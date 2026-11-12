@@ -8,7 +8,7 @@ Notable changes
 --------------------------------------------------------------
 
 They never select a post-quantum coin (beta2, audit M-1; they used to, and sent its change to a new ECC key); a
-post-quantum coin is spent with `z_sendmany` from its `sq…` address, which returns the change to it and signs
+post-quantum coin is spent with `z_sendmany` from its post-quantum address, which returns the change to it and signs
 with no wallet lock held. When the ECC coins do not cover the amount and the wallet holds post-quantum coins,
 the call is refused with `Insufficient funds in ordinary transparent addresses; this wallet also holds <amount>
 YEC at post-quantum addresses: send from one with z_sendmany, which returns the change to it`.
@@ -64,6 +64,33 @@ plain `getbalance` could count a coin spent since that height; beta2 review LOW-
 
 `walletconfirmbackup` accepts its optional `acknowledge_imports` argument (its argument-table row allowed none,
 so a wallet with imported keys under `-walletrequirebackup` could never confirm its backup; beta2 item 14).
+
+Post-quantum addresses show their scheme (D-9, `rpcversion` 9)
+-------------------------------------------------------------
+
+- **New prefixes.** A post-quantum address now names its signature scheme in its third character:
+  `sqf…` (FN-DSA-512, Falcon) and `sqs…` (SLH-DSA-SHA2-128s) on mainnet, `tqf…`/`tqs…` on testnet,
+  `rqf…`/`rqs…` on regtest; the YED form is `ybf…`/`ybs…` (mainnet), `ytf…`/`yts…`, `yrf…`/`yrs…`. Still 53
+  characters. The key, the script it pays and every balance are unchanged: only the text differs.
+- **The earlier text form is no longer accepted.** An address in the form used before this release
+  (`sq…`/`tq…`/`rq…` or `yb…`/`yt…`/`yr…` at 53 characters, whose third character did not name the scheme) is
+  refused by `sendtoaddress`, `validateaddress`, `yed_send` and every other RPC. Get the new string for a key
+  you already hold with `listreceivedbyaddress 0 true` (or `getaddressesbyaccount ""` where
+  `-allowdeprecated=accounts` is set; the wallet lists it in the new form); for a key in a
+  wallet dump, `z_importpqkey` with the dump's whole `pqseed=` line returns it (`address`). The one exception:
+  `z_importpqkey` still accepts a dump line whose `addr=`/`yecaddr=` are in the earlier form, so old dumps import.
+- **Wallets upgrade their address book once.** A wallet's post-quantum address-book entries written by an
+  earlier build are rewritten under the new form at the first start (labels kept; logged once).
+- **Nothing prints the earlier form.** A wallet or data directory carried over from an earlier build shows its
+  post-quantum addresses only in the new form, in every RPC result and in the address book; the keys, coins,
+  balances and the address index are untouched (they are keyed by the key hash, not by the text). Going back to an
+  earlier build after the first start is not supported for the address book: that build cannot read the rewritten
+  entries, so it shows the post-quantum addresses (in the earlier form) without their labels, while keys and coins
+  stay spendable. Keep a backup of `wallet.dat` from before the upgrade if you may need to go back.
+- **`rpcversion` 9.** `yed_getinfo.params.pqAddressVersion` and `.params.pq.plainAddressVersion` were hex
+  strings and are now objects keyed by scheme number (`{"1": "<hex>", "2": "<hex>"}`), one 3-byte version
+  each. Clients that build or check post-quantum addresses must read them this way or use
+  `src/test/data/pq_address_vectors.json`.
 
 `z_sendmany` and `z_mergetoaddress` move plain YEC between every address type
 ------------------------------------------------------------------------------

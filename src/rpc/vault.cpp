@@ -2126,8 +2126,9 @@ UniValue vault_lock(const UniValue& params, bool fHelp)
             "        \"owner\": pqkeyid (66 hex, scheme || keyhash), a PQ address or {\"scheme\": n, \"keyhash\": \"64 hex\"}\n"
             "        (default: a new SLH-DSA key of this wallet, as vault_getnewowner),\n"
             "        \"from\": the funding address (default: the wallet's confirmed transparent P2PKH coins): a transparent\n"
-            "        P2PKH address, a plain-YEC post-quantum address (its TX_PQPKH coins; FN-DSA-512 only once Falcon is active;\n"
-            "        fee priced by size) or a Sapling address (its confirmed notes) of this wallet; change goes back to it}\n"
+            "        P2PKH address, a plain-YEC post-quantum address (sqs…/sqf…, tqs…/tqf…, rqs…/rqf…: its TX_PQPKH coins;\n"
+            "        FN-DSA-512, f, only once Falcon is active; fee priced by size) or a Sapling address (its confirmed notes)\n"
+            "        of this wallet; change goes back to it}\n"
             "\nResult: {\"txid\", \"vout\", \"outpoint\", \"script\", \"owner\"}\n"
             + HelpExampleCli("vault_lock", "'{\"tag\":\"TEST\",\"setid\":\"..\",\"delay\":10,\"ownerheight\":1000,\"amount\":5}'")
             + HelpExampleRpc("vault_lock", "{...}"));
@@ -2851,7 +2852,7 @@ UniValue vault_release(const UniValue& params, bool fHelp)
             "\nRelease a matured intent to its recipient (RELEASE, selector 1, nSequence = delay; U-15: anyone may). The\n"
             "intent commits only SHA256 of the recipient script, so the recipient is the argument, or a script this node\n"
             "built the intent for, or a P2PKH / P2SH script of this wallet, or the TX_PQPKH script of a post-quantum key\n"
-            "this wallet holds (the owner's residual, quantum spec F-3). An address may be sq…/tq…/rq…; a pqkeyid is refused\n"
+            "this wallet holds (the owner's residual, quantum spec F-3). An address may be sqf…/sqs…, tqf…/tqs… or rqf…/rqs…; a pqkeyid is refused\n"
             "(pass the address or the script). Fee from this wallet.\n"
             "\nResult: \"txid\"\n"
             + HelpExampleCli("vault_release", "\"txid:0\"") + HelpExampleRpc("vault_release", "\"txid:0\", \"address\""));

@@ -60,6 +60,7 @@ from test_framework.yellowback_util import (
     usd_to_micro,
 )
 from test_framework import yellowback_model as ym
+from test_framework.pq_address import decode_pq_address, encode_pq_address, pq_prefix
 from test_framework.yellowback_attest import ArmedModeMixin
 
 FALCON_HEIGHT = 330
@@ -152,7 +153,7 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
         self.sync_all()
         self.mine(POOLS[0])
         assert_equal(user.getrawtransaction(txid1, 1)['vout'][0]['scriptPubKey']['type'], 'pqchannel')
-        client_addr = ym.base58check_encode(bytes([0x57, 0x10]) + client)
+        client_addr = encode_pq_address(client[0], client[1:], coin='yed')   # D-9: yrs…/yrf…
         rows = user.yed_listtokens([client_addr])
         assert_equal([(r['txid'], r['vout'], r['cents'], r['address']) for r in rows], [(txid1, 0, coin['cents'], client_addr)])
         # the cooperative spend to a P2PKH holder (before Falcon any holder shape holds YED)
@@ -186,9 +187,9 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
         self.mine(POOLS[0])
 
 # Rule: MINT-1 MINT-3
-        print('rpcversion 8 (7 added params.pq and the v4 MINT; 8 the fee structure)')
+        print('rpcversion 9 (7 added params.pq and the v4 MINT; 8 the fee structure; 9 the PQ versions per scheme, D-9)')
         info = user.yed_getinfo()
-        assert_equal(info['rpcversion'], 8)
+        assert_equal(info['rpcversion'], 9)   # 9: D-9, the PQ address versions per scheme
         pq = info['params']['pq']
         assert_equal((pq['schemes'], pq['falconActive'], pq['falconHeight']), ([1], False, FALCON_HEIGHT))
         assert_greater_than(pq['feeRateZatPerKB'], 0)
@@ -204,7 +205,7 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(vault['ownerScheme'], 1)
         assert_equal(len(vault['ownerHash']), 64)
         assert_equal(vault['ownerAddress'], m['ownerAddress'])
-        assert_equal((len(vault['ownerAddress']), vault['ownerAddress'][:2]), (53, 'yr'))
+        assert_equal((len(vault['ownerAddress']), vault['ownerAddress'][:3]), (53, 'yrs'))                # D-9: SLH-DSA
         assert ('20' + vault['ownerHash'] + '51c2') in vault['scriptPubKey']                       # the V's PQ owner slot
         dec = user.vault_decodescript(vault['scriptPubKey'])
         assert_equal(dec['owner'], '01' + vault['ownerHash'])
@@ -242,7 +243,7 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(receiver.yed_getnewaddress('p2pkh')[:2], 'yr')
         assert_equal((len(p2pkh), len(pq_addr), len(slh_addr)), (35, 53, 53))
         va = receiver.yed_validateaddress(pq_addr)
-        rq_of = lambda yaddr: ym.base58check_encode(bytes([0x4C, 0x51]) + ym.base58check_decode(yaddr)[2:])   # D-Q-20
+        rq_of = lambda yaddr: encode_pq_address(*decode_pq_address(yaddr)[2:])   # D-Q-20, D-9: the same key's rqs…/rqf…
         assert_equal((va['isvalid'], va['type'], va['pqscheme'], va['ismine'], va['transparentAddress']), (True, 'pq', 1, True, rq_of(pq_addr)))
         assert_equal(receiver.yed_validateaddress(slh_addr)['pqscheme'], 1)
         assert_equal(receiver.yed_validateaddress(p2pkh)['type'], 'p2pkh')
@@ -262,8 +263,10 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
         out = receiver.getrawtransaction(by_addr[pq_addr]['txid'], 1)['vout'][by_addr[pq_addr]['vout']]['scriptPubKey']
         assert_equal(out['hex'], bytes_to_hex_str(pqpkh_of(va['keyid'])))
         assert_equal(len(out['hex']), 70)                                                             # 35-byte TX_PQPKH
-        rq = ym.base58check_encode(bytes([0x4C, 0x51]) + hex_str_to_bytes(va['keyid']))
-        assert_equal((out.get('addresses'), rq[:2], len(rq)), ([rq], 'rq', 53))                        # D-Q-20: the plain-YEC rq… form
+        kid = hex_str_to_bytes(va['keyid'])
+        rq = encode_pq_address(kid[0], kid[1:])
+        assert_equal((out.get('addresses'), rq[:3], len(rq)), ([rq], pq_prefix(kid[0]), 53))          # D-Q-20, D-9: the plain-YEC rqs… form
+        assert_equal(pq_prefix(kid[0]), 'rqs')
 
 # Rule: XFER-1 TOK-PQ
         self.channel_case(user, receiver, p2pkh)

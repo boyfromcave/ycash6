@@ -241,7 +241,7 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
             "                  argument. Or the DEPRECATED placeholder: the empty string \"\", which may be followed by the type.\n"
             "                  Any other string is refused (\"Accounts are unsupported\"); the type names are lower case.\n"
             "2. \"type\"        (string, optional, default \"p2pkh\") \"p2pkh\", or \"pq\": a post-quantum address\n"
-            "                  (53 characters, its prefix showing the network and the scheme) from the wallet's seed, FN-DSA-512 once\n"
+            "                  (sqf…/sqs… mainnet, tqf…/tqs… testnet, rqf…/rqs… regtest: f = FN-DSA-512, s = SLH-DSA; 53 characters) from the wallet's seed, FN-DSA-512 once\n"
             "                  Falcon is active at the next block, SLH-DSA-SHA2-128s before (the YED holder policy, as\n"
             "                  yed_getnewaddress \"pq\"); \"pqslh\": always SLH-DSA-SHA2-128s (larger spends, hash-based only).\n"
             "                  Needs the vault upgrade active at the next block and an unlocked wallet.\n"

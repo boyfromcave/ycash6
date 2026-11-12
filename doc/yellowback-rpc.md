@@ -1,4 +1,4 @@
-# Yellowback RPC contract (`yed_*`), rpcversion 8
+# Yellowback RPC contract (`yed_*`), rpcversion 9
 
 This file is the interface between the node (`ycash-dd`) and the wallet application
 (`yecwallet-dd`). Nothing else crosses that boundary. It is written *before* the code it
@@ -15,7 +15,7 @@ example value is `null` is one the text marks *null when …* — the checker ac
 documented type for it. A field the text marks **optional** may be absent, and the checker asserts
 it only in the state the text names. Nothing else may be absent.
 
-**`rpcversion` rule.** `yed_getinfo.rpcversion` is `8` (the fee structure, below; post-quantum owners took `7`, in-term claims `6`, the vault upgrade `5`, v3 `3`). Additions (new commands, new fields)
+**`rpcversion` rule.** `yed_getinfo.rpcversion` is `9` (scheme-visible post-quantum prefixes, below; the fee structure took `8`, post-quantum owners `7`, in-term claims `6`, the vault upgrade `5`, v3 `3`). Additions (new commands, new fields)
 never bump it; a removal or a shape change does. Phase 8's additions (`yed_estimatesend`,
 `yed_unlockcoin`, `yed_getinfo.lockedOutputs`/`protectedByIndex`, H3/H5/H10) therefore landed
 under `rpcversion = 2`. **v3 bumps to `3` by decision (v3 plan W14), not by the letter of the
@@ -80,6 +80,19 @@ wallet shows before the owner confirms a redeem); `vault-locked` no longer refus
 in term and `claim-not-yet` no longer refuses a claim in term (the threshold decides:
 `claim-not-underwater`). Clients go to `6` with the in-term plan's T4.
 
+**Scheme-visible post-quantum prefixes (`rpcversion` 9; decision D-9, docs/plans/yellowback-quantum-spec.md §4.1).**
+A post-quantum address is Base58Check(3-byte version ‖ 32-byte keyHash), 53 characters, one version per network,
+coin and scheme, so the third character names the scheme: `sqf…`/`sqs…` (testnet `tqf…`/`tqs…`, regtest
+`rqf…`/`rqs…`) plain YEC, `ybf…`/`ybs…` (`ytf…`/`yts…`, `yrf…`/`yrs…`) YED; `f` = FN-DSA-512, `s` = SLH-DSA-SHA2-128s.
+The earlier 2-byte version ‖ scheme byte form (`sq…`/`tq…`/`rq…`, `yb…`/`yt…`/`yr…` with a digit or letter that did
+not name the scheme) is neither produced nor accepted by any RPC; the one exception is `z_importpqkey`'s check of a
+key-dump line's `addr=`/`yecaddr=`, which accepts the earlier form so a dump made before D-9 still imports, and the
+wallet rewrites its own address-book records once at load. Shape changes, old → new: `yed_getinfo.params.pqAddressVersion`
+hex string (`"5710"`) → object of hex keyed by scheme number (`{"1": "5715aa", "2": "571444"}`);
+`yed_getinfo.params.pq.plainAddressVersion` hex string (`"4c51"`) → the same kind of object (`{"1": "4c5655", "2":
+"4c54ef"}`). Every other field keeps its type; fields that carry a post-quantum address (`ownerAddress`,
+`transparentAddress`, `address`, …) carry the new text. The shared vectors are `src/test/data/pq_address_vectors.json`.
+
 **The fee structure (`rpcversion` 8; docs/plans/yellowback-quantum-fees-spec.md §1–§3, quantum plan
 D-Q-23 Option D, D-Q-23a, D-Q-24, D-Q-25).** The pool fee is a **protocol fee in dollars**, tiered by the
 vault's debt like tax brackets (`params.fees.protocol.bands`: 1.0 % of the first $1,000, 0.5 % to $10,000,
@@ -130,21 +143,26 @@ height and the consensus `pqFalconHeight` (`-1` = never). Falcon goes live from 
 2026-10-10): `pqFalconHeight` is 0 on mainnet and testnet, so there `falconHeight` is the vault activation height
 (`-1` while that height is unset, until the release that sets it) and `falconActive` is true from the vault upgrade's
 first block; regtest reports `-1` unless started with `-pqfalconheight`/`-pqfalcon=1`; `feeRateZatPerKB` = the size-priced rate wallets charge as
-`max(DEFAULT_FEE, rate × size)`, the node's `-pqfeerate`; `plainAddressVersion` = the hex Base58Check version of
-the plain-YEC PQ address, `4dd9`/`4f61`/`4c51` for `sq…`/`tq…`/`rq…`, D-Q-20); `yed_getinfo.params.addressVersion` and
-`pqAddressVersion` (hex, the YED address versions of this network: mainnet `1fdd`/`56ab`, testnet `2007`/`571e`,
-regtest `2002`/`5710`; clients read them instead of hard-coding the prefixes); `yed_getinfo.params.attest.mintPayloadVersion` (`4`: the MINT alone
+`max(DEFAULT_FEE, rate × size)`, the node's `-pqfeerate`; `plainAddressVersion` = the Base58Check versions of
+the plain-YEC PQ address, an object of hex keyed by scheme number, one 3-byte version per scheme so the prefix names it
+(D-Q-20, D-9): mainnet `{"2": "4ddd04", "1": "4dde6a"}` = `sqf…`/`sqs…`, testnet `4f6519`/`4f667f` = `tqf…`/`tqs…`, regtest
+`4c54ef`/`4c5655` = `rqf…`/`rqs…`); `yed_getinfo.params.addressVersion` (hex, the 35-character P2PKH YED address version:
+mainnet `1fdd`, testnet `2007`, regtest `2002`) and `pqAddressVersion` (the post-quantum YED versions, an object of hex keyed
+by scheme number like `plainAddressVersion`: mainnet `56aede`/`56b044` = `ybf…`/`ybs…`, testnet `5721c9`/`572330` =
+`ytf…`/`yts…`, regtest `571444`/`5715aa` = `yrf…`/`yrs…`, FN-DSA-512 / SLH-DSA; clients read them instead of hard-coding
+the prefixes); `yed_getinfo.params.attest.mintPayloadVersion` (`4`: the MINT alone
 is payload version 4, every other type stays `payloadVersion` 3 — quantum spec C-1, so a client's
 TRANSFER builder is unchanged and a v3 MINT is non-Yellowback); `yed_mint`'s `ownerAddress` (the fresh
 SLH-DSA owner's address; the arguments are unchanged, A-3; the examples below show the example `ownerHash`
-in its 53-character mainnet `yb…` form); `yed_validateaddress`'s `type` (`p2pkh` |
+in its 53-character mainnet `ybs…` form); `yed_validateaddress`'s `type` (`p2pkh` |
 `pq`) and, for a PQ address, `pqscheme` (`keyid` is then the 66-hex `scheme ‖ keyHash` and
-`transparentAddress` is the key's plain-YEC PQ address `sq…`/`tq…`/`rq…` — D-Q-20, Base58Check
-`4DD9`/`4F61`/`4C51` ‖ scheme ‖ keyHash, 53 characters; it was `""` before the SQ task); `yed_getnewaddress`'s optional `type` argument (`p2pkh`, `pq` a post-quantum
+`transparentAddress` is the key's plain-YEC PQ address `sqf…`/`sqs…` (testnet `tqf…`/`tqs…`, regtest `rqf…`/`rqs…`) —
+D-Q-20, D-9, Base58Check(3-byte version per network and scheme ‖ keyHash), 53 characters; it was `""` before the SQ task); `yed_getnewaddress`'s optional `type` argument (`p2pkh`, `pq` a post-quantum
 holder, `pqowner` an SLH-DSA key; the default follows the holder policy: `p2pkh` until Falcon is active,
 `pq` after — on mainnet and testnet Falcon is active from the vault upgrade, so the default there is always `pq` and
-no P2PKH YED holder ever exists; `p2pkh` defaults only on a regtest chain without Falcon). Addresses: a post-quantum YED address is Base58Check(`56AB`/`571E`/`5710` ‖ scheme ‖
-keyHash), `yb…`/`yt…`/`yr…`, **53** characters (the P2PKH form stays 35); `yed_send`, `yed_sendmany`,
+no P2PKH YED holder ever exists; `p2pkh` defaults only on a regtest chain without Falcon). Addresses: a post-quantum YED address is Base58Check(3-byte version ‖
+keyHash), the version naming network and scheme (D-9): `ybf…`/`ybs…` mainnet, `ytf…`/`yts…` testnet, `yrf…`/`yrs…` regtest
+(FN-DSA-512 / SLH-DSA-SHA2-128s), **53** characters (the P2PKH form stays 35; the pre-D-9 2-byte-version form is refused); `yed_send`, `yed_sendmany`,
 `yed_listtokens` and `yed_validateaddress` take either (`yed_listtokens` also takes the plain-YEC
 `sq…`/`tq…`/`rq…` form of a PQ holder, as it takes `s1…` for a P2PKH one). The owner's residual intent of a claim pays the
 owner's `TX_PQPKH` (`20 <ownerHash> 51|52 c2`, F-3). From the Falcon height every YED token output must
@@ -156,7 +174,9 @@ that actually receive YED: a TRANSFER with no YED input, or one XFER-1..3 burns,
 as implemented"). A hybrid channel output (`TX_PQCHANNEL`, D-Q-19) holds YED from the Falcon height when its
 client is a Falcon key; `yed_listtokens` lists it under the client's address.
 
-**Plain-YEC PQ addresses (`sq…`/`tq…`/`rq…`, D-Q-20): what node operators and clients should know.**
+**Plain-YEC PQ addresses (`sq…`/`tq…`/`rq…`, D-Q-20; the third character names the scheme, D-9: `sqf…` FN-DSA-512,
+`sqs…` SLH-DSA-SHA2-128s, likewise `tqf…`/`tqs…`, `rqf…`/`rqs…`, and `ybf…`/`ybs…`, `ytf…`/`yts…`, `yrf…`/`yrs…` for the
+YED form): what node operators and clients should know.**
 
 - **Inputs spending PQ coins carry no address** in `getblockdeltas`, `getspentinfo` and
   `getrawtransaction` (verbose `vin[].address`): the insight index keys a spent output by its
@@ -529,7 +549,7 @@ Result of `yed_getinfo`:
 
 ```json
 {
-  "rpcversion": 8,
+  "rpcversion": 9,
   "enabled": true,
   "network": "regtest",
   "height": 331,
@@ -612,7 +632,7 @@ Result of `yed_getinfo`:
       "maxVaultCents": null
     },
     "addressVersion": "2002",
-    "pqAddressVersion": "5710",
+    "pqAddressVersion": { "1": "5715aa", "2": "571444" },
     "windows": { "fast": 8, "mid": 24, "slow": 64 },
     "minFill": { "fast": 4, "mid": 16, "slow": 43 },
     "classes": [
@@ -630,7 +650,7 @@ Result of `yed_getinfo`:
       "falconActive": false,
       "falconHeight": -1,
       "feeRateZatPerKB": 5000000,
-      "plainAddressVersion": "4c51"
+      "plainAddressVersion": { "1": "4c5655", "2": "4c54ef" }
     },
     "policy": {
       "penaltyBlocks": 12,
@@ -1064,7 +1084,7 @@ Result of `yed_getvault`:
   "status": "ACTIVE",
   "ownerScheme": 1,
   "ownerHash": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
-  "ownerAddress": "yb5u8LCGfU3hYYhhAqvYzR3ZQuNFEUWzx5dmLiGjPW8Gqto3xqqCc",
+  "ownerAddress": "ybs3X4pcEUunYbKiws3N3LpX22ttkmAY3ZZhjitVx27wrHWd3QAx9",
   "termClass": "A",
   "lockHeight": 377,
   "claimHeight": 401,
@@ -1114,7 +1134,7 @@ Result of `yed_listvaults`:
     "status": "ACTIVE",
     "ownerScheme": 1,
     "ownerHash": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
-    "ownerAddress": "yb5u8LCGfU3hYYhhAqvYzR3ZQuNFEUWzx5dmLiGjPW8Gqto3xqqCc",
+    "ownerAddress": "ybs3X4pcEUunYbKiws3N3LpX22ttkmAY3ZZhjitVx27wrHWd3QAx9",
     "termClass": "A",
     "lockHeight": 377,
     "claimHeight": 401,
@@ -1215,7 +1235,7 @@ Result of `yed_listclaimable`:
 [
   {
     "vault": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8:0",
-    "ownerAddress": "yb5u8LCGfU3hYYhhAqvYzR3ZQuNFEUWzx5dmLiGjPW8Gqto3xqqCc",
+    "ownerAddress": "ybs3X4pcEUunYbKiws3N3LpX22ttkmAY3ZZhjitVx27wrHWd3QAx9",
     "collateralZat": 251889169000,
     "mintedCents": 100000,
     "pMint": 1985000,
@@ -1984,7 +2004,7 @@ Result of `yed_mint`:
 {
   "txid": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8",
   "vault": "6a1f2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8:0",
-  "ownerAddress": "yb5u8LCGfU3hYYhhAqvYzR3ZQuNFEUWzx5dmLiGjPW8Gqto3xqqCc",
+  "ownerAddress": "ybs3X4pcEUunYbKiws3N3LpX22ttkmAY3ZZhjitVx27wrHWd3QAx9",
   "termClass": "A",
   "lockHeight": 377,
   "claimHeight": 401,
@@ -2634,7 +2654,7 @@ Result of `yed_listpositions`:
     "status": "ACTIVE",
     "ownerScheme": 1,
     "ownerHash": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
-    "ownerAddress": "yb5u8LCGfU3hYYhhAqvYzR3ZQuNFEUWzx5dmLiGjPW8Gqto3xqqCc",
+    "ownerAddress": "ybs3X4pcEUunYbKiws3N3LpX22ttkmAY3ZZhjitVx27wrHWd3QAx9",
     "termClass": "A",
     "lockHeight": 377,
     "claimHeight": 401,
