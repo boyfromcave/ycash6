@@ -43,7 +43,8 @@ checks live answers against it. Edit this document, then regenerate.
   (`lockedvalue`, `epochbasis`, `epochused`, `unlockavailable`) and `bondmin` included, although
   the set state stores zatoshi (plan §15.4); `valuezat` fields are zatoshi.
 - **Fees**: every transaction these RPCs build pays a flat 10,000 zatoshi from the wallet's
-  confirmed transparent P2PKH coins (change to a new wallet address). Coins chosen are locked in
+  confirmed transparent P2PKH coins (change to a new wallet address), unless `vault_lock` names a
+  funding address (`from`, below). Coins chosen are locked in
   the wallet (`lockunspent` semantics) so that a following build does not reuse them before the
   first transaction confirms. `vault_ownerspend` prices its owner spend instead (below). Every
   transaction these RPCs broadcast must pay a network fee within the vault/Yellowback cap,
@@ -296,7 +297,7 @@ is active at the next block). `keyhash` is the 32 bytes the V pushes, `owner` = 
 `address` the 53-character PQ Yellowback address. The wallet must be unlocked.
 
 ### `vault_lock {params}`
-Params: `["params": {"tag": str, "setid": hash, "cancelsetid"?: hash, "delay": int, "ownerheight": height, "appheight"?: height, "amount": yec, "owner"?: pqkeyid}]`
+Params: `["params": {"tag": str, "setid": hash, "cancelsetid"?: hash, "delay": int, "ownerheight": height, "appheight"?: height, "amount": yec, "owner"?: pqkeyid, "from"?: address}]`
 
 Result: `{"txid": hash, "vout": int, "outpoint": outpoint, "script": hex, "owner": pqkeyid}`
 
@@ -310,6 +311,51 @@ govern a set here (`GovernedSet`). `owner` is
 a pqkeyid, a PQ address or `{"scheme": int, "keyhash": hex}` (any key: an external owner is
 allowed); without it the wallet draws a new SLH-DSA owner (as `vault_getnewowner`). The former
 `ownerkey` is refused. Both sets must be confirmed. `vout` is 0.
+
+`from` (beta2 decision D-3) names the one address of this wallet that funds the lock. Without it
+(or with `""`) the lock is funded as before, from the wallet's confirmed transparent P2PKH coins
+with change to a new wallet address. With it:
+
+| `from` | spends | fee | change |
+|---|---|---|---|
+| a transparent P2PKH address (`s1…`/`t…`) | that address's confirmed, unlocked coins, largest first | from the signed size: max(10,000 zat, the relay fee, the ZIP-317 conventional fee) | back to the same address (from 1,000 zat; less joins the fee) |
+| a plain-YEC post-quantum address (`TX_PQPKH`, scheme 1 SLH-DSA or 2 FN-DSA-512) | that address's confirmed, unlocked `TX_PQPKH` coins, largest first, signed under the next block's vault flags | as `sendtoaddress` prices a PQ input: max(10,000 zat, the plain PQ rate x the signed size) capped at the vault/Yellowback cap, never below the ZIP-317 conventional fee | back to the same PQ address (D-4) when above its dust threshold priced at the PQ spend size; less joins the fee |
+| a Sapling address (`ys1…`) | that address's confirmed notes (minimum 1 confirmation), largest first, at most 20 (the `yed_mint` selection) | max(10,000 zat, the ZIP-317 conventional fee of the shape) | a Sapling note to the same address |
+
+The owner (`owner`, or the new SLH-DSA default) does not depend on `from`. A transparent or PQ
+source spends at most 400 coins and 75,000 bytes of estimated inputs (the `yed_*` builders'
+caps), so the lock stays under 100 kB and the sigop limit; its coins are locked in the wallet only
+once the lock is in the mempool, so a refused lock leaves them free. A Sapling-funded lock is one
+transaction with Sapling spends, the V and the change note: the spend proofs are made with no
+wallet lock held, as for `yed_mint`, the selected notes are locked in the wallet (`LockNote`, as
+the `z_*` operations do) from selection until the lock is refused, or, once it is accepted, until
+the node restarts (the wallet learns of the spend only asynchronously, and another builder must not
+select the notes meanwhile; a lock on a spent note is harmless), and it carries
+the default expiry (next block + 20). On 6.20.0 the Sapling builder pads the bundle to two outputs
+(the change note and a dummy), and the ZIP-317 conventional fee counts both.
+The vault rules (V-1) read only the transparent outputs and inputs, so the shielded parts change
+nothing about the V. A coinbase output is never spent where coinbase must be shielded (mainnet,
+testnet). The wallet must be unlocked. Refusals (also under *Error reasons*):
+
+| code | message |
+|---|---|
+| -8 | `from must be an address string` |
+| -5 | `bad-address: from: not a transparent P2PKH, post-quantum or Sapling address of this network` (a P2SH, a Yellowback `yb…` or a malformed string) |
+| -5 | `bad-address: from: Sprout addresses are not supported` |
+| -4 | `from: not an address of this wallet` |
+| -4 | `from: a watch-only address of this wallet (no spending key)` |
+| -8 | `from: an FN-DSA-512 (scheme 2) address cannot be spent before Falcon is active at the next block` |
+| -6 | `insufficient confirmed funds at <from>: need <x> more` (transparent and PQ; with ` (its <y> of coinbase outputs must be shielded first: z_shieldcoinbase)` when coinbase outputs were left out) |
+| -6 | `insufficient-yec: need <x>, have <y> in confirmed Sapling notes at <from>` |
+| -4 | `from: too-many-coins: covering <x> at <from> would take more than 400 coins or 75000 bytes of inputs; consolidate the address's coins first, then retry` |
+| -4 | `from: the lock would be <n> bytes with <m> sigops (limits 100000, 4000); consolidate the address's coins first` (a backstop behind the caps) |
+| -4 | `from: the funding fee did not settle`, `from: the Sapling funding fee did not settle` (the fee loop did not converge; never underpaid) |
+| -6 | `too-many-notes: the transaction would spend <n> Sapling notes (limit 20); consolidate with z_mergetoaddress first` |
+| -4 | `from: refusing to spend a Yellowback outpoint as plain YEC: <txid>:<n>[, <txid>:<n>…] (its YED would burn; lock it again with yed_lockcoins)` (where Yellowback is live: a coin of a transparent or PQ `from` that the Yellowback index knows as a YED token or vault, an unconfirmed output a Yellowback payload assigns YED, or a carrier of the wallet; the wallet's coin lock already keeps every token out, so this is reached only when that lock was removed, e.g. by `yed_unlockcoin`. Such a coin is left out and the lock funded from the address's other coins; the refusal comes only when they do not cover it) |
+| -4 | `refusing to spend a Yellowback outpoint as plain YEC: <txid>:<n>[, <txid>:<n>…] (its YED would burn; lock it again with yed_lockcoins)` (where Yellowback is live, without `from`, and from any vault RPC that adds wallet P2PKH coins for its fee: `vault_lock`, `vault_buildunlock`, the set acts, a re-funded spend; a fee coin that is a YED token, an unconfirmed output a Yellowback payload assigns YED, or a carrier of the wallet, whose coin lock was removed, e.g. by `yed_unlockcoin` (before Falcon, regtest only: a P2PKH holder key). Such a coin is left out and the fee funded from the wallet's other coins; the refusal comes only when they do not cover it) |
+| -4 | `from: refusing to spend as plain YEC while the Yellowback index is unhealthy (<reason>): the wallet's YED coin locks cannot be trusted; restart with -reindex-yellowback` (where Yellowback is live, a transparent or PQ `from`; deliberate: the coin locks are not reconciled while the index is unhealthy, so no plain-YEC spend from such an address is made) |
+| -4 | `from: an input was spent while the lock was signed; nothing was sent, lock again`, `from: the next block's rules changed while the lock was signed (a reorg or a network upgrade); nothing was sent, lock again`, `from: the signed lock (<n> bytes) needs a fee of <fee>, more than the <fee> priced; nothing was sent` (a transparent or PQ `from` is priced under the node's locks with each input at its full signed size, then signed once with no lock held, then re-checked) |
+| -13 | `Error: Please enter the wallet passphrase with walletpassphrase first.` (a locked wallet, any `vault_lock`) |
 
 ### `vault_buildunlock "outpoint" [{"address"|"script", "amount"}, ...] ( rebuild )`
 Params: `["outpoint": outpoint, "recipients": [Recipient], "rebuild"?: bool]`
@@ -563,6 +609,12 @@ code. `qa/rpc-tests/vault_rpc_contract.py` provokes each one.
 | -8 | `unknown post-quantum scheme` | `vault_getnewowner` | `scheme` 3 |
 | -8 | `unregistered post-quantum scheme` | `vault_lock`, `vault_list` | an `owner` with scheme `03` |
 | -8 | `a scheme-2 (FN-DSA-512) owner before Falcon is active` | `vault_lock` | an `owner` with scheme `02` while Falcon is inactive at the next block |
+| -5 | `bad-address: from: not a transparent P2PKH, post-quantum or Sapling address of this network` | `vault_lock` | `from` `"nonsense"` |
+| -4 | `from: not an address of this wallet` | `vault_lock` | `from` another wallet's address |
+| -4 | `from: a watch-only address of this wallet` | `vault_lock` | `from` an address imported with `importaddress` |
+| -8 | `from: an FN-DSA-512 (scheme 2) address cannot be spent before Falcon is active` | `vault_lock` | `from` the address of a scheme-2 key imported with `z_importpqkey`, while Falcon is inactive at the next block |
+| -6 | `insufficient confirmed funds at` | `vault_lock` | `from` an empty transparent or post-quantum address of this wallet |
+| -6 | `in confirmed Sapling notes at` | `vault_lock` | `from` an empty Sapling address of this wallet |
 | -4 | `not a post-quantum key of this wallet` | `vault_ownerspend` | a vault with an external owner |
 | -8 | `not an unspent vault output` | `vault_buildunlock`, `vault_app` | a spent vault outpoint |
 | -8 | `the recipients' amounts exceed the vault's value` | `vault_buildunlock`, `vault_app` | more than the vault holds |

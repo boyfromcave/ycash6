@@ -312,7 +312,7 @@ release notes:
   the YEC their token outputs carry is not taken for change); holder keys issued by an earlier build
   are not added retroactively (`getnewaddress "" "pq"` files plain-YEC PQ keys; `"pqowner"` keys stay
   out).
-- **`z_sendmany` / `z_mergetoaddress` refuse an `sq…` recipient** on this line (their recipients are `libzcash::PaymentAddress`, which has no post-quantum alternative): pay an `sq…` address with `sendtoaddress` or `sendmany`.
+- **`z_sendmany` / `z_mergetoaddress` pay an `sq…` recipient and spend from an `sq…` address** (beta2 D-2, D-4, D-6: a post-quantum party is a transparent output beside the `libzcash::PaymentAddress` model; PQ change returns to its source address); `z_shieldcoinbase` still refuses a PQ source. Limits and error strings: `doc/yellowback-rpc.md`.
 - **Seed-only restore (`-mnemonicfile`)** restores the seed's transparent addresses (those
   `getnewaddress` handed out, and its change and mining keys) **as long as no more than `-keypool`
   (default 100) unused addresses in a row were handed out**, its first legacy Sapling address, and its
