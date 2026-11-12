@@ -191,8 +191,11 @@ env:
   # Audit 07/F-11: the files whose change runs the PR legs lockorder-pr and sanitizers-pr (an extended
   # regex over `git diff --name-only` of the PR), and the functional subset lockorder-pr runs (each also
   # in YELLOWBACK_SCRIPTS; the full suite stays in the nightly lockorder job).
-  OVERLAY_PATHS: '^(src/(vault/|yellowback/|rpc/vault\.cpp|rpc/yellowback[^/]*\.cpp|main\.cpp|miner\.cpp|txmempool\.cpp|sync\.(cpp|h))|qa/yellowback-lockorder-(check\.py|logonly\.sh))'
-  LOCKORDER_PR_SCRIPTS: vault_primitive vault_rpc_contract vault_slashing vault_upgrade yellowback_index yellowback_void_mint yellowback_attest_live wallet_pq_fee_cap vault_lock_from
+  # src/wallet/ and the three beta2 wallet scripts joined on 2026-11-11 (combined security audit: a
+  # wallet-only PR skipped this leg, and most of the new lock-taking code is in src/wallet/). Run time
+  # of the PR subset at -j2 grows by about four minutes (weights in qa/yellowback-ci-shard.py).
+  OVERLAY_PATHS: '^(src/(vault/|yellowback/|wallet/|rpc/vault\.cpp|rpc/yellowback[^/]*\.cpp|main\.cpp|miner\.cpp|txmempool\.cpp|sync\.(cpp|h))|qa/yellowback-lockorder-(check\.py|logonly\.sh))'
+  LOCKORDER_PR_SCRIPTS: vault_primitive vault_rpc_contract vault_slashing vault_upgrade yellowback_index yellowback_void_mint yellowback_attest_live wallet_pq_fee_cap vault_lock_from wallet_address_matrix wallet_yed_ecc_token wallet_balance_by_type
   # yellowback_stratum drives the real pool software: boyfromcave/yolo (Rust), checked out at this
   # commit and built in the main job, exported as YOLO_BIN. Without the binary the script SKIPs.
   YOLO_REPO: boyfromcave/yolo
