@@ -1452,6 +1452,17 @@ enum class AccountChangeAddressFailure {
 static const uint32_t PQ_KEY_LOOKAHEAD = 20;
 
 /**
+ * Beta2: the legacy transparent HD lookahead (CWallet::TopUpLegacyTKeys). The number of keys held per chain from
+ * the chain's counter on: the keypool size (-keypool, default DEFAULT_KEYPOOL_SIZE) plus one, as many as the
+ * keypool holds, so a restore re-finds a used key after up to -keypool unused ones in a row.
+ */
+uint32_t LegacyTKeyLookahead(int64_t keypool);
+//! One past the last index held from counter: counter + lookahead, capped at the first hardened index.
+uint32_t LegacyTKeyLookaheadEnd(uint32_t counter, uint32_t lookahead);
+//! (external, index) of a legacy-account transparent key path m/44'/coin'/2147483647'/{0,1}/index, else nullopt.
+std::optional<std::pair<bool, uint32_t>> ParseLegacyTKeyPath(const std::string& path, uint32_t coinType);
+
+/**
  * A CWallet is an extension of a keystore, which also maintains a set of transactions and balances,
  * and provides the ability to create new transactions.
  */
@@ -2045,6 +2056,106 @@ public:
     bool IsOwnPQKey(const CPQKey& key) const;
     //! Writes the "pqissued" record a wallet without one starts from: one past its highest own-seed index.
     void SeedPQIssued(uint8_t scheme);
+    /**
+     * Beta2 (seed-only restore of ECC coins): the legacy transparent HD lookahead, the counterpart of the PQ one.
+     * Beside the keys it has issued (GenerateNewKey: getnewaddress, the keypool, Yellowback's fresh keys), the
+     * wallet holds the keys of indices [counter, counter + LegacyTKeyLookahead()) of the external and the
+     * internal chain of its mnemonic seed (m/44'/coin'/0x7FFFFFFF'/{0,1}/i) without moving the chain's counter,
+     * so a wallet restored from its recovery phrase recognises the addresses the original wallet handed out.
+     * The held keys live in memory only (re-derived at load and at walletpassphrase): the file keeps exactly
+     * the keys the wallet issued, so an older binary opening it derives and writes the same keys as before
+     * (an encrypted wallet's "ckey" records cannot be overwritten). An output paying a held or pooled key marks
+     * it used (NoteLegacyTKeysUsed, from AddToWalletIfInvolvingMe): the counter moves past it, the held keys
+     * below it are kept as issued keys, the keypool entries at or below it leave the pool (Bitcoin Core's
+     * MarkReserveKeysAsUsed) and the lookahead is topped up. A locked encrypted wallet cannot derive: it marks,
+     * logs, and tops up at walletpassphrase (then rescan to find coins beyond the keys it held).
+     */
+    void TopUpLegacyTKeys();
+    //! False when a write (a held key, the HD chain counter) failed (review L-1); the in-memory state is updated.
+    bool MarkLegacyTKeyUsed(const CKeyID& id);
+    //! nHeight: the block height of a mined transaction, -1 for one not in a block (review L-2's flag).
+    bool NoteLegacyTKeysUsed(const CTransaction& tx, int nHeight = -1);
+    //! NotePQKeysUsed and NoteLegacyTKeysUsed, repeated while a mark grows a lookahead (review M-3).
+    bool NoteKeysUsed(const CTransaction& tx, int nHeight = -1);
+    //! A key the file holds already (not held) with the legacy key path (external, index) of this seed (review L-1).
+    bool IsStoredLegacyTKeyAt(const CKeyID& id, bool external, uint32_t index) const;
+    //! True for a key the lookahead holds that the wallet has not issued (never written to the wallet file).
+    bool IsHeldLegacyTKey(const CKeyID& id) const;
+    //! True when an unlocked wallet would hold more of the lookahead than it does now (a locked wallet's state).
+    bool LegacyTKeyLookaheadShort() const;
+    //! Issues a held key: takes it out of the held set and writes it to the wallet file.
+    bool PersistLegacyTKey(const CKeyID& id);
+    //! The held, unissued keys: id -> (external, index).
+    std::map<CKeyID, std::pair<bool, uint32_t>> mapLegacyTKeyHeld;
+    //! Per chain (0 internal, 1 external): one past the highest index the lookahead has derived.
+    uint32_t nLegacyTKeyHeldEnd[2] = {0, 0};
+    //! External keys this wallet re-found (a mark moved the counter past them) rather than issued itself, since
+    //! load: the only keys a payment files in the address book (review M-1).
+    std::set<CKeyID> setLegacyTKeyRefound;
+    /**
+     * Review L-2 (getwalletinfo lookahead_incomplete): set when the wallet, locked and without its full transparent
+     * lookahead, saw a mined transaction with an output paying a transparent key it does not hold, which may be an
+     * address of its seed it has not issued: such a coin is missed. Persisted ("lookaheadincomplete", the lowest
+     * such height); cleared by a scan from at or below that height with the lookahead held (unlocked).
+     */
+    bool fLegacyTKeyLookaheadIncomplete = false;
+    int nLegacyTKeyIncompleteFrom = -1;
+    /**
+     * Review 3 H-1 (replaces review M-b's stored extended public key, whose chain code gave a copy of the file plus one
+     * leaked key every legacy transparent key, and the file alone the legacy shielding OVKs): the KEY IDs of the
+     * lookahead, kept in clear ("legacytlookahead", CLegacyTLookahead), recomputed from the seed and rewritten at every
+     * unlocked top-up. A locked wallet that has not held its lookahead since it started watches these IDs
+     * (mapLegacyTKeyWatched): a payment to one is its own incoming coin, counted as watch-only (CWallet::IsMine) until
+     * walletpassphrase derives the key; it is never in the key store, never in the keypool, never handed out. The
+     * window cannot grow while locked: a payment that leaves fewer than -keypool + 1 watched or held keys beyond it on
+     * its chain sets lookahead_incomplete (a later payment past the window would be missed).
+     */
+    std::optional<CLegacyTLookahead> legacyTLookahead;
+    //! The loaded record is checked against the seed at the first unlocked top-up (review 3 LOW, integrity).
+    bool fLegacyTLookaheadUnverified = false;
+    void LoadLegacyTLookahead(const CLegacyTLookahead& record);
+    //! True when the stored key IDs are this wallet's seed's (what a locked wallet can watch with).
+    bool HaveLegacyTLookahead() const;
+    //! Watched key IDs: id -> (external, index); guarded by cs_KeyStore (read by IsMine without cs_wallet).
+    std::map<CKeyID, std::pair<bool, uint32_t>> mapLegacyTKeyWatched;
+    //! Per chain: one past the highest watched index (0 when nothing is watched).
+    uint32_t nLegacyTKeyWatchedEnd[2] = {0, 0};
+    bool fLegacyTKeyWatchedBuilt = false;
+    //! Sets mapLegacyTKeyWatched from the stored record: its IDs the key store does not hold.
+    void RebuildLegacyTKeyWatched();
+    //! A P2PKH or P2PK script paying a watched key ID.
+    bool IsLegacyTKeyWatched(const CScript& script) const;
+    //! True when ReadKeyValue met the intermediate build's "legacytaccountpub" record (erased by LoadWallet).
+    bool fObsoleteLegacyTAccountPub = false;
+    //! The (external, index) of a transparent key of this seed's legacy account: held, stored with its key path, or watched.
+    std::optional<std::pair<bool, uint32_t>> LegacyTKeyPosition(const CKeyID& id) const;
+    //! Unlocked: marks the keys of the wallet's transactions that paid a watched key while locked (review 3 H-1).
+    void NoteLegacyTKeysWatchedWhileLocked(const std::map<CKeyID, std::pair<bool, uint32_t>>& watched);
+    //! The wallet's best block height at load (-1 none): blocks at or below it were processed by an earlier run.
+    int nLegacyTKeyProcessedHeight = -1;
+    void SetLegacyTKeyLookaheadIncomplete(int nFromHeight);
+    void ClearLegacyTKeyLookaheadIncomplete();
+    void LoadLegacyTKeyLookaheadIncomplete(int nFromHeight) { fLegacyTKeyLookaheadIncomplete = nFromHeight >= 0; nLegacyTKeyIncompleteFrom = nFromHeight; }
+    /**
+     * Review M-c (getwalletinfo restore_in_progress): a wallet created from a recovery phrase (-mnemonicfile) must scan
+     * the chain from genesis, and its keys' birthday is the time of the restore, so after an interrupted restore the
+     * start-up scan would begin near the tip and skip the history. The "restorescan" record (the height the scan starts
+     * from) is written when the restore creates the wallet; while it is set, every start scans from that height
+     * (InitLoadWallet), and only a start-up scan that completed, every re-pass included, with the node out of initial
+     * block download, erases it. An older binary ignores the record (ReadKeyValue skips an unknown type).
+     */
+    int nRestoreScanFrom = -1;
+    void LoadRestoreScan(int nFromHeight) { nRestoreScanFrom = nFromHeight; }
+    bool RestoreInProgress() const { return nRestoreScanFrom >= 0; }
+    //! Review 3 (M-c LOW): the pending restore was announced in the node's warnings (SetWalletRestorePending).
+    bool fWalletRestoreWarned = false;
+    //! Keys added by the transparent and PQ lookaheads since load (ScanForWalletTransactions' re-pass test).
+    uint64_t nKeyLookaheadGrowth = 0;
+    //! The keypool's keys by pool index and pool index by key (kept beside setKeyPool, for the mark-used path).
+    std::map<int64_t, CKeyID> mapKeyPoolKeyId;
+    std::map<CKeyID, int64_t> mapKeyPoolIndex;
+    void NoteKeyPoolEntry(int64_t nIndex, const CKeyID& id) { mapKeyPoolKeyId[nIndex] = id; mapKeyPoolIndex[id] = nIndex; }
+    void ForgetKeyPoolEntry(int64_t nIndex);
     bool SetPQIssued(uint8_t scheme, uint32_t next);
     bool LoadPQIssued(uint8_t scheme, uint32_t next);
     //! Adds a PQ key to the store and saves it to disk.

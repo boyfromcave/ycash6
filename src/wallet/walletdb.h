@@ -436,6 +436,42 @@ struct VaultSetSigRecord {
     uint256 sighash;
 };
 
+/**
+ * Review 3 H-1: the key IDs (hash160 of the public key) of the legacy transparent lookahead, per HD chain, written in
+ * clear ("legacytlookahead") at every unlocked top-up, so a locked wallet recognises a payment to one of them. A key ID
+ * is what a P2PKH address encodes: it reveals the wallet's next -keypool + 1 addresses per chain, nothing a parent key,
+ * a sibling key or an outgoing viewing key can be computed from (no chain code, no public key).
+ */
+class CLegacyTLookahead
+{
+public:
+    static const int CURRENT_VERSION = 1;
+    int nVersion = CURRENT_VERSION;
+    uint256 seedFp;              //!< the seed the IDs derive from (the "mnemonichdchain" record holds it in clear too)
+    uint32_t nStart[2] = {0, 0}; //!< per chain (0 internal, 1 external): the index of vIds[chain][0]
+    std::vector<uint160> vIds[2];
+
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action)
+    {
+        READWRITE(nVersion);
+        READWRITE(seedFp);
+        READWRITE(nStart[0]);
+        READWRITE(vIds[0]);
+        READWRITE(nStart[1]);
+        READWRITE(vIds[1]);
+    }
+
+    bool operator==(const CLegacyTLookahead& o) const
+    {
+        return seedFp == o.seedFp && nStart[0] == o.nStart[0] && nStart[1] == o.nStart[1] && vIds[0] == o.vIds[0] &&
+               vIds[1] == o.vIds[1];
+    }
+    bool operator!=(const CLegacyTLookahead& o) const { return !(*this == o); }
+};
+
 /** Access to the wallet database */
 class CWalletDB : public CDB
 {
@@ -539,6 +575,16 @@ public:
     bool WriteCryptedMnemonicSeed(const uint256& seedFp, const std::vector<unsigned char>& vchCryptedSecret);
     bool WriteMnemonicHDChain(const CHDChain& chain);
     bool WriteHasExternalImports(bool value);
+    //! Review L-2: the lowest height a locked wallet without its transparent lookahead may have missed a coin at.
+    bool WriteLegacyTKeyLookaheadIncomplete(int nFromHeight);
+    bool EraseLegacyTKeyLookaheadIncomplete();
+    //! Review 3 H-1: the key IDs of the transparent lookahead, in clear, so a locked wallet recognises a payment to one.
+    bool WriteLegacyTLookahead(const CLegacyTLookahead& record);
+    //! Review 3 H-1: erases the extended public key ("legacytaccountpub") an intermediate build stored in clear.
+    bool EraseObsoleteLegacyTAccountPub();
+    //! Review M-c: the restore marker, the height a wallet restored from its recovery phrase scans from until one scan completes.
+    bool WriteRestoreScan(int nFromHeight);
+    bool EraseRestoreScan();
 
     /// Write spending key to wallet database, where key is payment address and value is spending key.
     bool WriteZKey(const libzcash::SproutPaymentAddress& addr, const libzcash::SproutSpendingKey& key, const CKeyMetadata &keyMeta);

@@ -140,6 +140,12 @@ BASE_SCRIPTS= [
     # Balances and listings by address type (beta2 item 15): ECC / post-quantum (by scheme) / Sapling splits in
     # getwalletinfo and z_gettotalbalance, z_getbalance of a PQ address, the scheme in listings, unconfirmed rule.
     'wallet_balance_by_type.py',
+    # Beta2 P0: a -mnemonicfile restore re-finds every ECC (P2PKH) coin of the seed: the legacy transparent HD
+    # lookahead, keypool marking, the rescan's re-pass for keys used out of chain order, the gap limit (-keypool).
+    'wallet_seed_restore_ecc.py',
+    # Review 3 H-1: an encrypted, locked wallet file holds no chain code or public key of the legacy transparent account,
+    # only the key IDs of its lookahead (no other key and no OVK from the file plus one dumped key).
+    'wallet_seed_lookahead_exposure.py',
     # getnewaddress argument shapes (beta2 item 10): the type first (pq | pqslh | p2pkh) and the old "" + type.
     'wallet_getnewaddress_type.py',
     # beta2 D-2/D-6: z_sendmany and z_mergetoaddress between ECC, Sapling and PQ (both schemes), the address matrix.

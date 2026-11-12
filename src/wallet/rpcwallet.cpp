@@ -3358,6 +3358,27 @@ UniValue getwalletinfo(const UniValue& params, bool fHelp)
             "                                    derivation tree (importprivkey, z_importkey, importwallet). When set, the recovery phrase alone is NOT\n"
             "                                    a complete backup. Back up wallet.dat or run z_exportwallet to capture the imported keys.\n"
             "  \"external_imports_warning\": \"...\", (string, optional) human-readable warning, only present when has_external_imports is true.\n"
+            "  \"lookahead_incomplete\": true|false, (bool) true when the wallet may have missed a transparent coin: while encrypted and locked\n"
+            "                                    (when it cannot derive the keys of the addresses of its seed it has not issued; it\n"
+            "                                    watches the next -keypool + 1 of each chain by their key IDs, a payment to one being a\n"
+            "                                    watch-only coin until walletpassphrase) it saw a block transaction paying an address of\n"
+            "                                    its seed that leaves fewer than -keypool + 1 addresses it holds or watches beyond it, so\n"
+            "                                    a later payment past them would be missed; or a write of a key it saw paid failed. An\n"
+            "                                    ordinary block, a wallet whose seed no other wallet uses and a locked restart set\n"
+            "                                    nothing. (A wallet encrypted by an older release and not unlocked since cannot tell, and\n"
+            "                                    is set by a new block with an output it cannot check.) Kept in the wallet file; the remedy\n"
+            "                                    is a rescan of the missed range with the wallet unlocked, which clears it: an import RPC\n"
+            "                                    with rescan (importprivkey, importpubkey, importaddress, importwallet, z_importkey,\n"
+            "                                    z_importviewingkey, z_importwallet) run while unlocked, or -rescan for an unencrypted\n"
+            "                                    wallet; an encrypted wallet's start-up scan (-rescan included) always runs locked. Or\n"
+            "                                    restore the recovery phrase into a new wallet file (-wallet=<new file> -mnemonicfile=<file>),\n"
+            "                                    which finds the coin.\n"
+            "  \"restore_in_progress\": true|false, (bool) true while the wallet, created from a recovery phrase (-mnemonicfile), has not\n"
+            "                                    completed its scan of the chain from genesis: its balances and transactions may be\n"
+            "                                    incomplete. Every start of the node scans from genesis again until one scan completes\n"
+            "                                    with the node synced (an interrupted restore resumes this way; a restore made before the\n"
+            "                                    node had the chain completes at the first restart after it has synced, and getinfo's\n"
+            "                                    errors asks for that restart once the node has synced).\n"
             "}\n"
             "\nbalance counts confirmed coins and this wallet's own unconfirmed outputs (a transaction whose every input\n"
             "is this wallet's, such as change); unconfirmed_balance counts the other unconfirmed outputs (payments from\n"
@@ -3423,6 +3444,8 @@ UniValue getwalletinfo(const UniValue& params, bool fHelp)
     auto legacySeed = pwalletMain->GetLegacyHDSeed();
     if (legacySeed.has_value())
         obj.pushKV("legacy_seedfp", legacySeed.value().Fingerprint().GetHex());
+    obj.pushKV("lookahead_incomplete", pwalletMain->fLegacyTKeyLookaheadIncomplete);
+    obj.pushKV("restore_in_progress", pwalletMain->RestoreInProgress());   // review M-c
     if (pwalletMain->HasExternalImports()) {
         obj.pushKV("has_external_imports", true);
         obj.pushKV("external_imports_warning",

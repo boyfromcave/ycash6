@@ -44,6 +44,7 @@ from test_framework.util import (
     bitcoind_processes,
     connect_nodes_bi,
     nuparams,
+    seed_restored_balance_ecc,
     start_node,
     start_nodes,
     stop_node,
@@ -359,16 +360,12 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
         assert_equal((r['balance_pq'], r['balance_pq_1'], r['balance_pq_2']), (settled['balance_pq'], change_s, settled['balance_pq_2']))
         assert_equal((r['z1_transparent_pq'], r['z1_private'], r['fn@1'], r['slh@1'], r['z@1']),
                      (settled['z1_transparent_pq'], settled['z1_private'], 2, change_s, 1))
-        # the getnewaddress ECC key is not re-found from the seed on either line: only a wallet.dat backup restores
-        # it. Which other ECC keys the restore re-derives is a line difference: none on ycash-dd (random keypool keys);
-        # on 6.x the keypool (internal-chain) keys come from the seed, as far as the pool and the order of key use
-        # reach (wt/handoff/Y6-FIX2-ecc-seed-restore-design.md). Whatever it re-derives, the restored ECC balance is
-        # exactly the original coins at the keys it holds again, never more than the original balance.
-        assert not n0.validateaddress(self.addrs['ecc'])['ismine']
-        refound = sum((a for addr, a in ecc_coins if n0.validateaddress(addr)['ismine']), Decimal(0))
-        print('  ECC re-found by the restore: %s of %s' % (refound, settled['balance_ecc']))
-        assert_equal(r['balance_ecc'], refound)
-        assert r['balance_ecc'] <= settled['balance_ecc']
+        # What ECC the restored wallet finds is a line difference (seed_restored_balance_ecc, test_framework/util.py):
+        # none on ycash-dd (random keypool keys: only a wallet.dat backup restores the getnewaddress key); on 6.x the
+        # transparent keys come from the seed and the restore re-finds every ECC coin (beta2 P0), the getnewaddress
+        # key's among them.
+        assert_equal(n0.validateaddress(self.addrs['ecc'])['ismine'], seed_restored_balance_ecc(settled) == settled['balance_ecc'])
+        assert_equal(r['balance_ecc'], seed_restored_balance_ecc(settled))
         # the restored PQ keys are filed by the rescan (beta2); listreceivedbyaddress lists them
         self.check_listing(ecc=False)
         self.restart0()
