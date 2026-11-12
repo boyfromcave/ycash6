@@ -2365,10 +2365,10 @@ BOOST_AUTO_TEST_CASE(module_displace_hook)
     std::vector<CKey> keys;
     for (int i = 0; i < 15; i++) keys.push_back(MakeKey((unsigned char)(70 + i)));   // one join per block: keys[14] is the youngest
     const SetId s = SetWithMembers(c, keys, p);
-    SetCreateBody small = Params(true);
-    small.seats = 1;
-    small.unlockThreshold = small.cancelThreshold = small.slashThreshold = 1;
-    const SetId s1 = SetWithMembers(c, {MakeKey(69)}, small);
+    SetCreateBody smallSet = Params(true);
+    smallSet.seats = 1;
+    smallSet.unlockThreshold = smallSet.cancelThreshold = smallSet.slashThreshold = 1;
+    const SetId s1 = SetWithMembers(c, {MakeKey(69)}, smallSet);
     BOOST_CHECK_EQUAL(CountActive(GetMembers(c.kv, s)), 15);
 
     // Ungoverned (the module unconfigured): full is full, whatever the bond.

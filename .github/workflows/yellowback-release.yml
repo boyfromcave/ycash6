@@ -65,7 +65,7 @@
 # absent when it fails, so a release is never blocked on it):
 #   linux_x86_64          tier 1  ubuntu-22.04 native (glibc 2.35 floor), the same build as CI
 #   linux_aarch64         tier 1  ubuntu-22.04-arm native (depends pins clang + rust for arm64 Linux)
-#   macos_aarch64         tier 1  macos-14 native
+#   macos_aarch64         tier 1  macos-15 native (macos-14 is retired: "not supported")
 #   windows               tier 1  ubuntu-22.04 cross build, HOST=x86_64-w64-mingw32 (depends ships
 #                                 llvm-mingw), smoke-tested on windows-latest
 #   ubuntu_18.04_x86_64   tier 2  contrib/legacy-glibc-build (Ubuntu 18.04 image, LEGACY_GLIBC=1)
@@ -235,7 +235,7 @@ jobs:
             smoke: full
           - platform: macos_aarch64
             tier: 1
-            os: macos-14
+            os: macos-15
             kind: native
             smoke: full
           - platform: windows

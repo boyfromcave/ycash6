@@ -33,7 +33,7 @@ src/vault/node.h 5ab9e85217a0d6cef5b19a8d6f195323c31aaec18bcd37acda15a4ebae3c1e7
 # re-derives openDebtCents (HALT-2, 2026-10-28) on both lines; pins updated then.
 # ParamsFromArgs takes the testnet profile (testnet plan Revision 3, 2026-10-29)
 # on both lines; pins updated then.
-src/yellowback/index.cpp 5ee5ae18ca99de37efcdbcc9b62fb8c809acb36337772f8e753c65bef7373012 aa7f118e0492f03fa1e1353f2d02c69f21eb12e90179f57faa84b98e1cdd61de
+src/yellowback/index.cpp 35c9707adf3faa5131852ae1e91d9cd4a5407454d8c448f8e696204cb8b0968d c4c47ec9cd4c5d50c8e4c581e3ac7afc1476c22282669956f00a1485ca37adf9
 src/yellowback/index.h 241446bc6a427a7d4ef4f44fe0f510511840f9caefbd805844155512d3f77295 b3a5554369b9bf8eeae2beefe5cd9b445f299ebbe56cb73ce5c8c548bb0758a8
 
 # Comment only: DEFAULT_YELLOWBACK_FEE still 1000; the note names the 6.20.0

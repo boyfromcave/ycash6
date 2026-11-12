@@ -525,7 +525,12 @@ YellowbackIndex::ConnectCheck YellowbackIndex::CheckConnect(const CBlock& block,
         // would have), then die the way kill -9 does.
         LogPrintf("yellowback: -yellowbacktestfault: crash before judging block %s at %d\n", block.GetHash().ToString(), h);
         FlushStateToDisk();
+#ifdef WIN32
+        // Windows has no SIGKILL: end the process at once, with no handlers, atexit or destructors.
+        TerminateProcess(GetCurrentProcess(), 9);
+#else
         raise(SIGKILL);
+#endif
     }
     try {
         MaybeFault(TestFault::CHECK, h);
