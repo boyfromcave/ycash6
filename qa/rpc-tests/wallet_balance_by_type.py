@@ -349,8 +349,8 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
         settled = v
 
         print('restore from the seed alone: the PQ coins, their addresses with the scheme, the first Sapling address')
-        # the ECC coins of the original wallet (P2PKH, confirmed), to judge what the restore re-finds below
-        ecc_coins = [(c['address'], c['amount']) for c in n0.listunspent(1, 9999999) if c['scriptPubKey'].startswith('76a914')]
+        # the ECC coins of the original wallet (P2PKH, confirmed, spendable: not the watch-only one), to judge what the restore re-finds below
+        ecc_coins = [(c['address'], c['amount']) for c in n0.listunspent(1, 9999999) if c['spendable'] and c['scriptPubKey'].startswith('76a914')]
         assert_equal(sum(a for _, a in ecc_coins), settled['balance_ecc'])
         export = n0.z_exportwallet('bytypeseed')
         self.restart0(['%s=%s' % (SEED_RESTORE_OPTION, export)], wallet='restored.dat')
