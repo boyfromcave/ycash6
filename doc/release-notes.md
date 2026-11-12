@@ -22,13 +22,26 @@ Falcon is active, no Yellowback outpoint); when every one is a Yellowback outpoi
 them is given instead. A coinbase shortfall is added to the message (`; its coinbase funds can only be spent
 after they have been sent to a zaddr`) instead of hiding it (review LOW-2, LOW-3).
 
-Where Yellowback is not live (`-yellowback=0`, or no attestor set), no coin-selecting send spends an output its
-Yellowback payload gives YED (`sendtoaddress`, `sendmany`, the coins `fundrawtransaction` adds, `z_sendmany`,
-`z_mergetoaddress`, the vault fee funding), whether or not the wallet carries the "has held YED" mark: a wallet
-restored from its seed phrase where Yellowback is not live has no mark and was not protected before. The stock
-sends leave such an output out; the others refuse with `refusing to spend an output that carries YED as plain YEC while Yellowback is not live:
-<txid>:<n>[, …] (its YED would burn; to destroy it deliberately, name the outpoint in a raw transaction)` (beta2
-item 9).
+Where Yellowback is not live (no YED attestor set configured for the network; `-yellowback=0` does not turn a
+configured Yellowback off, it only acknowledges a leftover index or a wallet that has held YED), no coin-selecting
+send spends an output the Yellowback rules give YED (`sendtoaddress`, `sendmany`, `sendfrom`, the coins
+`fundrawtransaction` adds, `z_sendmany`, `z_mergetoaddress`, the vault fee funding, `vault_lock "from"`), whether or not
+the wallet carries the "has held YED" mark: a wallet restored from its seed phrase where Yellowback is not live has no
+mark and was not protected before (beta2 item 9). The wallet recognises such an output from its transaction alone, with
+no index: a MINT's vault and token outputs, the outputs a TRANSFER or REDEEM payload assigns, and for a claim cancel
+(CANCEL_COSIGN) the re-created vault and every output that can be its refund token (the refund goes to a holder only
+the index records, so each non-zero output at index 1 or above that is the first to pay its script is counted: the
+cancel's own YEC change is treated as YED too). The same list pre-locks this wallet's outputs of a transaction the index
+has not judged yet where Yellowback is live (the claim cancel's refund was missing from it: an unconfirmed refund could
+be spent). The stock sends leave such an output out and, short of funds, say so: `Insufficient funds; this wallet also
+holds <n> output(s) that carry YED, which no send spends as plain YEC while Yellowback is not live: <txid>:<n>[, …] (its
+YED would burn; to destroy it deliberately, name the outpoint in a raw transaction)`; the others refuse with `refusing
+to spend an output that carries YED as plain YEC while Yellowback is not live: <txid>:<n>[, …] (its YED would burn; to
+destroy it deliberately, name the outpoint in a raw transaction)`. Such an output is spent deliberately by a raw
+transaction, or `fundrawtransaction`, that names it. Because the check reads only the transaction, it is conservative:
+an output a payload names that the index would not have given YED (an invalid or over-assigned transfer, a payment
+from a third party in a transaction that carries a decodable payload) and a claim cancel's YEC change are also kept
+out of the coin-selecting sends where Yellowback is not live; they are spent the same deliberate way.
 
 `vault_send` and `set_sendact` refuse a coin named by `allowinputs` that is a Yellowback outpoint (a YED token,
 vault or carrier of this wallet), with the Yellowback refusal; a deliberate burn goes through
@@ -40,7 +53,9 @@ spent before Falcon is active at the next block` now answer -5 (`RPC_INVALID_ADD
 
 The vault RPCs release the coins their default funding locked when the call fails for any reason (an unknown
 `setid`, a signing failure, a conflicting build, a refused broadcast), and only those: a coin locked with
-`lockunspent` is never released (beta2 review LOW-4). The coinbase refusal of that funding names the full route:
+`lockunspent` is never released (beta2 review LOW-4). Two coins stay locked as before: a fee input of a remembered build that
+`vault_refee` re-locks after a failed re-funding, and the fee coins of a build returned by `rebuild=true` after
+this wallet signed the earlier one (locked until spent, released with `lockunspent`, or a restart). The coinbase refusal of that funding names the full route:
 `z_shieldcoinbase, then z_sendmany to a transparent address, or vault_lock "from" the shielded address` (LOW-5).
 
 `getbalance … asOfHeight` counts each transaction afresh at that height: it no longer reads, or writes, the

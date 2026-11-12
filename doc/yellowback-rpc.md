@@ -243,11 +243,13 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
   `refusing to spend a Yellowback outpoint as plain YEC: <txid>:<n>[, <txid>:<n>…] (its YED would burn; lock it again with yed_lockcoins)`.
   A deliberate burn goes through `sendrawtransaction … allowyedburn`; inputs named by the caller
   (`fundrawtransaction`'s own inputs, raw-transaction signing) are not checked, except a coin `vault_send` /
-  `set_sendact` sign because `allowinputs` names it (audit L-3). Where Yellowback is not live (`-yellowback=0`, or
-  no attestor set), the same coin-selecting calls leave out every output its own payload gives YED (no index is
-  needed for that), whether or not the wallet carries the "has held YED" mark (a seed restore, an imported key or a
+  `set_sendact` sign because `allowinputs` names it (audit L-3). Where Yellowback is not live (no YED attestor set configured; `-yellowback=0` only
+  acknowledges a leftover index or a marked wallet), the same coin-selecting calls leave out every output the
+  Yellowback rules may give YED, read from its transaction alone (no index; a claim cancel's re-created vault and every
+  output that can be its refund, its YEC change included, are counted), whether or not the wallet carries the "has held YED" mark (a seed restore, an imported key or a
   wallet that never saw Yellowback live has none): `sendtoaddress`, `sendmany` and `fundrawtransaction` use the
-  other coins or report insufficient funds; `z_sendmany`, `z_mergetoaddress` and the vault fee funding are refused,
+  other coins or report insufficient funds, naming the outputs left out (`Insufficient funds; this wallet also holds
+  <n> output(s) that carry YED, which no send spends as plain YEC while Yellowback is not live: <txid>:<n>[, …] …`); `z_sendmany`, `z_mergetoaddress` and the vault fee funding are refused,
   when they need one, with `refusing to spend an output
   that carries YED as plain YEC while Yellowback is not live: <txid>:<n>[, <txid>:<n>…] (its YED would burn; to
   destroy it deliberately, name the outpoint in a raw transaction)` (beta2 item 9).

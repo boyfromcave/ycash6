@@ -44,7 +44,6 @@ from test_framework.util import (
     bitcoind_processes,
     connect_nodes_bi,
     nuparams,
-    seed_restored_balance_ecc,
     start_node,
     start_nodes,
     stop_node,
@@ -350,6 +349,9 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
         settled = v
 
         print('restore from the seed alone: the PQ coins, their addresses with the scheme, the first Sapling address')
+        # the ECC coins of the original wallet (P2PKH, confirmed), to judge what the restore re-finds below
+        ecc_coins = [(c['address'], c['amount']) for c in n0.listunspent(1, 9999999) if c['scriptPubKey'].startswith('76a914')]
+        assert_equal(sum(a for _, a in ecc_coins), settled['balance_ecc'])
         export = n0.z_exportwallet('bytypeseed')
         self.restart0(['%s=%s' % (SEED_RESTORE_OPTION, export)], wallet='restored.dat')
         n0 = self.nodes[0]
@@ -358,11 +360,15 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
         assert_equal((r['z1_transparent_pq'], r['z1_private'], r['fn@1'], r['slh@1'], r['z@1']),
                      (settled['z1_transparent_pq'], settled['z1_private'], 2, change_s, 1))
         # the getnewaddress ECC key is not re-found from the seed on either line: only a wallet.dat backup restores
-        # it. What ECC the restored wallet finds is a line difference (seed_restored_balance_ecc, test_framework/util.py):
-        # none on ycash-dd (random keypool keys); on 6.x the keypool keys come from the seed and the rescan re-finds
-        # some of them (change).
+        # it. Which other ECC keys the restore re-derives is a line difference: none on ycash-dd (random keypool keys);
+        # on 6.x the keypool (internal-chain) keys come from the seed, as far as the pool and the order of key use
+        # reach (wt/handoff/Y6-FIX2-ecc-seed-restore-design.md). Whatever it re-derives, the restored ECC balance is
+        # exactly the original coins at the keys it holds again, never more than the original balance.
         assert not n0.validateaddress(self.addrs['ecc'])['ismine']
-        assert_equal(r['balance_ecc'], seed_restored_balance_ecc(settled))
+        refound = sum((a for addr, a in ecc_coins if n0.validateaddress(addr)['ismine']), Decimal(0))
+        print('  ECC re-found by the restore: %s of %s' % (refound, settled['balance_ecc']))
+        assert_equal(r['balance_ecc'], refound)
+        assert r['balance_ecc'] <= settled['balance_ecc']
         # the restored PQ keys are filed by the rescan (beta2); listreceivedbyaddress lists them
         self.check_listing(ecc=False)
         self.restart0()

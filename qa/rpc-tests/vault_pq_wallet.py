@@ -16,8 +16,9 @@ docs/plans/yellowback-quantum-spec.md §1.5, §2.1, §6.2, rulings A-12, A-13, C
   node 0 runs -txunpaidactionlimit=0 (q/fees review) and mines every block, so nothing with an unpaid action
   confirms; a vault the conventional fee would leave a dust output is refused;
 - a TX_PQPKH output to a wallet PQ key: listunspent sees it, a restart with -rescan finds it again, the
-  wallet spends it through coin selection (sendtoaddress) at max(DEFAULT_FEE, -pqfeerate x size), and at the
-  default rate (node 0) never below the ZIP-317 conventional fee;
+  wallet spends it with z_sendmany from its address (the stock sends select ECC coins only, beta2 audit M-1) at
+  max(DEFAULT_FEE, -pqfeerate x size), and, pricing it itself when fundrawtransaction funds a raw transaction
+  naming it, at the default rate (node 0) never below the ZIP-317 conventional fee;
 - ANY_TADDR in z_sendmany and z_mergetoaddress selects ECC coins only, never a TX_PQPKH coin (a PQ coin is spent
   when its address is named, beta2 D-2/D-6: wallet_address_matrix.py);
 - dumpwallet / importwallet carry the PQ keys (pqseed lines): the importing wallet owns the vault and
