@@ -366,7 +366,7 @@ YED form): what node operators and clients should know.**
     Yellowback index holds a YED token of this wallet at that address (read from the wallet's own Yellowback-locked
     outpoints: a token whose lock was removed with `yed_unlockcoin` is not marked until it is locked again); the
     field is absent otherwise.
-    `validateaddress` of a post-quantum address adds `pqschemename` beside `pqscheme`.
+    `validateaddress` of a post-quantum address adds `pqschemename` beside `pqscheme`. `z_validateaddress` answers for a post-quantum address too (audit L-4; it said `isvalid: false`): `type` (dd) / `address_type` (6.x) `"pq"`, `ismine`, and validateaddress's `pqscheme`, `pqschemename`, `pqkeyhash`; its answers for Sprout, Sapling and unified addresses are unchanged.
   - **Unconfirmed funds, one rule per kind of figure** (finding L-6; the existing semantics, the same as ycash-dd's,
     now documented and pinned by `qa/rpc-tests/wallet_balance_by_type.py`). *Spendable now*
     (`getwalletinfo.balance`, `getbalance` with no arguments): confirmed outputs and this wallet's own unconfirmed
@@ -1966,7 +1966,10 @@ from that address's confirmed notes, largest-first — blocks for the proving ti
 confirmed from `yed_estimatecollateral`; the node refuses `collateral-above-max` at preflight,
 before the carrier, and again when the MINT is built on the confirmed carrier — then the carrier
 lapses and `yed_sweepcarriers` reclaims it — so a block or a price move between the estimate and
-the call never locks more than was agreed). Builds the §3.5
+the call never locks more than was agreed). Before the carrier is broadcast the preflight also dry-runs the
+selection of the whole mint (collateral, token, pool and attestor fees, the MINT's and the carrier's network fees) on
+the same source, and refuses `insufficient-yec` with nothing sent (beta2; it used to broadcast the carrier and fail
+at the MINT). Builds the §3.5
 MINT at `R = tip − REF_LAG` after the MINTPOL-1 gate (`Snapshots[R].activation == ACTIVE`,
 `haltMask == 0`, the cap has room — or, under a `GLOBAL_RATIO` halt or above the cap, the class
 is at or over `RECAP_RATIO_BPS`; W16, W20), draws one fresh key for the vault owner and the token output,

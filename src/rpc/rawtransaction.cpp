@@ -971,7 +971,7 @@ UniValue signrawtransaction(const UniValue& params, bool fHelp)
 {
     if (!fEnableSignRawTransaction || fHelp || params.size() < 1 || params.size() > 5)
         throw runtime_error(
-            "signrawtransaction \"hexstring\" ( [{\"txid\":\"id\",\"vout\":n,\"scriptPubKey\":\"hex\",\"redeemScript\":\"hex\"},...] [\"privatekey1\",...] sighashtype )\n"
+            "signrawtransaction \"hexstring\" ( [{\"txid\":\"id\",\"vout\":n,\"scriptPubKey\":\"hex\",\"redeemScript\":\"hex\"},...] [\"privatekey1\",...] sighashtype \"branchid\" )\n"
             + SupportedOnYcash(fEnableSignRawTransaction,
                                "signrawtransaction",
                                "ycashd has no other call for this raw-transaction step.") +

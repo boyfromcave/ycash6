@@ -834,9 +834,10 @@ UniValue yed_getbalance(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() > 1)
         throw std::runtime_error(
-            "yed_getbalance\n\nConfirmed YED (from the index) and unconfirmed YED (mempool transactions that would assign YED to this wallet).\n"
+            "yed_getbalance ( \"dummy\" )\n\nConfirmed YED (from the index) and unconfirmed YED (mempool transactions that would assign YED to this wallet).\n"
             "spendableCents is confirmedCents less the YED this wallet's own unconfirmed transactions already spend: what\n"
             "yed_send, yed_redeem and yed_claim can use now (their change returns in unconfirmedCents).\n"
+            "Argument: \"dummy\" (string, optional) ignored; accepted for compatibility.\n"
             "Result: { \"confirmedCents\": n, \"spendableCents\": n, \"unconfirmedCents\": n, \"height\": n }\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
@@ -869,7 +870,8 @@ UniValue yed_getbalance(const UniValue& params, bool fHelp)
 UniValue yed_listunspent(const UniValue& params, bool fHelp)
 {
     if (fHelp || params.size() > 1)
-        throw std::runtime_error("yed_listunspent\n\nYED outputs that are mine, with whether each is spent by an unconfirmed transaction and whether it is locked.\n");
+        throw std::runtime_error("yed_listunspent ( \"dummy\" )\n\nYED outputs that are mine, with whether each is spent by an unconfirmed transaction and whether it is locked.\n"
+                                 "Argument: \"dummy\" (string, optional) ignored; accepted for compatibility.\n");
     YellowbackWallet& yw = EnsureYW();
     YellowbackIndex& index = *yw.Index();
     LOCK2(cs_main, pwalletMain->cs_wallet);
@@ -904,7 +906,8 @@ UniValue yed_mint(const UniValue& params, bool fHelp)
             "wallet key (quantum plan §4.3), the YED goes to a fresh holder key (P2PKH; a Falcon key from the Falcon height).\n"
             "v3 (W7): two transactions — the carrier funding transaction first (carrierTxid; its redeem script commits to the\n"
             "attestation bundle), then the MINT after one confirmation, spending the carrier as its last input. Before commit the\n"
-            "wallet dry-runs MINT-1..10 with the bundle and refuses naming the rule.\n"
+            "wallet dry-runs MINT-1..10 with the bundle and refuses naming the rule. Before the carrier is broadcast the wallet\n"
+            "checks that the source covers the whole mint (collateral, fees and the carrier; insufficient-yec otherwise).\n"
             "\nArguments:\n"
             "1. cents       (numeric, required) amount of YED to mint, in cents\n"
             "2. lockBlocks  (numeric, required) lock length in blocks (class A, B or C by range)\n"

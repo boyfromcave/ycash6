@@ -224,8 +224,7 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
 
     if (!fEnableGetNewAddress || fHelp || params.size() > 2)
         throw runtime_error(
-            "getnewaddress ( \"type\" )\n"
-            "getnewaddress ( \"\" \"type\" )\n"
+            "getnewaddress ( \"type\"|\"\" ( \"type\" ) )\n"
             + SupportedOnYcash(fEnableGetNewAddress,
                                "getnewaddress",
                                "This is the way to get a new transparent (\"p2pkh\") or\n"
@@ -3906,7 +3905,10 @@ UniValue zc_benchmark(const UniValue& params, bool fHelp)
 
     if (fHelp || params.size() < 2) {
         throw runtime_error(
-            "zcbenchmark benchmarktype samplecount\n"
+            "zcbenchmark benchmarktype samplecount ( arg )\n"
+            "\n"
+            "arg (optional): the thread count for createjoinsplit and solveequihash, the JoinSplit hex for\n"
+            "verifyjoinsplit.\n"
             "\n"
             "Runs a benchmark of the selected benchmark type samplecount times,\n"
             "returning the running times of each sample.\n"
@@ -6987,7 +6989,7 @@ UniValue z_listoperationids(const UniValue& params, bool fHelp)
 
     if (fHelp || params.size() > 1)
         throw runtime_error(
-            "z_listoperationids\n"
+            "z_listoperationids ( \"status\" )\n"
             "\nReturns the list of operation ids currently known to the wallet.\n"
             "\nArguments:\n"
             "1. \"status\"         (string, optional) Filter result by the operation's state e.g. \"success\".\n"

@@ -318,9 +318,12 @@ UniValue z_validateaddress(const UniValue& params, bool fHelp)
             "{\n"
             "  \"isvalid\" : true|false,        (boolean) If the address is valid or not. If not, this is the only property returned.\n"
             "  \"address\" : \"addr\",          (string) The address validated\n"
-            "  \"address_type\" : \"xxxx\",     (string) \"p2pkh\", \"p2sh\", \"sprout\" or \"sapling\"\n"
-            "  \"type\" : \"xxxx\",             (string) \"p2pkh\", \"p2sh\", \"sprout\" or \"sapling\" (DEPRECATED, legacy attribute)\n"
+            "  \"address_type\" : \"xxxx\",     (string) \"p2pkh\", \"p2sh\", \"sprout\", \"sapling\" or \"pq\" (a post-quantum address)\n"
+            "  \"type\" : \"xxxx\",             (string) \"p2pkh\", \"p2sh\", \"sprout\", \"sapling\" or \"pq\" (DEPRECATED, legacy attribute)\n"
             "  \"ismine\" : true|false,         (boolean) If the address is yours or not\n"
+            "  \"pqscheme\" : n,                (numeric) [pq] 1 = SLH-DSA-SHA2-128s (sqs…/tqs…/rqs…), 2 = FN-DSA-512 (sqf…/tqf…/rqf…)\n"
+            "  \"pqschemename\" : \"name\",     (string) [pq] \"SLH-DSA-SHA2-128s\" or \"FN-DSA-512\"\n"
+            "  \"pqkeyhash\" : \"hex\",         (string) [pq] SHA256(scheme || public key), as in its TX_PQPKH script\n"
             "  \"payingkey\" : \"hex\",         (string) [sprout] The hex value of the paying key, a_pk\n"
             "  \"transmissionkey\" : \"hex\",   (string) [sprout] The hex value of the transmission key, pk_enc\n"
             "  \"diversifier\" : \"hex\",       (string) [sapling] The hex value of the diversifier, d\n"
@@ -345,6 +348,24 @@ UniValue z_validateaddress(const UniValue& params, bool fHelp)
     bool isValid = address.has_value();
 
     UniValue ret(UniValue::VOBJ);
+#ifdef ENABLE_WALLET
+    if (!isValid) {
+        // Beta2 audit L-4: a post-quantum address is a payment address of this node too (z_sendmany pays and spends
+        // it); answer for it with validateaddress's post-quantum fields instead of "isvalid": false.
+        const CTxDestination dest = keyIO.DecodeDestination(strAddress);
+        if (const CPQKeyID* id = std::get_if<CPQKeyID>(&dest)) {
+            ret.pushKV("isvalid", true);
+            ret.pushKV("address", strAddress);
+            ret.pushKV("address_type", "pq");
+            if (fEnableAddrTypeField) ret.pushKV("type", "pq");   // deprecated, as for the other types
+            if (pwalletMain) ret.pushKV("ismine", (IsMine(*pwalletMain, dest) & ISMINE_SPENDABLE) ? true : false);
+            ret.pushKV("pqscheme", (int)id->scheme);
+            ret.pushKV("pqschemename", PQSchemeName(id->scheme));
+            ret.pushKV("pqkeyhash", HexStr(id->hash.begin(), id->hash.end()));
+            return ret;
+        }
+    }
+#endif
     ret.pushKV("isvalid", isValid);
     if (isValid)
     {

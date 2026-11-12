@@ -4,6 +4,57 @@ release-notes at release time)
 Notable changes
 ===============
 
+Wallet follow-ups, second round (beta2)
+---------------------------------------
+
+- **No lock outlives a vault transaction (audit L-1).** `vault_lock` "from" a transparent or post-quantum address
+  locked the coins of an accepted lock for good (until a restart or `lockunspent true`), so a lock that expired or
+  was evicted unmined left them out of `listunspent`, `z_gettotalbalance` and every send. The vault RPCs now record
+  an accepted transaction in the wallet at once, as a send does, and keep no coin lock for it: its inputs are spent
+  by an unconfirmed transaction while it is in the mempool or the chain, and spendable again when it leaves the
+  mempool unmined. The same holds for the coins the default funding picks (`vault_lock` without "from", `set_*`,
+  `vault_release`, ...); the Sapling notes of a lock "from" a `ys1…` address, kept locked until a restart once the lock was accepted, are released at the end of the call and kept spent by the recorded transaction. A coin locked with `lockunspent` is never unlocked. The YEC inputs the
+  Yellowback wallet locks for a YED transaction (F-1) are handed back within about a second once it is mined or has
+  left the mempool unmined; they used to wait for the next YED build.
+- **`yed_mint` checks the whole mint before its carrier (YEW-FIX item 5).** A wallet that cannot fund the mint's
+  collateral, its fees and its carrier from the source (the default transparent coins, an `s1…` "from" or a `ys1…`
+  "from") is refused before anything is broadcast: `insufficient-yec: the mint needs <total> YEC (collateral <c>,
+  fees <f> with its carrier's), checked before its carrier is broadcast; nothing was sent: need …, have …`. It used
+  to broadcast the carrier and fail at the MINT.
+- **`z_validateaddress` answers for a post-quantum address (audit L-4).** It said `isvalid: false`; it now gives
+  ``address_type` (and the deprecated `type`) "pq"`, `ismine`, and `validateaddress`'s `pqscheme`, `pqschemename` and `pqkeyhash`. Its answers for
+  Sprout, Sapling, unified, P2PKH and P2SH addresses are unchanged.
+- **Help signatures.** The first help line of `getnewaddress`, `signrawtransaction` (`branchid`), `stop` (`detach`,
+  ignored), `yed_getbalance` and `yed_listunspent` (an ignored argument), `z_listoperationids` (`status`) and
+  `zcbenchmark` (its third argument) now names every argument the call accepts.
+
+Post-quantum addresses show their scheme (D-9, `rpcversion` 9)
+-------------------------------------------------------------
+
+- **New prefixes.** A post-quantum address now names its signature scheme in its third character:
+  `sqf…` (FN-DSA-512, Falcon) and `sqs…` (SLH-DSA-SHA2-128s) on mainnet, `tqf…`/`tqs…` on testnet,
+  `rqf…`/`rqs…` on regtest; the YED form is `ybf…`/`ybs…` (mainnet), `ytf…`/`yts…`, `yrf…`/`yrs…`. Still 53
+  characters. The key, the script it pays and every balance are unchanged: only the text differs.
+- **The earlier text form is no longer accepted.** An address in the form used before this release
+  (`sq…`/`tq…`/`rq…` or `yb…`/`yt…`/`yr…` at 53 characters, whose third character did not name the scheme) is
+  refused by `sendtoaddress`, `validateaddress`, `yed_send` and every other RPC. Get the new string for a key
+  you already hold with `listreceivedbyaddress 0 true` (or `getaddressesbyaccount ""` where
+  `-allowdeprecated=accounts` is set; the wallet lists it in the new form); for a key in a
+  wallet dump, `z_importpqkey` with the dump's whole `pqseed=` line returns it (`address`). The one exception:
+  `z_importpqkey` still accepts a dump line whose `addr=`/`yecaddr=` are in the earlier form, so old dumps import.
+- **Wallets upgrade their address book once.** A wallet's post-quantum address-book entries written by an
+  earlier build are rewritten under the new form at the first start (labels kept; logged once).
+- **Nothing prints the earlier form.** A wallet or data directory carried over from an earlier build shows its
+  post-quantum addresses only in the new form, in every RPC result and in the address book; the keys, coins,
+  balances and the address index are untouched (they are keyed by the key hash, not by the text). Going back to an
+  earlier build after the first start is not supported for the address book: that build cannot read the rewritten
+  entries, so it shows the post-quantum addresses (in the earlier form) without their labels, while keys and coins
+  stay spendable. Keep a backup of `wallet.dat` from before the upgrade if you may need to go back.
+- **`rpcversion` 9.** `yed_getinfo.params.pqAddressVersion` and `.params.pq.plainAddressVersion` were hex
+  strings and are now objects keyed by scheme number (`{"1": "<hex>", "2": "<hex>"}`), one 3-byte version
+  each. Clients that build or check post-quantum addresses must read them this way or use
+  `src/test/data/pq_address_vectors.json`.
+
 `sendtoaddress` and `sendmany` spend ordinary (ECC) coins only
 --------------------------------------------------------------
 

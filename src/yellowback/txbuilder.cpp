@@ -1466,7 +1466,43 @@ MintPreflight PreflightMint(YellowbackWallet& yw, Cents cents, int lockBlocks, c
     pf.xMint = g.xMint;
     pf.aMint = f.aMint;
     CombineMint(ctx, g, f, pf.pMint, pf.source);
-    CheckMaxCollateral(MintCollateral(ctx, cents, g, pf.pMint.value()), maxCollateralZat);
+    const CAmount collateral = MintCollateral(ctx, cents, g, pf.pMint.value());
+    CheckMaxCollateral(collateral, maxCollateralZat);
+    // Beta2 WALLET-FOLLOW-4 item 2: the whole mint is funded before its carrier is broadcast. The carrier takes
+    // CARRIER_VALUE plus its fee from the source and the MINT takes the rest: its outputs as BuildMint makes them (the
+    // collateral, the token, the pool fee when a payee is eligible at R, the attestor fee) plus its network fee, less the
+    // CARRIER_VALUE the carrier hands back. A wallet that cannot cover the sum is refused here, with nothing sent; it
+    // used to broadcast the carrier and fail at the MINT. The same selection is dry-run on the same coins or notes
+    // (a post-quantum coin raises the network fee as it does in BuildMint).
+    const CAmount protocolFee = ProtocolFeeZat(cents, pf.pMint.value(), ctx.params).value_or(MAX_MONEY);
+    BuiltTx fees;
+    AttestFeeFor(ctx, pf.refHeight, std::vector<unsigned char>(), f, protocolFee, fees);
+    const bool payee = ctx.Payee(pf.refHeight, std::vector<unsigned char>()).has_value();   // eligibility does not depend on the selector
+    PQFeeFollower follow;
+    follow.fee = std::max(ctx.fee, YedNetworkFee({}, std::nullopt));
+    const CAmount feesTotal = (payee ? protocolFee : 0) + fees.attestFeeZat + follow.fee + ctx.fee;
+    const CAmount total = collateral + TOKEN_VALUE + feesTotal;
+    try {
+        if (source.kind == AddressChoice::SAPLING) {
+            libzcash::SaplingExtendedSpendingKey extsk;
+            std::vector<SaplingNoteEntry> notes;
+            std::vector<SaplingWitness> witnesses;
+            uint256 anchor;
+            ctx.SelectSapling(source, total, extsk, notes, witnesses, anchor);
+        } else {
+            CMutableTransaction dry;
+            std::vector<std::pair<CScript, CAmount>> prevs;
+            CScript onlyScript;
+            if (source.kind == AddressChoice::TRANSPARENT_ADDR) onlyScript = GetScriptForDestination(source.keyId);
+            ctx.SelectYec(total, dry, prevs, onlyScript.empty() ? nullptr : &onlyScript, source.text, &follow);
+        }
+    } catch (const std::runtime_error& e) {
+        const std::string what = e.what();
+        const std::string prefix = "insufficient-yec: ";
+        if (what.rfind(prefix, 0) != 0) throw;
+        throw std::runtime_error(strprintf("insufficient-yec: the mint needs %s YEC (collateral %s, fees %s with its carrier's), checked before its carrier is broadcast; nothing was sent: %s",
+                                           FormatMoney(total), FormatMoney(collateral), FormatMoney(feesTotal), what.substr(prefix.size())));
+    }
     return pf;
 }
 
