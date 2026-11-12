@@ -2935,6 +2935,33 @@ acknowledge that any YED outputs in this wallet are spendable as plain YEC."* Pa
 `-yellowback=0` explicitly is that acknowledgement and starts normally (with the warning logged);
 the check is skipped with `-disablewallet`, which cannot burn anything.
 
+**From the wallet side (beta2 item 32).** A wallet that has held YED (one of its outputs was locked
+as a YED token output) or issued a YED holder key (`yed_getnewaddress`) carries a write-once
+`"yedheld"` record in `wallet.dat`; `getwalletinfo` reports it as `"yed_held": true|false`. It
+survives restarts, `-rescan`, `-zapwallettxes` and `-salvagewallet`, and an older binary ignores
+the record. Loaded where Yellowback is not live (a copied `wallet.dat`, a fresh datadir with no
+index, a configuration without the attestor set), such a wallet refuses to start:
+*"This wallet has held YED, but Yellowback is not live with these options, so its YED outputs
+cannot be locked. Start with the network's attestor set (regtest -yellowbackattestorset) to keep
+those outputs locked, or with -yellowback=0 to acknowledge that they are spendable as plain YEC."*
+`-yellowback=0` is the same acknowledgement as H6's; the node then starts and warns
+*"This wallet has held YED and Yellowback is not live (-yellowback=0): its YED outputs are not
+locked, and any send that spends one destroys the YED it carries."* Where Yellowback is live the
+index is brought to the tip before the wallet layer attaches (or the node does not start), so the
+locks are rebuilt and the marker changes nothing. `yed_held` is per wallet; `yed_holder` (on
+`validateaddress` and `listreceivedbyaddress` rows) marks one address as a holder key.
+
+**What the has-held-YED marker does not cover.** The marker is written only by this release, on a
+node where Yellowback is live. It is absent, so start-up does not refuse, for: a wallet restored
+from its seed, or rebuilt by `-rescan`, on a node where Yellowback is not live; a new wallet filled
+by a `dumpwallet`/`importwallet` or `z_exportwallet`/`z_importwallet` round trip on such a node (the
+marker is not in the dump); and a wallet from an earlier release that holds YED and has not yet
+been started by this release where Yellowback is live. On a network with no Yellowback activation
+height set, a wallet cannot become marked. **Restore, rescan and import only on a node where
+Yellowback is live:** there, the start-up reconcile and the import hook set the marker. A marked
+wallet started with `-yellowback=0` (on the command line or in the config file) keeps the warning in
+`getinfo` `errors` for the life of the process, and `getwalletinfo` reports `"yed_unlocked": true`.
+
 ## v3 additions (bond-weighted price attestation; `rpcversion = 3`)
 
 The contract of v3 plan §4.5, written in Phase A0 before the code; the node context lands in

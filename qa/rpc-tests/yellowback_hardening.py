@@ -11,6 +11,7 @@ lockunspent (H5), the startup check (H6) and sendrawtransaction (H7).
 Written before the code it exercises (H12)."""
 
 import os
+import tempfile
 from decimal import Decimal
 
 from test_framework.util import (assert_equal, assert_start_raises_init_error, bytes_to_hex_str, start_node,
@@ -30,6 +31,8 @@ from test_framework.yellowback_util import (
 
 COIN = 10 ** 8
 UNLOCK_ACK = 'I understand this burns YED'
+HELD_WARNING = ('Warning: This wallet has held YED and Yellowback is not live (-yellowback=0): its YED outputs are not '
+                'locked, and any send that spends one destroys the YED it carries.')
 
 
 def assert_rpc_error(substr, fn, *args, **kwargs):
@@ -312,9 +315,14 @@ class YellowbackHardeningTest(YellowbackTestFramework):
 
 # Rule: H6
         print('h6_-yellowback=0_is_the_acknowledgement')
-        node = start_node(i, self.options.tmpdir, base + ['-yellowback=0'])
-        assert_equal(node.getblockcount() >= 0, True)
-        stop_node(node, i)
+        with tempfile.SpooledTemporaryFile(max_size=2**16) as err:
+            node = start_node(i, self.options.tmpdir, base + ['-yellowback=0'], stderr=err)
+            assert_equal(node.getblockcount() >= 0, True)
+            stop_node(node, i)
+            # node 0 has held YED, so ycashd's wallet-side guard (beta2 item 32) warns on the same acknowledgement
+            if not pair:
+                err.seek(0)
+                assert_equal(err.read().decode('utf-8').strip(), HELD_WARNING)
 
         # back to the normal role arguments so the framework can finish
         self.nodes[i] = start_node(i, self.options.tmpdir, self.node_args(i))
