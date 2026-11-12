@@ -2,7 +2,7 @@
   "contract": "vault-rpc",
   "source": {
     "file": "doc/vault-rpc.md",
-    "sha256": "c550cc1ce6bbeb392cff51fa1fc155437cf6b477c6ff9d13dc87bf208b40fedc"
+    "sha256": "6a4797e0ff65d79fc102fb9eb0cfc384bca7a99233fcb96813f5495e1d094746"
   },
   "branchid": "6d5b7a31",
   "units": {
@@ -2015,11 +2015,15 @@
               },
               "owner": {
                 "type": "pqkeyid"
+              },
+              "from": {
+                "type": "address"
               }
             },
             "optional": [
               "appheight",
               "cancelsetid",
+              "from",
               "owner"
             ]
           }
@@ -2622,6 +2626,54 @@
         "vault_lock"
       ],
       "provokedBy": "an `owner` with scheme `02` while Falcon is inactive at the next block"
+    },
+    {
+      "code": -5,
+      "message": "bad-address: from: not a transparent P2PKH, post-quantum or Sapling address of this network",
+      "raisedBy": [
+        "vault_lock"
+      ],
+      "provokedBy": "`from` `\"nonsense\"`"
+    },
+    {
+      "code": -4,
+      "message": "from: not an address of this wallet",
+      "raisedBy": [
+        "vault_lock"
+      ],
+      "provokedBy": "`from` another wallet's address"
+    },
+    {
+      "code": -4,
+      "message": "from: a watch-only address of this wallet",
+      "raisedBy": [
+        "vault_lock"
+      ],
+      "provokedBy": "`from` an address imported with `importaddress`"
+    },
+    {
+      "code": -8,
+      "message": "from: an FN-DSA-512 (scheme 2) address cannot be spent before Falcon is active",
+      "raisedBy": [
+        "vault_lock"
+      ],
+      "provokedBy": "`from` the address of a scheme-2 key imported with `z_importpqkey`, while Falcon is inactive at the next block"
+    },
+    {
+      "code": -6,
+      "message": "insufficient confirmed funds at",
+      "raisedBy": [
+        "vault_lock"
+      ],
+      "provokedBy": "`from` an empty transparent or post-quantum address of this wallet"
+    },
+    {
+      "code": -6,
+      "message": "in confirmed Sapling notes at",
+      "raisedBy": [
+        "vault_lock"
+      ],
+      "provokedBy": "`from` an empty Sapling address of this wallet"
     },
     {
       "code": -4,
