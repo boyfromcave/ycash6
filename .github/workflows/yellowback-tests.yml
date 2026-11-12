@@ -546,9 +546,9 @@ jobs:
         # vault_pq_reorg's Falcon spends come from the framework's signer, compiled with $CC on the fly;
         # without a compiler the script would SKIP. Two packages, not the prereqs action's full apt list.
         if: matrix.suite == 'yellowback'
+        timeout-minutes: 20   # apt is bounded (qa/yellowback-ci-apt.sh); never the job's whole budget
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q gcc libc6-dev
+          qa/yellowback-ci-apt.sh gcc libc6-dev
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: node-bin
@@ -748,9 +748,9 @@ jobs:
         with:
           apt: 'false'
       - name: Install a C compiler (the Falcon signer of test_framework/pq.py) and librocksdb (koganyd)
+        timeout-minutes: 20   # apt is bounded (qa/yellowback-ci-apt.sh); never the job's whole budget
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q gcc libc6-dev librocksdb-dev
+          qa/yellowback-ci-apt.sh gcc libc6-dev librocksdb-dev
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: node-bin
@@ -837,9 +837,9 @@ jobs:
         with:
           apt: 'false'
       - name: Install a C compiler (the Falcon signer of test_framework/pq.py) and librocksdb (koganyd)
+        timeout-minutes: 20   # apt is bounded (qa/yellowback-ci-apt.sh); never the job's whole budget
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q gcc libc6-dev librocksdb-dev
+          qa/yellowback-ci-apt.sh gcc libc6-dev librocksdb-dev
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: node-bin
@@ -929,9 +929,9 @@ jobs:
         with:
           apt: 'false'
       - name: Install a C compiler (the Falcon signer of test_framework/pq.py)
+        timeout-minutes: 20   # apt is bounded (qa/yellowback-ci-apt.sh); never the job's whole budget
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q gcc libc6-dev
+          qa/yellowback-ci-apt.sh gcc libc6-dev
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: node-bin
@@ -1576,9 +1576,9 @@ jobs:
         with:
           apt: 'false'
       - name: Install a C compiler (the Falcon signer test_pq.py exercises; audit 04/F-1)
+        timeout-minutes: 20   # apt is bounded (qa/yellowback-ci-apt.sh); never the job's whole budget
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q gcc libc6-dev
+          qa/yellowback-ci-apt.sh gcc libc6-dev
       - name: rpc-tests.py SKIP detection (--fail-on-skip; audit 04/F-1, 04/N-4)
         run: python3 qa/pull-tester/test_rpc_tests_classify.py -v
       - name: Vault chain-parameter extractor unit tests (audit W3-P-1)
@@ -1974,7 +1974,7 @@ jobs:
         # every file copied into <Target>/crashes/ is replayed by yellowback_fuzz_tests forever.
         run: |
           set -e
-          sudo apt-get install -y clang
+          qa/yellowback-ci-apt.sh clang
           # -fsanitize=fuzzer links libFuzzer's main(), so configure's own "C++ compiler works"
           # program (int main) fails to link with it in CXXFLAGS ("cannot create executables").
           # Instrument with fuzzer-no-link at configure time and add the runtime on the ycashd
