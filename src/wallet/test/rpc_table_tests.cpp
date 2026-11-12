@@ -88,28 +88,26 @@ std::set<std::string> AllRegisteredMethods()
 // The arguments a method's help signature (its first help line) names: {required, optional}. A quoted string, an
 // object or an array is one argument; everything inside "( ... )" is optional. "..." (more of the same) is not counted.
 // Rows whose count differs from a help signature that is abbreviated or out of date (the help is wrong, not the row:
-// each call takes what its row says). Kept so that a new mismatch fails; each is a help defect to fix on its own.
-const std::map<std::string, std::string> HELP_SIGNATURE_DIFFERS = {
-    {"getnewaddress", "the help signature line omits an optional argument the row has"},
-    {"prioritisetransaction", "angle-bracket placeholders with spaces (<priority delta>) read as several words"},
-    {"signrawtransaction", "the help signature line omits an optional argument the row has"},
-    {"stop", "the help signature line omits an optional argument the row has"},
-    {"yed_getbalance", "the help signature line omits an optional argument the row has"},
-    {"yed_listunspent", "the help signature line omits an optional argument the row has"},
-    {"z_listoperationids", "the help signature line omits an optional argument the row has"},
-    {"zcbenchmark", "the help signature line omits an optional argument the row has"},
-};
+// each call takes what its row says). Kept so that a new mismatch fails; each is a help defect to fix on its own. Empty
+// since WALLET-FOLLOW-4 item 5 fixed the seven help lines that omitted an optional argument (getnewaddress,
+// signrawtransaction, stop, yed_getbalance, yed_listunspent, z_listoperationids, zcbenchmark) and the parser learned
+// that an angle-bracket placeholder with spaces (prioritisetransaction's <priority delta>) is one argument.
+const std::map<std::string, std::string> HELP_SIGNATURE_DIFFERS = {};
 
 std::pair<size_t, size_t> HelpArgumentCounts(const std::string& line)
 {
     size_t required = 0, optional = 0;
     int parens = 0, depth = 0;
-    bool quoted = false, inToken = false, first = true;
+    bool quoted = false, angled = false, inToken = false, first = true;
     for (size_t i = 0; i < line.size(); i++) {
         const char c = line[i];
         if (quoted) {
             if (c == '\\') i++;
             else if (c == '"') quoted = false;
+            continue;
+        }
+        if (angled) {                                                       // <priority delta>: one placeholder
+            if (c == '>') angled = false;
             continue;
         }
         if (depth == 0) {
@@ -125,6 +123,7 @@ std::pair<size_t, size_t> HelpArgumentCounts(const std::string& line)
         if (c == '{' || c == '[') depth++;
         else if (c == '}' || c == ']') depth--;
         else if (c == '"') quoted = true;
+        else if (c == '<' && depth == 0) angled = true;
     }
     return {required, optional};
 }

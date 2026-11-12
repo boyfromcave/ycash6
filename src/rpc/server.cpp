@@ -1,6 +1,7 @@
 // Copyright (c) 2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
 // Copyright (c) 2019-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -283,8 +284,10 @@ UniValue stop(const UniValue& params, bool fHelp)
     // Accept the deprecated and ignored 'detach' boolean argument
     if (fHelp || params.size() > 1)
         throw runtime_error(
-            "stop\n"
-            "\nStop Ycash server.");
+            "stop ( detach )\n"
+            "\nStop Ycash server.\n"
+            "\nArguments:\n"
+            "1. detach   (boolean, optional) DEPRECATED and ignored; accepted for compatibility.\n");
     // Event loop will exit after current HTTP requests have been handled, so
     // this reply will get back to the client.
     StartShutdown();
