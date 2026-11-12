@@ -1212,6 +1212,7 @@ jobs:
         env:
           REF: ${{ github.base_ref || github.ref_name }}
           HEAD_REF: ${{ github.head_ref }}
+          GITHUB_TOKEN: ${{ github.token }}   # read-only: lists the other line's pull requests (public repository)
           INTERM: ${{ steps.line.outputs.interm }}
           QUANTUM: ${{ steps.line.outputs.quantum }}
         run: |
@@ -1229,9 +1230,11 @@ jobs:
           fi
           # A pull request into upgrade/vault carries a rule change the other line's upgrade/vault does not
           # have yet. When that same branch exists on the other line, compare with it (both lines land the
-          # change together). A missing branch keeps the upgrade/vault comparison above.
-          if [ "$other" = upgrade/vault ] && [ -n "$HEAD_REF" ] && git ls-remote --exit-code --heads "$url" "$HEAD_REF" >/dev/null; then
-            other=$HEAD_REF
+          # change together). A missing branch keeps the upgrade/vault comparison above, and so does a
+          # stale one (beta2 list item 63: the head of an already merged pull request, or a branch that adds
+          # nothing to upgrade/vault); qa/yellowback-other-line-branch.py decides and prints why.
+          if [ "$other" = upgrade/vault ] && [ -n "$HEAD_REF" ]; then
+            other=$(python3 qa/yellowback-other-line-branch.py --repo "$OTHER_LINE_REPO" --branch "$HEAD_REF")
           fi
           git fetch --no-tags --depth 1 "$url" "+refs/heads/$other:refs/remotes/other-line/head"
           echo "comparing with $OTHER_LINE_REPO $other @ $(git rev-parse --short other-line/head)"
