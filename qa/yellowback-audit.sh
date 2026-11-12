@@ -252,11 +252,12 @@ leg_attribution() {
   [ -z "$removed" ] || { echo "copyright lines removed (never allowed):"; echo "$removed"; fail=1; }
   hits=$(git grep -n -i 'ycash6' -- src || true)
   [ -z "$hits" ] || { echo "'ycash6' in src/ (the software is Ycash):"; echo "$hits"; fail=1; }
-  added=$(git diff "$base" HEAD -- src qa contrib doc | grep -aE '^\+[^+]' || true)
+  # This file names the patterns it looks for, so its own lines are not read as hits.
+  added=$(git diff "$base" HEAD -- src qa contrib doc ':!qa/yellowback-audit.sh' | grep -aE '^\+[^+]' || true)
   hits=$(printf '%s\n' "$added" | grep -aE 'ydollar|YDollar|\byd_' || true)
   [ -z "$hits" ] || { echo "retired YDollar naming:"; echo "$hits"; fail=1; }
   # Code only (doc/ prose may name the retired `feature/digidollar` branch).
-  hits=$(git diff "$base" HEAD -- src qa contrib | grep -aE '^\+[^+]' | grep -aEi 'digidollar' | grep -avE '^\+[[:space:]]*(//|#|\*|/\*)' || true)
+  hits=$(git diff "$base" HEAD -- src qa contrib ':!qa/yellowback-audit.sh' | grep -aE '^\+[^+]' | grep -aEi 'digidollar' | grep -avE '^\+[[:space:]]*(//|#|\*|/\*)' || true)
   [ -z "$hits" ] || { echo "DigiDollar naming outside a citing comment:"; echo "$hits"; fail=1; }
   return $fail
 }
