@@ -6614,6 +6614,17 @@ bool CWallet::SelectCoinsMinConf(const CAmount& nTargetValue, int nConfMine, int
     return true;
 }
 
+CAmount CWallet::PQSelectableValue() const
+{
+    // the post-quantum coins SelectCoins leaves out without coin control (confirmed, spendable; coinbase as SelectCoins)
+    vector<COutput> coins;
+    AvailableCoins(coins, std::nullopt, true, nullptr, false, !Params().GetConsensus().fCoinbaseMustBeShielded);
+    CAmount value = 0;
+    for (const COutput& o : coins)
+        if (o.fSpendable && IsPQInputScript(o.tx->vout[o.i].scriptPubKey)) value += o.tx->vout[o.i].nValue;
+    return value;
+}
+
 bool CWallet::SelectCoins(const CAmount& nTargetValue, set<pair<const CWalletTx*,unsigned int> >& setCoinsRet, CAmount& nValueRet,  bool& fOnlyCoinbaseCoinsRet, bool& fNeedCoinbaseCoinsRet, const CCoinControl* coinControl) const
 {
     // Output parameter fOnlyCoinbaseCoinsRet is set to true when the only available coins are coinbase utxos.
@@ -6625,6 +6636,17 @@ bool CWallet::SelectCoins(const CAmount& nTargetValue, set<pair<const CWalletTx*
     // If coinbase utxos can only be sent to zaddrs, exclude any coinbase utxos from coin selection.
     bool fShieldCoinbase = Params().GetConsensus().fCoinbaseMustBeShielded;
     vector<COutput> vCoins = (fShieldCoinbase) ? vCoinsNoCoinbase : vCoinsWithCoinbase;
+
+    // Beta2 (audit M-1, the lead architect's decision): without coin control -- sendtoaddress, sendmany and the
+    // atomic-swap calls -- only ordinary (ECC) coins are selected. A post-quantum coin is spent by naming its address
+    // in z_sendmany, which returns the change to it and signs with no lock held; CreateTransaction would move its
+    // change to an ECC key and sign post-quantum inputs under cs_main and cs_wallet. Coin control (fundrawtransaction,
+    // caller-named inputs) is unchanged.
+    if (!coinControl) {
+        vCoins.erase(std::remove_if(vCoins.begin(), vCoins.end(), [](const COutput& o) {
+            return IsPQInputScript(o.tx->vout[o.i].scriptPubKey);
+        }), vCoins.end());
+    }
 
     // Output parameter fNeedCoinbaseCoinsRet is set to true if coinbase utxos need to be spent to meet target amount
     if (fShieldCoinbase && vCoinsWithCoinbase.size() > vCoinsNoCoinbase.size()) {
@@ -6878,6 +6900,10 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
                         strFailReason = _("Coinbase funds can only be sent to a zaddr");
                     } else if (fNeedCoinbaseCoins) {
                         strFailReason = _("Insufficient funds, coinbase funds can only be spent after they have been sent to a zaddr");
+                    } else if (CAmount pqValue = coinControl ? 0 : PQSelectableValue(); pqValue > 0) {
+                        strFailReason = strprintf("Insufficient funds in ordinary transparent addresses; this wallet also holds %s YEC at "
+                                                  "post-quantum addresses: send from one with z_sendmany, which returns the change to it",
+                                                  FormatMoney(pqValue));
                     } else {
                         strFailReason = _("Insufficient funds");
                     }

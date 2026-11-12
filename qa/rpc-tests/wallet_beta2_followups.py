@@ -16,6 +16,9 @@ Wallet follow-ups found during beta2 (wt list items 21, 41, 44), one case each:
 - note_locks (list item 21c): a yed_mint funded from a Sapling address locks the notes it selected while its proofs
   run with no lock held, so a z_sendmany from the same address meanwhile is refused for want of notes (it used to
   select the same note, and one of the two failed late).
+- ecc_send (audit M-1, list item 21d, review L-4): sendtoaddress / sendmany select ordinary (ECC) coins only; with
+  too few of them and post-quantum coins in the wallet they are refused, naming the PQ value and z_sendmany; an
+  ECC send's inputs and change are ECC and leave the post-quantum balance as it was.
 
 Node 0 runs on a fresh wallet file (no coinbase of its own); node 1 mines and pays. The keys ahead of node 0's
 lookahead are issued by a copy of node 0's wallet taken before any post-quantum key was issued (same HD seed).
@@ -26,6 +29,7 @@ One file on both C++ lines (ycash-dd: BITCOIND=, ycash6: ZCASHD=).
 """
 
 import os
+import re
 import shutil
 import threading
 import time
@@ -242,11 +246,52 @@ class WalletBeta2FollowupsTest(BitcoinTestFramework):
         self.mine(2)                                  # the carrier, then the MINT the wallet commits on it
         self.mine()
 
+    # ---- item 4 / 11: the stock sends spend ECC coins only ----------------------------------------------------------
+
+    PQ_REFUSAL = re.compile(r'^Insufficient funds in ordinary transparent addresses; this wallet also holds ([0-9.]+) YEC at '
+                            r'post-quantum addresses: send from one with z_sendmany, which returns the change to it$')
+
+    def ecc_send(self):
+        print('ecc_send: sendtoaddress / sendmany spend ECC coins only')
+        n0, n1 = self.nodes
+        slh = n0.getnewaddress('', 'pqslh')
+        for _ in range(6):
+            n1.sendtoaddress(slh, Decimal('0.5'))
+        n1.sendtoaddress(n0.getnewaddress(), 2)
+        self.mine()
+        pq_before = D(n0.getwalletinfo()['balance_pq'])
+        unspent = n0.listunspent()
+        types = {u['address']: n0.validateaddress(u['address']) for u in unspent}
+        pq_free = sum(D(u['amount']) for u in unspent if 'pqscheme' in types[u['address']])
+        ecc_free = sum(D(u['amount']) for u in unspent if 'pqscheme' not in types[u['address']])
+        assert pq_free >= 3, pq_free
+        own = n0.getnewaddress()
+        for call in (lambda: n0.sendtoaddress(own, ecc_free + 1), lambda: n0.sendmany('', {own: ecc_free + 1})):
+            try:
+                call()
+                raise AssertionError('expected the ECC-only refusal')
+            except JSONRPCException as e:
+                m = self.PQ_REFUSAL.match(e.error['message'])
+                assert m, e.error['message']
+                assert_equal(D(m.group(1)), pq_free)
+        assert_equal(D(n0.getwalletinfo()['balance_pq']), pq_before)
+        print('an ECC send: ECC inputs, ECC change, the post-quantum balance unchanged')
+        txid = n0.sendtoaddress(n1.getnewaddress(), 1)
+        tx = n0.getrawtransaction(txid, 1)
+        for i in tx['vin']:
+            prev = n0.getrawtransaction(i['txid'], 1)['vout'][i['vout']]['scriptPubKey']
+            assert_equal(prev['type'], 'pubkeyhash')
+        for o in tx['vout']:
+            assert_equal(o['scriptPubKey']['type'], 'pubkeyhash')
+        self.mine()
+        assert_equal(D(n0.getwalletinfo()['balance_pq']), pq_before)
+
     def run_test(self):
         self.mine(ACTIVATION - self.nodes[0].getblockcount())
         self.topup_balance()
         self.vault_funding()
         self.note_locks()
+        self.ecc_send()
 
 
 if __name__ == '__main__':

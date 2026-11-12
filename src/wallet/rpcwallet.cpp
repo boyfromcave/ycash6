@@ -214,7 +214,7 @@ void EnsurePQAmountNotDust(const CTxDestination& dest, CAmount amount)
 static void RefusePQSource(const KeyIO& keyIO, const std::string& str, const std::string& method)
 {
     if (IsPQKeyDestination(keyIO.DecodeDestination(str)))
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, method + " cannot spend from a post-quantum address; use sendtoaddress or sendmany");
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, method + " cannot spend from a post-quantum address; use z_sendmany");
 }
 
 UniValue getnewaddress(const UniValue& params, bool fHelp)
@@ -245,8 +245,8 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
             "                  Falcon is active at the next block, SLH-DSA-SHA2-128s before (the YED holder policy, as\n"
             "                  yed_getnewaddress \"pq\"); \"pqslh\": always SLH-DSA-SHA2-128s (larger spends, hash-based only).\n"
             "                  Needs the vault upgrade active at the next block and an unlocked wallet.\n"
-            "                  A post-quantum address receives plain YEC; sendtoaddress/sendmany spend it (fee by size),\n"
-            "                  the z_* operations never pay or spend it.\n"
+            "                  A post-quantum address receives plain YEC; z_sendmany and z_mergetoaddress spend it (fee by\n"
+            "                  size, change back to it); sendtoaddress, sendmany and z_shieldcoinbase never do.\n"
 
             "\nResult:\n"
             "\"zcashaddress\"    (string) The new transparent Ycash address\n"
@@ -518,6 +518,8 @@ UniValue sendtoaddress(const UniValue& params, bool fHelp)
             "pool, and all the details of the transaction, including sender, recipient, and amount will be\n"
             "permanently visible on the public chain. THIS API PROVIDES NO PRIVACY, and should only be\n"
             "used when interoperability with legacy Bitcoin infrastructure is required.\n"
+            "\nOrdinary (ECC) coins only: a post-quantum coin is spent with z_sendmany from its address, which returns the\n"
+            "change to it; with too few ECC coins the call is refused, naming the post-quantum value.\n"
             + HelpRequiringPassphrase() +
             "\nArguments:\n"
             "1. \"zcashaddress\"  (string, required) The transparent Ycash address to send to.\n"
@@ -1960,6 +1962,8 @@ UniValue sendmany(const UniValue& params, bool fHelp)
     if (fHelp || params.size() < 2 || params.size() > 5)
         throw runtime_error(
             "sendmany \"\" {\"address\":amount,...} ( minconf \"comment\" [\"address\",...] )\n"
+            "\nOrdinary (ECC) coins only: a post-quantum coin is spent with z_sendmany from its address, which returns the\n"
+            "change to it; with too few ECC coins the call is refused, naming the post-quantum value.\n"
             "\nSend to multiple transparent recipients, using funds from the legacy transparent\n"
             "value pool. Amounts are decimal numbers with at most 8 digits of precision.\n"
             "Payments sent using this API are visible on-chain and do not otherwise\n"

@@ -2326,6 +2326,8 @@ public:
      * Create a new transaction paying the recipients with a set of coins
      * selected by SelectCoins(); Also create the change output, when needed
      */
+    /** Beta2 (audit M-1): the value of the post-quantum coins SelectCoins leaves out when there is no coin control. */
+    CAmount PQSelectableValue() const;
     bool CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletTx& wtxNew, CReserveKey& reservekey, CAmount& nFeeRet, int& nChangePosRet,
                            std::string& strFailReason, const CCoinControl *coinControl = NULL, bool sign = true);
 

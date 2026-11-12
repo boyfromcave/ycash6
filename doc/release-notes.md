@@ -4,6 +4,17 @@ release-notes at release time)
 Notable changes
 ===============
 
+`sendtoaddress` and `sendmany` spend ordinary (ECC) coins only
+--------------------------------------------------------------
+
+They never select a post-quantum coin (beta2, audit M-1; they used to, and sent its change to a new ECC key); a
+post-quantum coin is spent with `z_sendmany` from its `sq…` address, which returns the change to it and signs
+with no wallet lock held. When the ECC coins do not cover the amount and the wallet holds post-quantum coins,
+the call is refused with `Insufficient funds in ordinary transparent addresses; this wallet also holds <amount>
+YEC at post-quantum addresses: send from one with z_sendmany, which returns the change to it`.
+`fundrawtransaction` (coin control) is unchanged; `z_shieldcoinbase` from a post-quantum address now points to
+`z_sendmany`.
+
 `z_sendmany` and `z_mergetoaddress` move plain YEC between every address type
 ------------------------------------------------------------------------------
 
