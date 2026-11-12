@@ -148,6 +148,7 @@ BASE_SCRIPTS= [
     # beta2 review M1/m2: a YED token at an ECC holder key (minted before Falcon) is never spent by the stock paths.
     'wallet_yed_ecc_token.py',
     'wallet_beta2_followups.py',
+    'wallet_beta2_followups2.py',
     # Longest test should go first, to favor running tests in parallel
     # vv Tests less than 5m vv
     'wallet.py',

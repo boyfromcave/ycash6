@@ -4,6 +4,30 @@ release-notes at release time)
 Notable changes
 ===============
 
+Wallet follow-ups, second round (beta2)
+---------------------------------------
+
+- **No lock outlives a vault transaction (audit L-1).** `vault_lock` "from" a transparent or post-quantum address
+  locked the coins of an accepted lock for good (until a restart or `lockunspent true`), so a lock that expired or
+  was evicted unmined left them out of `listunspent`, `z_gettotalbalance` and every send. The vault RPCs now record
+  an accepted transaction in the wallet at once, as a send does, and keep no coin lock for it: its inputs are spent
+  by an unconfirmed transaction while it is in the mempool or the chain, and spendable again when it leaves the
+  mempool unmined. The same holds for the coins the default funding picks (`vault_lock` without "from", `set_*`,
+  `vault_release`, ...); the Sapling notes of a lock "from" a `ys1…` address, kept locked until a restart once the lock was accepted, are released at the end of the call and kept spent by the recorded transaction. A coin locked with `lockunspent` is never unlocked. The YEC inputs the
+  Yellowback wallet locks for a YED transaction (F-1) are handed back within about a second once it is mined or has
+  left the mempool unmined; they used to wait for the next YED build.
+- **`yed_mint` checks the whole mint before its carrier (YEW-FIX item 5).** A wallet that cannot fund the mint's
+  collateral, its fees and its carrier from the source (the default transparent coins, an `s1…` "from" or a `ys1…`
+  "from") is refused before anything is broadcast: `insufficient-yec: the mint needs <total> YEC (collateral <c>,
+  fees <f> with its carrier's), checked before its carrier is broadcast; nothing was sent: need …, have …`. It used
+  to broadcast the carrier and fail at the MINT.
+- **`z_validateaddress` answers for a post-quantum address (audit L-4).** It said `isvalid: false`; it now gives
+  ``address_type` (and the deprecated `type`) "pq"`, `ismine`, and `validateaddress`'s `pqscheme`, `pqschemename` and `pqkeyhash`. Its answers for
+  Sprout, Sapling, unified, P2PKH and P2SH addresses are unchanged.
+- **Help signatures.** The first help line of `getnewaddress`, `signrawtransaction` (`branchid`), `stop` (`detach`,
+  ignored), `yed_getbalance` and `yed_listunspent` (an ignored argument), `z_listoperationids` (`status`) and
+  `zcbenchmark` (its third argument) now names every argument the call accepts.
+
 Post-quantum addresses show their scheme (D-9, `rpcversion` 9)
 -------------------------------------------------------------
 
