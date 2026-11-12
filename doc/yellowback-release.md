@@ -354,7 +354,12 @@ release notes:
   (`listunspent` with `spendable` false, `getbalance` with `includeWatchonly`,
   `listtransactions` with `includeWatchonly`), never spendable or handed out while locked;
   `walletpassphrase` derives its key, marks it and moves the window past it, and the coin is
-  spendable. **What the file reveals:** the wallet's next `-keypool` + 1 transparent addresses per
+  spendable. A payment shown as watch-only while locked to a key ID the seed does not derive (a
+  tampered `legacytlookahead` record) disappears from the listings after the unlock, which rebuilds
+  the window from the seed; its transaction stays in `wallet.dat` with no output of the wallet's.
+  `getnewaddress` refuses while the wallet is locked (`Please enter the wallet passphrase with
+  walletpassphrase first.`), so a locked wallet hands out no transparent address at all.
+  **What the file reveals:** the wallet's next `-keypool` + 1 transparent addresses per
   chain, nothing more: no chain code and no public key of the account or a chain is stored, so no
   other key and no outgoing viewing key can be derived from the file, even with one exported private
   key. (An intermediate build of this release stored the legacy account's extended public key in
