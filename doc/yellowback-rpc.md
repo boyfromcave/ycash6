@@ -1957,7 +1957,10 @@ from that address's confirmed notes, largest-first — blocks for the proving ti
 confirmed from `yed_estimatecollateral`; the node refuses `collateral-above-max` at preflight,
 before the carrier, and again when the MINT is built on the confirmed carrier — then the carrier
 lapses and `yed_sweepcarriers` reclaims it — so a block or a price move between the estimate and
-the call never locks more than was agreed). Builds the §3.5
+the call never locks more than was agreed). Before the carrier is broadcast the preflight also dry-runs the
+selection of the whole mint (collateral, token, pool and attestor fees, the MINT's and the carrier's network fees) on
+the same source, and refuses `insufficient-yec` with nothing sent (beta2; it used to broadcast the carrier and fail
+at the MINT). Builds the §3.5
 MINT at `R = tip − REF_LAG` after the MINTPOL-1 gate (`Snapshots[R].activation == ACTIVE`,
 `haltMask == 0`, the cap has room — or, under a `GLOBAL_RATIO` halt or above the cap, the class
 is at or over `RECAP_RATIO_BPS`; W16, W20), draws one fresh key for the vault owner and the token output,
@@ -2851,7 +2854,7 @@ for a bad argument, `RPC_WALLET_ERROR` otherwise.
 | `bad-address` | `yed_mint` (`from`), `yed_redeem`, `yed_claim` (`to`; a claim's must be transparent) | the address is not an `s1…`/`sm…` or `ys1…` address of this network (a `yb…` YED address, a Sprout address, nonsense), or its Sapling spending key is not in this wallet: pass a `yed_getnewaddress` result as `from` |
 | `bad-mint-amount` | `yed_mint` | `cents` outside `[MIN_MINT, MAX_MINT]` |
 | `bad-xfer-amount` | `yed_send`, `yed_sendmany` | an amount outside `[MIN_OUTPUT, MAX_OUTPUT]` |
-| `insufficient-yec` | `yed_mint`, `yed_send`, `yed_sendmany`, `yed_claim` | the wallet (or the named `from` address) cannot cover collateral + fees from confirmed, unlocked outputs or notes (YED never pays the network fee); `yed_mint` checks the whole mint (collateral, its fees and the carrier's) before it broadcasts the carrier, so the refusal comes with nothing sent (beta2 WALLET-FOLLOW-4): `yed_mint … <an empty s1… address>` |
+| `insufficient-yec` | `yed_mint`, `yed_send`, `yed_sendmany`, `yed_claim` | the wallet (or the named `from` address) cannot cover collateral + fees from confirmed, unlocked outputs or notes (YED never pays the network fee): `yed_mint … <an empty s1… address>` |
 | `too-many-coins` | `yed_mint`, `yed_send`, `yed_sendmany`, `yed_claim`, `yed_claimnotice`, `yed_reportequivocation` | covering the YEC the transaction needs would take more than 400 plain YEC inputs or 75,000 estimated bytes of them even largest-first (the selector goes smallest-first and falls back to largest-first when that would cross either cap; cf. DigiByte v9.26.7 b54e3861). Message grammar: `too-many-coins: covering <amount> YEC would take more than 400 coins (or 75000 bytes of inputs); combine small coins first by sending them to yourself, then retry`: a wallet of 1,000 pool payouts of 0.00001 YEC funding a 0.005 YEC fee |
 | `vault-spend-pending` | `yed_redeem`, `yed_claim`, `yed_estimateredeem` (in `error`, no throw) | a transaction in this node's mempool already spends the vault (`yed_getvault.spendPending`; the message names its txid); checked before any coin is selected (cf. DigiByte v9.26.7 00136af6): `yed_redeem` twice before a block |
 | `carrier-record-failed` | `yed_mint`, `yed_claim`, `yed_claimnotice`, `yed_reportequivocation` | the carrier record could not be written to `<datadir>/yellowback/carriers.dat`, which is written **before** the carrier is committed (cf. DigiByte v9.26.7 38895edb): nothing was sent. A record whose commit then fails is removed again. Provoke with an unwritable `<datadir>/yellowback` |
