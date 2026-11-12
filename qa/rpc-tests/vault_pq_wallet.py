@@ -48,6 +48,7 @@ from test_framework.util import (
     start_nodes,
     stop_node,
     sync_blocks,
+    wait_and_assert_operationid_status,
     z_sendmany_opid,
 )
 

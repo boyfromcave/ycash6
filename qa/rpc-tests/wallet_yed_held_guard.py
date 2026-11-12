@@ -284,13 +284,13 @@ class WalletYedHeldGuardTest(YellowbackTestFramework):
                 assert_equal(e.error['message'], refusal)
             token_unspent()
 
-            print('  vault funding (set_create) with only the token selectable: insufficient funds')
+            print('  vault funding (set_create) with only the token selectable: refused, naming the token')
             assert node.lockunspent(False, [{'txid': plain['txid'], 'vout': plain['vout']}])
             try:
                 node.set_create({'seats': 1, 'unlockthreshold': 1, 'maturity': 2})
                 raise AssertionError('set_create funded its fee from the YED output')
             except JSONRPCException as e:
-                assert 'insufficient confirmed transparent funds' in e.error['message'], e.error['message']
+                assert refusal in e.error['message'], e.error['message']
             token_unspent()
             assert node.lockunspent(True, [{'txid': plain['txid'], 'vout': plain['vout']}])
 
