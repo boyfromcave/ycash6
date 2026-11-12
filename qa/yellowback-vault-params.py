@@ -62,7 +62,7 @@ EXPECTED_PQ_FALCON_HEIGHT = 0
 # Release stages (testnet plan §5.1): the tag's suffix names one. configure.ac renders BUILD < 25 as
 # -beta<N>, 25..49 as -rc<N>, 50 as the release and above 50 as -<N> (a later build of a release).
 STAGES = ("beta", "rc", "final")
-RELEASE_VERSION = re.compile(r"^(?P<line>\d+\.\d+)\.\d+(?:-(?P<pre>beta|rc)[1-9]\d*|-[1-9]\d*)?$")
+RELEASE_VERSION = re.compile(r"^(?P<line>\d+\.\d+)\.\d+(?:-(?P<pre>beta|rc)[1-9]\d*|-[1-9]\d*)?\Z")  # \Z: no trailing newline
 
 
 class ParseError(Exception):

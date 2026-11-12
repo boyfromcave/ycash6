@@ -22,7 +22,7 @@ is the procedure around it.
 | `ycashd_v<V>_<platform>.spdx.json` | an SPDX SBOM of each package (syft) | |
 | `SHA256SUMS` | the sha256 of every package and SBOM | |
 | `SHA256SUMS.cosign.bundle` | a keyless Sigstore signature of `SHA256SUMS` | |
-| `SHA256SUMS.minisig` | the owner's minisign signature of `SHA256SUMS`, added on the draft (below) | |
+| `SHA256SUMS.minisig` | the Yellowback lead architect's minisign signature of `SHA256SUMS`, added on the draft (below) | |
 
 Each package is a directory `ycashd_v<V>_<platform>/` holding stripped `ycashd`, `ycash-cli`,
 `ycash-tx`, `ycashd-wallet-tool` (`.exe` on Windows) and `COPYING`. No zk parameters ship or need
@@ -32,7 +32,7 @@ release to be drafted. Tier 2 jobs may fail; their asset is then missing from th
 Every build runs `qa/yellowback-release-smoke.sh` on the packaged binaries: each binary's version
 banner must be `v<V>`, and a throwaway regtest node must start on the vault upgrade, create a YED
 attestor set, restart naming it (so Yellowback is live), answer `getnetworkinfo` and `yed_getinfo`
-(`rpcversion` equal to `YELLOWBACK_RPC_VERSION` in `src/rpc/yellowback.cpp`, 8 today; upgrade active), and stop. The Windows `.exe` files are run on windows-latest
+(`rpcversion` equal to `YELLOWBACK_RPC_VERSION` in `src/rpc/yellowback.cpp` of the same tree; upgrade active), and stop. The Windows `.exe` files are run on windows-latest
 (version banners only). The 18.04 package's smoke test runs inside an `ubuntu:18.04` container,
 which also proves its glibc floor.
 
@@ -44,10 +44,17 @@ gitian descriptors are not maintained; Guix builds are a mainnet-launch item, te
 ## Signatures and provenance (testnet plan §5.2, T-6)
 
 In plain words: anyone can check that a download is the file this repository's release workflow
-built, and that the owner vouched for it, without trusting the download site.
+built, and that the Yellowback lead architect vouched for it, without trusting the download site.
 
 - **Build provenance.** Every package, every SBOM and `SHA256SUMS` carries a GitHub build
-  provenance attestation (SLSA build level 2): `gh attestation verify <file> -R boyfromcave/ycash6`.
+  provenance attestation (SLSA build level 2), checked against the release workflow at the tag:
+
+  ```
+  gh attestation verify <file> -R boyfromcave/ycash6 --source-ref refs/tags/v<V> \
+    --signer-workflow boyfromcave/ycash6/.github/workflows/yellowback-release.yml
+  ```
+
+  Without `--source-ref` the check also accepts a proving run's files (attested at a branch).
 - **Keyless cosign.** `SHA256SUMS.cosign.bundle` signs `SHA256SUMS`; its certificate names this
   workflow at the tag:
 
@@ -56,7 +63,7 @@ built, and that the owner vouched for it, without trusting the download site.
     --certificate-identity https://github.com/boyfromcave/ycash6/.github/workflows/yellowback-release.yml@refs/tags/v<V> \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com SHA256SUMS
   ```
-- **The owner's minisign key** (key id `02C923A6C593AF18`, public key
+- **The Yellowback lead architect's minisign key** (key id `02C923A6C593AF18`, public key
   `RWQYr5PFpiPJAigk86vf89bPYrJCXj5tskgRAPRYFsEXyciZo8dveOGQ`, also ycash-infra
   `keys/ycash-release.pub`) signs `SHA256SUMS` on the draft. The signature is not made here: the
   private ycash-ops repository's `sign-release` workflow (repo `ycash6`, tag `v<V>`, asset
@@ -100,10 +107,18 @@ Both are minor bumps over 6.20.0 because 6.20.x patch numbers belong to the upst
    and `src/clientversion.h`, plus the title line of `README.md`. Run `qa/yellowback-audit.sh`.
 2. **Write the notes** at `doc/release-notes/release-notes-<V>.md`. The release job refuses to run
    without them. Start from the previous one.
-3. **Proving run.** Push the branch and merge it to `upgrade/vault` once `yellowback tests`
-   is green. Then run the workflow by hand: Actions → *yellowback release* → *Run workflow* on
-   `upgrade/vault`. It builds, smoke-tests and uploads every package as a workflow artifact,
-   but creates no release. Download and spot-check at least one package.
+3. **Proving run (dry run).** Push the branch and merge it to `upgrade/vault` once `yellowback tests`
+   is green. Then run the workflow by hand on `upgrade/vault`:
+   `gh workflow run yellowback-release.yml -R boyfromcave/ycash6 --ref upgrade/vault` (input
+   `strict`, default true). A strict dispatch refuses exactly what the tag would (the version and
+   line, the stage rules, Vault parity with ycash-dd's pairing tag, or with ycash-dd `upgrade/vault`
+   while that tag does not exist), builds depends from source as the tag does (no cache; only
+   `strict=false` restores one), builds and smoke-tests every package, signs `SHA256SUMS`
+   (identity: the branch), and its `release-dry-run` job checks the signed set and the notes file
+   and prints the release the tag would create. It never creates a release and never starts
+   rc-qualify: those two jobs run on a pushed tag only, and a dispatch on a tag ref is refused (it
+   would sign with the tag's identity). `release-dry-run` runs only when strict. Download and spot-check at least one
+   package. Then prove the qualification on the same artifacts (rc-qualify, "Proving run" below).
 4. **Release train.** Add `releases/v<V>.yaml` to the workspace (`boyfromcave/yellowback`,
    its `releases/README.md`) by pull request: every component at the commit this release is
    qualified with, ycash6 at the commit you are about to tag. Its `release-train` check must pass.
@@ -117,7 +132,7 @@ Both are minor bumps over 6.20.0 because 6.20.x patch numbers belong to the upst
 6. **Draft and qualification (automatic).** The workflow drafts the release (pre-release for
    `-rc`/`-beta`) with every package, SBOM, `SHA256SUMS`, `SHA256SUMS.cosign.bundle` and the notes
    from step 2, then starts `rc-qualify` on the tag (below). Wait for its record.
-7. **Owner's signature.** In ycash-ops: Actions → *sign-release* → repo `ycash6`, tag `v<V>`,
+7. **The lead architect's signature.** In ycash-ops: Actions → *sign-release* → repo `ycash6`, tag `v<V>`,
    asset `SHA256SUMS`. It checks the provenance, signs and uploads `SHA256SUMS.minisig` to the draft.
 8. **Testnets (release candidates; manual, from ycash-ops).** Deploy the rc image to
    testnet-yb-fast, then testnet-yb-slow; testnet-legacy runs the same rc with Vault off (below).
@@ -144,12 +159,24 @@ reads the train from the workspace, and runs:
 | 3 | two ycash-dd nodes (built at the train's `vault-params` commit) on the devnet; block hash, vault and YED state hashes equal at every 100th height | `qa/yellowback-rc-qualify.sh cross-line`, `qa/yellowback-rc-crossline.py` |
 | 4 | the launch ceremony rehearsed on regtest with the fast and slow profiles' maturity | `qa/yellowback-rc-qualify.sh ceremony` (needs `contrib/testnet/ceremony`, N2) |
 
+**Proving run (before the tag).** rc-qualify can run on the proving run's artifacts, so a tag
+never meets it for the first time: once the release train (step 4) names the `upgrade/vault` head as
+`ycash6.commit` and `v<V>` as its tag (on a workspace branch is enough, input `train_ref`), dispatch
+`gh workflow run rc-qualify.yml -R boyfromcave/ycash6 --ref upgrade/vault -f proving_run=<run id>
+-f train_ref=<workspace branch>`, where `<run id>` is the green, strict dry run of step 3 at that
+same commit (its `release-dry-run` job green; the job refuses any other run, a branch other than
+`upgrade/vault` or `release/*`, and refuses again once `upgrade/vault` moves). A failing proving run
+opens no issue (the node suites' issue steps skip it). The candidate
+is that run's `release-signed` artifact, checked the same way (its cosign identity is the workflow
+at the branch); the record (`proving_run: true`) stays a workflow artifact and nothing is written
+to any release.
+
 The record, `rc-qualify-<run id>.json`, is uploaded to the release: each step's result, the train,
 the package's sha256, and `qualified` (true only when every step passed). Step 5, the 24-hour
 canary from rc2 on, needs the live testnet and is part of the deploy below.
 
 **Testnets (manual gate; deploys run from the private ycash-ops).** After a qualified record and
-the owner's signature:
+the Yellowback lead architect's signature:
 1. Build the rc's node image at the tag's commit (ycash-infra `node-image`, until the release image
    of §5.5 exists) and pin its digest in ycash-ops.
 2. ycash-ops *deploy*: network `yb-fast`, action `upgrade`. Watch it: no fork, no state-hash
@@ -224,11 +251,14 @@ When setting them in a release:
   (`.github/workflows/yellowback-release-guard.yml`) runs `qa/yellowback-release-heights.sh` and
   refuses the tag unless the version is a 6.22.x release version and the rules of its stage hold
   (below). It also refuses any compared Vault field that differs from ycash6 (`v<V>` when that tag
-  already exists, otherwise `upgrade/vault`).
+  already exists, otherwise `upgrade/vault`). Prove it before tagging: dispatch the guard on
+  ycash-dd `upgrade/vault` with `-f release_version=<V>`; it checks that commit exactly as the tag
+  would be checked (without the input a dispatch only warns).
 - Then tag ycash6 `v<V>`. This release workflow refuses the tag when `vault-params/v<V>` is
   missing on ycash-dd, when the stage's rules fail, or when any compared Vault field differs
-  (`qa/yellowback-release-heights.sh --release-version <V>`). A `workflow_dispatch` run only
-  warns, and compares with ycash-dd `upgrade/vault`.
+  (`qa/yellowback-release-heights.sh --release-version <V>`). A `workflow_dispatch` run (the
+  proving run, `strict` by default) applies the same rules, comparing with the pairing tag when it
+  exists, else with ycash-dd `upgrade/vault`; with `strict=false` it only warns.
 
 The rules (audit W3-P-1; testnet plan §5.1, T-8):
 
@@ -248,7 +278,7 @@ Which rules a tag needs depends on the stage its version names:
 | Tag | Required | Not required |
 |---|---|---|
 | `v6.22.N-betaM` | parity with ycash-dd, the mainnet set maturity, the 6.22 line; testnet-legacy without a height; R8's branch IDs | heights (H_S included), sets, protocol version |
-| `v6.22.N-rcM` | the above; R3–R6; R7 for the testnet: testnet-yb-fast's height **and** set; testnet-yb-slow's set only with its height (a height alone is its pending activation, T-15); mainnet's height and set both or neither; R8 (H_S and the checkpoint at H_S set) | R1 and R2: mainnet's height and set stay unset on an rc unless the owner sets both |
+| `v6.22.N-rcM` | the above; R3–R6; R7 for the testnet: testnet-yb-fast's height **and** set; testnet-yb-slow's set only with its height (a height alone is its pending activation, T-15); mainnet's height and set both or neither; R8 (H_S and the checkpoint at H_S set) | R1 and R2: mainnet's height and set stay unset on an rc unless the Yellowback lead architect sets both |
 | `v6.22.N` (final) | R1–R8 | — |
 
 `qa/yellowback-release-heights.sh` reads the stage from `--release-version` (or `--stage`); with

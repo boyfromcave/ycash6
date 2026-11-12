@@ -2068,7 +2068,8 @@ jobs:
           path: ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
           if-no-files-found: warn
       - name: Open an issue on failure
-        if: failure()
+        # Not for an rc-qualify proving run (release_package on a branch): its record is the report.
+        if: failure() && !(inputs.release_package && github.ref_type != 'tag')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -2267,7 +2268,8 @@ jobs:
           path: ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
           if-no-files-found: warn
       - name: Open an issue on failure
-        if: failure()
+        # Not for an rc-qualify proving run (release_package on a branch): its record is the report.
+        if: failure() && !(inputs.release_package && github.ref_type != 'tag')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -2353,7 +2355,8 @@ jobs:
           path: ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
           if-no-files-found: warn
       - name: Open an issue on failure
-        if: failure()
+        # Not for an rc-qualify proving run (release_package on a branch): its record is the report.
+        if: failure() && !(inputs.release_package && github.ref_type != 'tag')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -2449,7 +2452,8 @@ jobs:
             coverage-html
           if-no-files-found: ignore
       - name: Open an issue on failure
-        if: failure()
+        # Not for an rc-qualify proving run (release_package on a branch): its record is the report.
+        if: failure() && !(inputs.release_package && github.ref_type != 'tag')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
