@@ -15,7 +15,7 @@ is the procedure around it.
 |---|---|---|
 | `ycashd_v<V>_linux_x86_64.tar.gz` | ubuntu-22.04, native (glibc 2.35 floor) | 1 |
 | `ycashd_v<V>_linux_aarch64.tar.gz` | ubuntu-22.04-arm, native | 1 |
-| `ycashd_v<V>_macos_aarch64.tar.gz` | macos-14, native, `MACOSX_DEPLOYMENT_TARGET=11.0` | 1 |
+| `ycashd_v<V>_macos_aarch64.tar.gz` | macos-15, native, `MACOSX_DEPLOYMENT_TARGET=11.0` | 1 |
 | `ycashd_v<V>_windows.zip` | ubuntu-22.04, cross (`HOST=x86_64-w64-mingw32`, llvm-mingw from depends) | 1 |
 | `ycashd_v<V>_ubuntu_18.04_x86_64.tar.gz` | `contrib/legacy-glibc-build` (18.04 image, glibc ≤ 2.27) | 2 |
 | `ycashd_v<V>_macos_x86_64.tar.gz` | macos-15-intel, native | 2 |

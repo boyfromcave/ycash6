@@ -1093,8 +1093,8 @@ BOOST_AUTO_TEST_CASE(v3_armed_mint_passes_and_the_dry_run_names_the_rule)
     noCarrier.vin.pop_back();
     BOOST_CHECK_EQUAL(DryRun(a.view, a.P, CTransaction(noCarrier), a.R + 3)->verdict, verdict::MINT9_NO_BUNDLE);
     // mint10-diverged: attestors at 2x the pools.
-    const MicroUsd far = 4000000;
-    CMutableTransaction diverged = ArmedMint(a, 100000, a.BundleFor(none, far), ks, branchId, far);
+    const MicroUsd farPrice = 4000000;
+    CMutableTransaction diverged = ArmedMint(a, 100000, a.BundleFor(none, farPrice), ks, branchId, farPrice);
     BOOST_CHECK_EQUAL(DryRun(a.view, a.P, CTransaction(diverged), a.R + 3)->verdict, verdict::MINT10_DIVERGED);
     // afee1-fee: the attestor fee output missing while A is non-empty.
     CMutableTransaction noAfee = ArmedMint(a, 100000, bundle, ks, branchId, v.aMint, false);
