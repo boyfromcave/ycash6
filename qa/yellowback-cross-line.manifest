@@ -57,6 +57,14 @@ identical qa/rpc-tests/testnet_ceremony.py
 identical contrib/yellowback/devnet/testnet_join.py
 identical contrib/yellowback/devnet/test_testnet_join.py
 identical contrib/docker/ycashd/test_entrypoint.py
+# The beta2 functional scripts both lines run byte-identical (one file copied to both, briefing "Every PR"):
+# kept identical by this list, not by discipline (beta2 list item 71).
+identical qa/rpc-tests/wallet_address_matrix.py
+identical qa/rpc-tests/wallet_balance_by_type.py
+identical qa/rpc-tests/wallet_pq_fee_cap.py
+identical qa/rpc-tests/wallet_yed_ecc_token.py
+identical qa/rpc-tests/wallet_getnewaddress_type.py
+identical qa/rpc-tests/vault_lock_from.py
 tree contrib/bootstrap
 tree contrib/testnet
 tree contrib/yellowback/profiles
