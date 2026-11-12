@@ -115,7 +115,7 @@ __all__ = [
     'restart_with_yellowback', 'sync_all_nodes', 'node_pubkey', 'term_class_of', 'protocol_fee_cents', 'protocol_fee_zat',
     'vault_fee_zat', 'early_redeem_fee_zat', 'vault_early_redeem_fee_zat',
     'mint_vault_raw', 'redeem_vault_raw', 'malformed_vault_spend', 'mine_rejected_block',
-    'wait_for_rejection', 'debug_log_contains',
+    'wait_for_rejection', 'debug_log_contains', 'debug_log_lacks', 'wait_for_log', 'log_settle',
 ]
 
 # ---------------------------------------------------------------------------
@@ -1568,18 +1568,61 @@ def debug_log_lines(tmpdir, i):
     return lines
 
 
-def debug_log_contains(tmpdir, i, needle):
-    """True iff node ``i``'s regtest debug.log contains ``needle`` (a kogany + yewd pair: its
-    backend's log, ``node<i>/backend/zakurad.log``, is read too, since yewd's own debug.log
-    carries none of the node's lines; after ``restart_quiet`` the pair's output, a fatal stop's
-    reason among it, is in ``node<i>/stderr.txt``, and yewd's own lines in ``node<i>/yewd.log``:
-    both read too)."""
+# The node writes its log through a non-blocking writer: a line logged while an RPC ran can reach
+# the file after the RPC has returned (seen on loaded CI runners ~200 ms late). So a test that
+# expects a line waits for it (LOG_WAIT), and a test that expects a line to be ABSENT first lets
+# the writer catch up (LOG_SETTLE). A node that has exited has flushed its log (a SIGKILL may
+# drop the last lines): a read after the exit needs neither.
+LOG_WAIT = 30       # seconds a positive expectation polls for its line
+LOG_SETTLE = 2      # seconds a negative expectation lets the writer drain first (10x the lag seen)
+
+
+def wait_for_log(read, found, timeout=LOG_WAIT):
+    """``read()`` once ``found(read())`` holds, polled every 0.2 s for up to ``timeout`` seconds;
+    the last read when it never does (the caller's assertion then reports it)."""
+    deadline = time.time() + timeout
+    while True:
+        text = read()
+        if found(text) or time.time() >= deadline:
+            return text
+        time.sleep(0.2)
+
+
+def log_settle(settle=LOG_SETTLE):
+    """Before a check that a line is absent from a running node's log: let the writer drain."""
+    time.sleep(settle)
+
+
+def _kogany_skips(tmpdir, i, needle):
     backend = os.path.join(tmpdir, 'node%d' % i, 'backend', 'zakurad.log')
     why = [r for k, r in KOGANY_NO_SUCH_LOG.items() if needle == k or (k.endswith(' ') and needle.startswith(k))]
     if os.path.exists(backend) and why:
         print('  [kogany pair] %r skipped: %s' % (needle, why[0]))
         return True
-    return any(needle in l for l in debug_log_lines(tmpdir, i))
+    return False
+
+
+def debug_log_contains(tmpdir, i, needle, timeout=LOG_WAIT):
+    """True iff node ``i``'s regtest debug.log contains ``needle``, waiting up to ``timeout``
+    seconds for it (``LOG_WAIT``: the log writer is non-blocking; ``timeout=0`` reads once, for a
+    node that has exited or a caller that polls itself). A check that a line is absent uses
+    ``debug_log_lacks``. (A kogany + yewd pair: its backend's log, ``node<i>/backend/zakurad.log``,
+    is read too, since yewd's own debug.log carries none of the node's lines; after
+    ``restart_quiet`` the pair's output, a fatal stop's reason among it, is in
+    ``node<i>/stderr.txt``, and yewd's own lines in ``node<i>/yewd.log``: both read too.)"""
+    if _kogany_skips(tmpdir, i, needle):
+        return True
+    has = lambda lines: any(needle in l for l in lines)
+    return has(wait_for_log(lambda: debug_log_lines(tmpdir, i), has, timeout))
+
+
+def debug_log_lacks(tmpdir, i, needle, settle=LOG_SETTLE):
+    """True iff node ``i``'s logs (``debug_log_contains``) do not contain ``needle`` once the
+    writer has had ``settle`` seconds to drain (``settle=0`` for a node that has exited)."""
+    if _kogany_skips(tmpdir, i, needle):
+        return True
+    log_settle(settle)
+    return not any(needle in l for l in debug_log_lines(tmpdir, i))
 
 
 # ---------------------------------------------------------------------------

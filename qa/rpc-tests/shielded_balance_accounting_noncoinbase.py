@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 The Zcash developers
+# Copyright (c) 2026 The Ycash developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -23,6 +24,7 @@ import os
 
 from test_framework.blocktools import solve_block_from_template, txs_from_template
 from test_framework.test_framework import BitcoinTestFramework
+from test_framework.yellowback_util import log_settle
 from test_framework.util import (
     BLOSSOM_BRANCH_ID,
     CANOPY_BRANCH_ID,
@@ -67,6 +69,7 @@ class ShieldedBalanceAccountingNoncoinbaseTest(BitcoinTestFramework):
         self.is_network_split = False
 
     def assert_no_abort(self):
+        log_settle()    # the log writer is non-blocking: let it drain before checking a line is absent
         debug_log = os.path.join(self.options.tmpdir, "node0", "regtest", "debug.log")
         with open(debug_log, encoding="utf8") as f:
             log = f.read()

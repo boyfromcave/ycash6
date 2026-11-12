@@ -262,7 +262,7 @@ class WalletSeedRestoreEccTest(BitcoinTestFramework):
         assert_equal(after['txcount'], before['txcount'] - 1)
         assert_equal(after['listtransactions'], before['listtransactions'] - 1)
         assert all(a in restored for a in in_order)
-        log = self.debug_log()
+        log = self.wait_log(0, 'the key lookahead moved during the scan; re-checking heights')
         assert 'the key lookahead moved during the scan; re-checking heights' in log
 
         print('held keys appear in no listing and no dump before they are issued or paid')
@@ -407,13 +407,14 @@ class WalletSeedRestoreEccTest(BitcoinTestFramework):
         n0 = self.nodes[0]
         connect_nodes_bi(self.nodes, 0, 1)
         sync_blocks(self.nodes)
-        log = self.debug_log()[logpos:]
+        log = self.wait_log(logpos, 'Actual scanning started at height 0', "The restore's scan from height 0 is complete")
         assert 'Actual scanning started at height 0' in log
         assert "The restore's scan from height 0 is complete" in log
         assert_equal(n0.getwalletinfo()['restore_in_progress'], False)
         assert_equal(self.snapshot()['utxos'], restored_utxos)
         logpos = len(self.debug_log())
         n0 = self.restart0('eccinterrupted.dat', later)
+        time.sleep(2)                       # the writer is non-blocking: let it drain before checking a line is absent
         assert 'has not completed its scan' not in self.debug_log()[logpos:]
         assert_equal(n0.getwalletinfo()['restore_in_progress'], False)
         assert_equal(self.snapshot()['utxos'], restored_utxos)
@@ -454,7 +455,7 @@ class WalletSeedRestoreEccTest(BitcoinTestFramework):
         lb_export = n0.z_exportwallet('lbexport')
         logpos = len(self.debug_log())
         n0 = self.restart0('lbrestored.dat', ['-mnemonicfile=%s' % lb_export])
-        log = self.debug_log()[logpos:]
+        log = self.wait_log(logpos, 'the re-check found 1 more transaction(s)\n')
         assert_equal(log.count('re-checking heights'), 1)
         assert 'the re-check found 1 more transaction(s)\n' in log
         assert_equal(sorted((u['address'], Decimal(u['amount'])) for u in n0.listunspent(0)),

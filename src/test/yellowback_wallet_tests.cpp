@@ -791,7 +791,10 @@ BOOST_AUTO_TEST_CASE(remove_orphan_drops_spend_indexes)
     wallet->SetBroadcastTransactions(true);
     const CKey key = CKey::TestOnlyRandomKey(true);
     const CScript mine = GetScriptForDestination(key.GetPubKey().GetID());
-    BOOST_REQUIRE(wallet->AddKey(key));
+    {
+        LOCK(wallet->cs_wallet);   // AddKeyPubKey asserts it (mapKeyMetadata); cs_main before cs_wallet
+        BOOST_REQUIRE(wallet->AddKey(key));
+    }
     CMutableTransaction parent;
     parent.vin.push_back(CTxIn(COutPoint(uint256S("03"), 0)));
     parent.vout.push_back(CTxOut(50000, mine));

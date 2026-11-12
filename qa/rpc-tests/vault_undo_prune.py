@@ -34,7 +34,7 @@ from test_framework.util import (
     start_nodes,
     stop_node,
 )
-from test_framework.yellowback_util import YCASH_UPGRADE_ARGS
+from test_framework.yellowback_util import YCASH_UPGRADE_ARGS, log_settle, wait_for_log
 
 ACTIVATION = 20
 UNDO_KEEP = 4096          # src/vault/db.h
@@ -90,9 +90,11 @@ class VaultUndoPruneTest(BitcoinTestFramework):
         assert_equal(n.vault_getinfo()['active'], True)
         h0 = self.assert_db_at_tip('after mining')
 
+        want = ['vault: pruned undo of %s at %d' % (n.getblockhash(h), h) for h in range(ACTIVATION, ACTIVATION + 4)]
+        wait_for_log(self.log, lambda log: all(line in log for line in want))
+        log_settle()                                                      # and the absent lines below stay absent
         log = self.log()
-        for h in range(ACTIVATION, ACTIVATION + 4):
-            line = 'vault: pruned undo of %s at %d' % (n.getblockhash(h), h)
+        for line in want:
             assert line in log, 'missing "%s" in debug.log' % line
         assert 'vault: pruned undo of %s ' % n.getblockhash(ACTIVATION + 4) not in log
         assert 'vault: pruned undo of %s ' % n.getblockhash(ACTIVATION - 1) not in log

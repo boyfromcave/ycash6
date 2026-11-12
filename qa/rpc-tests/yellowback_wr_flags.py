@@ -42,6 +42,7 @@ from test_framework.yellowback_util import (
     REF_LAG,
     USER,
     YellowbackTestFramework,
+    wait_for_log,
 )
 from test_framework.yellowback_attest import ArmedModeMixin
 
@@ -110,8 +111,12 @@ class YellowbackWrFlagsTest(ArmedModeMixin, YellowbackTestFramework):
         """Wallet transactions -deletetx has removed on node i, from its own accounting
         ("Deleted spent wtx" / "Deleted expired/conflicted wtx", one line each, -debug=deletetx)."""
         log = os.path.join(self.options.tmpdir, 'node%d' % i, 'regtest', 'debug.log')
-        with open(log, encoding='utf8', errors='replace') as f:
-            return len(re.findall(r'Deleted (?:spent|expired/conflicted) wtx ', f.read()))
+
+        def read():
+            with open(log, encoding='utf8', errors='replace') as f:
+                return f.read()
+        pattern = r'Deleted (?:spent|expired/conflicted) wtx '
+        return len(re.findall(pattern, wait_for_log(read, lambda text: re.search(pattern, text))))
 
     def notes(self, node, addr):
         return node.z_listunspent(0, 9999999, False, [addr])
@@ -205,17 +210,23 @@ class YellowbackWrFlagsTest(ArmedModeMixin, YellowbackTestFramework):
         cons = self.wait_consolidation_txs(user)
         assert_equal(len(cons), 1)                                 # the commit happened (one address, one transaction)
         spent_by_cons = len(user.getrawtransaction(cons[0], 1)['vShieldedSpend'])
-        # The batch takes a random 10..44 notes, so it may hold every note of ys (the 25 YEC one
-        # too). Then the wallet has nothing confirmed and unspent there until it confirms, and the
-        # mint must be refused cleanly (insufficient-yec), never build on a note already spent in
-        # the mempool; it goes through one block later.
+        # The batch takes a random 10..44 notes, so it may hold the note that funds the mint (the
+        # change of round 1's mint), not necessarily every note. Then what is left confirmed and
+        # unspent there cannot fund it until the batch confirms, and the mint must be refused
+        # cleanly (insufficient-yec), never build on a note already spent in the mempool; it goes
+        # through one block later.
+        left_value = None
         try:
             mint2 = self.mint(user, 10000, 48, ys)                 # the carrier block also mines the consolidation
             print('  mint went through beside the pending consolidation')
         except Exception as e:
             assert 'insufficient-yec' in str(e), str(e)
-            assert_equal(spent_by_cons, before)                    # refused only because every note is in the batch
-            print('  consolidation holds all %d notes: mint refused (insufficient-yec), retried after it confirms' % before)
+            # the notes outside the batch (confirmed; the batch's own output is unconfirmed) are
+            # exactly the unspent rest; below, they are shown to be short of the mint's collateral
+            left = [n for n in self.notes(user, ys) if n['confirmations'] > 0]
+            assert_equal(len(left), before - spent_by_cons)
+            left_value = sum(n['amount'] for n in left)
+            print('  consolidation holds %d of %d notes, %s YEC left outside it: mint refused (insufficient-yec), retried after it confirms' % (spent_by_cons, before, left_value))
             self.mine(POOLS[0])
             mint2 = self.mint(user, 10000, 48, ys)
         assert_equal(mint2['fundedFrom'], 'sapling')
@@ -223,6 +234,11 @@ class YellowbackWrFlagsTest(ArmedModeMixin, YellowbackTestFramework):
         assert_equal(nodes[2].yed_gettxinfo(mint2['txid'])['verdict'], 'ok')
         assert_greater_than(user.gettransaction(cons[0])['confirmations'], 0)   # confirmed alongside the mint's carrier
         assert_equal(user.yed_getvault(mint2['txid'])['status'], 'ACTIVE')
+        if left_value is not None:
+            # refused only because the batch held the funding: the shielded value the mint draws
+            # (valueBalance = its transparent outputs, the vault's collateral among them, plus its
+            # fee) is more than the notes outside the batch held
+            assert_greater_than(Decimal(user.getrawtransaction(mint2['txid'], 1)['valueBalance']), left_value)
         assert_equal(user.yed_getbalance()['confirmedCents'], 20000)
         after = len(self.notes(user, ys))
         assert after < before, (before, after, spent_by_cons)      # consolidation really collapsed notes

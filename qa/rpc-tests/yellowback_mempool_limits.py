@@ -64,6 +64,7 @@ from test_framework.yellowback_util import (
     build_vault_spend_raw,
     conventional_fee,
     debug_log_contains,
+    debug_log_lacks,
     vault_fee_zat,
     mine_block_raw,
     mint_vault_raw,
@@ -347,7 +348,7 @@ class YellowbackMempoolLimitsTest(YellowbackTestFramework):
         after = self.pool_state('after the sweep')
         assert_equal(after, before)                              # S and C gone, every filler kept
         assert debug_log_contains(self.options.tmpdir, USER, 'dropping %s from the mempool at the new tip' % s_txid)
-        assert not debug_log_contains(self.options.tmpdir, USER, 'dropping %s from the mempool at the new tip' % c_txid)  # C went with S (recursive remove)
+        assert debug_log_lacks(self.options.tmpdir, USER, 'dropping %s from the mempool at the new tip' % c_txid)  # C went with S (recursive remove)
         for i in POOLS:
             wait_for_mempool(nodes[i], s_txid, present=False)
             wait_for_mempool(nodes[i], c_txid, present=False)
@@ -475,7 +476,7 @@ class YellowbackMempoolLimitsTest(YellowbackTestFramework):
         assert_equal(c_exp, built_at + 1 + TX_EXPIRING_SOON_THRESHOLD)     # the carrier itself sits on the boundary
         self.raw_block([user.gettransaction(carrier)['hex']])
         deadline = time.time() + 30
-        while not debug_log_contains(self.options.tmpdir, USER, 'expiring-too-soon'):
+        while not debug_log_contains(self.options.tmpdir, USER, 'expiring-too-soon', timeout=0):   # the loop polls
             assert time.time() < deadline, 'the pending mint at lag 36 neither completed nor refused'
             for t in user.getrawmempool():
                 assert carrier not in [v.get('txid') for v in user.getrawtransaction(t, 1)['vin']], \

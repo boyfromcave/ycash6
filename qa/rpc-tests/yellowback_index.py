@@ -59,6 +59,7 @@ from test_framework.yellowback_util import (
     assert_same_statehash,
     debug_log_contains,
     debug_log_lines,
+    log_settle,
     mine_rejected_block,
     mint_vault_raw,
     redeem_vault_raw,
@@ -324,7 +325,7 @@ class YellowbackIndexTest(YellowbackTestFramework):
         # The SIGKILL exit (wait_crashed) is the fault firing at the armed height, the rejected block's. Its log line is
         # written through the non-blocking log writer, whose last lines a SIGKILL can drop (seen on CI): when it is
         # there it must name this block; when it is lost, the restart below still has to judge the stored block.
-        if debug_log_contains(tmpdir, 3, 'crash before judging block '):
+        if debug_log_contains(tmpdir, 3, 'crash before judging block ', timeout=0):    # node 3 has exited
             assert debug_log_contains(tmpdir, 3, 'crash before judging block %s' % rejected), 'node 3 did not crash at the block'
         else:
             print('  (node 3\'s last log lines were lost to the SIGKILL; the crash is its exit status)')
@@ -333,6 +334,7 @@ class YellowbackIndexTest(YellowbackTestFramework):
         wait_for_rejection([nodes[3]], rejected)
         assert debug_log_contains(tmpdir, 3, 'block %s at' % rejected) and debug_log_contains(tmpdir, 3, 'is invalid: vault-spend-malformed'), \
             'node 3 did not judge the stored block at restart'
+        log_settle()                                    # a negative check: let the log writer drain first
         n2 = [l for l in debug_log_lines(tmpdir, 3) if rejected in l and 'N2)' in l]
         assert not n2, 'node 3 accepted the stored block under N2: %s' % n2
         wait_for_rejection(self.enforcing_nodes(), rejected)
