@@ -312,11 +312,20 @@ class VaultPQWalletTest(BitcoinTestFramework):
         self.mine(1)
         locked0 = [{'txid': u['txid'], 'vout': u['vout']} for u in n0.listunspent(0) if u.get('address') != pq0]
         assert n0.lockunspent(False, locked0)
-        txid = n0.sendtoaddress(n1.getnewaddress(), 1)
+        # the wallet's own pricing of a PQ input (CreateTransaction): sendtoaddress selects ECC coins only (beta2 audit
+        # M-1), so the PQ coin is named in a raw transaction that fundrawtransaction prices
+        coin0 = [u for u in n0.listunspent(1, 9999999, [pq0])]
+        assert_equal(len(coin0), 1)
+        funded = n0.fundrawtransaction(n0.createrawtransaction([{'txid': coin0[0]['txid'], 'vout': coin0[0]['vout']}],
+                                                               {n1.getnewaddress(): 1}))
+        signed = n0.signrawtransaction(funded['hex'])
+        assert_equal(signed['complete'], True)
+        txid = n0.sendrawtransaction(signed['hex'])
         assert n0.lockunspent(True, locked0)
         tx = self.tx_of(txid)
+        assert_equal([(i['txid'], i['vout']) for i in tx['vin']], [(coin0[0]['txid'], coin0[0]['vout'])])
         assert_equal(len(tx['vin'][0]['scriptSig']['hex']) // 2, SLH_PQPKH_SCRIPTSIG)
-        fee = -zat(n0.gettransaction(txid)['fee'])
+        fee = zat(funded['fee'])
         assert fee >= conventional_fee(tx), (fee, conventional_fee(tx))      # ~27,000, where the size rate gives ~8,100
         self.mine(1)
         assert self.tx_of(txid)['confirmations'] >= 1
