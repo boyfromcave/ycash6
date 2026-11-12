@@ -63,6 +63,7 @@ vault    vault_bridge                  gate    W9
 vault    vault_pq                      gate    W9
 vault    vault_pq_wallet               report  W9
 vault    vault_pq_wallet_restore       report  W9
+vault    vault_lock_from               report  W9
 vault    wallet_pq_address             report  W9
 vault    wallet_balance_by_type        report  W9
 vault    wallet_getnewaddress_type     report  W9
@@ -136,6 +137,7 @@ sidecar  vault_bridge                  report  W9     # vault
 sidecar  vault_pq                      report  W9     # vault
 sidecar  vault_pq_wallet               report  W9     # vault
 sidecar  vault_pq_wallet_restore       report  W9     # vault
+sidecar  vault_lock_from               report  W9     # vault
 sidecar  wallet_pq_address             report  W9     # vault
 sidecar  wallet_balance_by_type        report  W9     # vault
 sidecar  wallet_getnewaddress_type     report  W9     # vault
@@ -204,6 +206,7 @@ pair     vault_bridge                  report  W9     # vault
 pair     vault_pq                      report  W9     # vault
 pair     vault_pq_wallet               report  W9     # vault
 pair     vault_pq_wallet_restore       report  W9     # vault
+pair     vault_lock_from               report  W9     # vault
 pair     wallet_pq_address             report  W9     # vault
 pair     wallet_balance_by_type        report  W9     # vault
 pair     wallet_getnewaddress_type     report  W9     # vault
