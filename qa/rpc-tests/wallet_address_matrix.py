@@ -90,6 +90,8 @@ LOCKED = 'Please enter the wallet passphrase with walletpassphrase first'
 NO_PQ_UTXOS = 'Insufficient transparent funds, no UTXOs found for taddr from address.'
 NO_MERGE_FUNDS = 'Could not find any funds to merge.'
 YED_REFUSED = 'refusing to spend a Yellowback outpoint as plain YEC: '
+# an output read from its payload while the index has not judged its transaction (review 3 MEDIUM-1)
+YED_PENDING = 'refusing to spend an output that may carry YED as plain YEC before the Yellowback index judges its transaction: '
 UNLOCK_ACK = 'I understand this burns YED'
 
 
@@ -566,7 +568,7 @@ class WalletAddressMatrixTest(BitcoinTestFramework):
                 break
             time.sleep(1)
         assert_equal(r[0]['status'], 'failed')
-        assert YED_REFUSED + '%s:1' % mint_txid in r[0]['error']['message'], r[0]['error']['message']
+        assert YED_PENDING + '%s:1' % mint_txid in r[0]['error']['message'], r[0]['error']['message']
         n0.yed_lockcoins()
         self.mine(1)
 
