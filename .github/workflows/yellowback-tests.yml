@@ -1598,6 +1598,13 @@ jobs:
       - name: kogany mixed shard manifest (every YELLOWBACK_SCRIPTS entry grouped or excluded)
         if: ${{ !cancelled() }}
         run: python3 qa/test_kogany_mixed_shards.py -v
+      - name: Index profiles the functional scripts run under (report only; beta2 list item 17)
+        # P0 default, P1 txindex, P2 insight, P3 lightwalletd, P4 module live (the address plan's section 6),
+        # read from each script's flags or its "# index-profiles:" line, so a run says which profiles it tested.
+        if: ${{ !cancelled() }}
+        run: |
+          # shellcheck disable=SC2086  # the lists are space-separated names, split on purpose
+          python3 qa/yellowback-index-profiles.py $YELLOWBACK_SCRIPTS $STOCK_BASELINE $NIGHTLY_SCRIPTS
       - name: Testnet tooling unit tests (testnet plan N2; offline)
         if: ${{ !cancelled() }}
         run: python3 -m unittest contrib/yellowback/profiles/test_ybprofile.py contrib/bootstrap/test_ycash_bootstrap.py contrib/testnet/ceremony/test_ceremony.py contrib/docker/ycashd/test_entrypoint.py contrib/yellowback/devnet/test_testnet_join.py
