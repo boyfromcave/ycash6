@@ -359,11 +359,12 @@ release notes:
   other key and no outgoing viewing key can be derived from the file, even with one exported private
   key. (An intermediate build of this release stored the legacy account's extended public key in
   clear, `legacytaccountpub`; with one leaked private key it gave every legacy transparent key, and
-  alone the legacy shielding OVKs. This release erases that record at load and rewrites the wallet
-  file, logging `erased the transparent account's extended public key`; its bytes stay in the
-  database log under `database/` until the node removes its log files, at the latest at a clean
-  shutdown (which removes `database/`; after a crash, at the next clean shutdown), and in any copy or
-  backup made before.) The window cannot move while locked, so
+  alone the legacy shielding OVKs. This release erases that record from the wallet's database at load,
+  logging `erased the transparent account's extended public key`, and does not force a rewrite of
+  `wallet.dat`; the erased bytes may remain in free pages of the file and in the database log until
+  the file is next rewritten or compacted, and in any copy or backup made before. No released build
+  wrote the record: anyone who ran an intermediate build on a wallet they care about should restore
+  the recovery phrase into a new wallet file.) The window cannot move while locked, so
   `getwalletinfo` `lookahead_incomplete` is set when a payment leaves fewer than `-keypool` + 1
   addresses the wallet holds or watches beyond it on its chain: a later payment past them (another
   wallet of the same seed issued them) would be missed. An ordinary block, the wallet's own

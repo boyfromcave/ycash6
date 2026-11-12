@@ -7964,16 +7964,16 @@ DBErrors CWallet::LoadWallet(bool& fFirstRunRet)
     if (fObsoleteLegacyTAccountPub) {
         // Review 3 H-1: an intermediate build of this release stored the legacy transparent account's extended public
         // key in clear ("legacytaccountpub"); its chain code gives anyone with a copy of the file and one leaked key every
-        // legacy transparent key, and the file alone the legacy shielding OVKs. Erase it, then rewrite the file (as
-        // encryptwallet does) so its bytes do not stay in a free page of wallet.dat. The database log under database/
-        // holds them until the environment removes its log files (at the latest at a clean shutdown); a copy or backup
-        // made before keeps them.
+        // legacy transparent key, and the file alone the legacy shielding OVKs. Erase the record and log it. The file is
+        // NOT rewritten here (review 4): CDB::Rewrite removes wallet.dat and renames the copy, and a crash between the two
+        // loses the wallet file, while no released build ever wrote the record (only local test wallets carry it). The
+        // erased bytes may stay in free pages of wallet.dat and in the database log until the file is next rewritten or
+        // compacted, and in any copy or backup made before.
         if (!CWalletDB(strWalletFile).EraseObsoleteLegacyTAccountPub()) {
             LogPrintf("LoadWallet: error: erasing the transparent account's extended public key (legacytaccountpub) failed\n");
         } else {
-            const bool rewritten = !bitdb.IsMock() && CDB::Rewrite(strWalletFile);   // (a unit test's database is in memory)
             LogPrintf("LoadWallet: erased the transparent account's extended public key an earlier build stored in clear "
-                      "(legacytaccountpub)%s\n", rewritten ? "; the wallet file was rewritten" : "; rewriting the wallet file failed");
+                      "(legacytaccountpub)\n");
         }
         fObsoleteLegacyTAccountPub = false;
     }

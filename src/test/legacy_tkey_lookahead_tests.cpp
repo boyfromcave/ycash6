@@ -386,7 +386,8 @@ BOOST_AUTO_TEST_CASE(lookahead_key_ids)
         bool fFirstRun;
         BOOST_REQUIRE_EQUAL(w.LoadWallet(fFirstRun), DB_LOAD_OK);
         LOCK(w.cs_wallet);
-        // the old record is erased at load, never read
+        // the old record is erased from the logical database at load, never read (the file is not rewritten, so its
+        // bytes may stay in a free page: nothing here checks raw bytes)
         BOOST_CHECK(!w.fObsoleteLegacyTAccountPub);
         BOOST_CHECK(!RawWalletDB(file).Exists(std::string("legacytaccountpub")));
         // the tampered record is loaded, then checked against the seed and rewritten at the first unlocked top-up
