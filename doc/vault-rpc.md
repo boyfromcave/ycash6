@@ -320,7 +320,7 @@ with change to a new wallet address. With it:
 | `from` | spends | fee | change |
 |---|---|---|---|
 | a transparent P2PKH address (`s1…`/`t…`) | that address's confirmed, unlocked coins, largest first | from the signed size: max(10,000 zat, the relay fee, the ZIP-317 conventional fee) | back to the same address (from 1,000 zat; less joins the fee) |
-| a plain-YEC post-quantum address (`TX_PQPKH`, scheme 1 SLH-DSA or 2 FN-DSA-512) | that address's confirmed, unlocked `TX_PQPKH` coins, largest first, signed under the next block's vault flags | as `sendtoaddress` prices a PQ input: max(10,000 zat, the plain PQ rate x the signed size) capped at the vault/Yellowback cap, never below the ZIP-317 conventional fee | back to the same PQ address (D-4) when above its dust threshold priced at the PQ spend size; less joins the fee |
+| a plain-YEC post-quantum address (`TX_PQPKH`; `sqs…`/`tqs…`/`rqs…` scheme 1 SLH-DSA, `sqf…`/`tqf…`/`rqf…` scheme 2 FN-DSA-512, D-9) | that address's confirmed, unlocked `TX_PQPKH` coins, largest first, signed under the next block's vault flags | as `sendtoaddress` prices a PQ input: max(10,000 zat, the plain PQ rate x the signed size) capped at the vault/Yellowback cap, never below the ZIP-317 conventional fee | back to the same PQ address (D-4) when above its dust threshold priced at the PQ spend size; less joins the fee |
 | a Sapling address (`ys1…`) | that address's confirmed notes (minimum 1 confirmation), largest first, at most 20 (the `yed_mint` selection) | max(10,000 zat, the ZIP-317 conventional fee of the shape) | a Sapling note to the same address |
 
 The owner (`owner`, or the new SLH-DSA default) does not depend on `from`. A transparent or PQ
