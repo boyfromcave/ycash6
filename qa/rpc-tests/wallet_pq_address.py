@@ -53,6 +53,7 @@ from test_framework.util import (
     stop_node,
     sync_blocks,
     wait_and_assert_operationid_status,
+    z_sendmany_opid,
 )
 from test_framework.yellowback_model import base58check_decode, base58check_encode
 from test_framework.yellowback_util import MARGINAL_FEE, conventional_fee
@@ -255,11 +256,9 @@ class WalletPQAddressTest(BitcoinTestFramework):
         assert_equal(n0.listlockunspent(), locks)            # a refused merge leaves no coin locked
         assert_equal(n0.getaddressbalance({'addresses': [a, a2]})['balance'], zat(3))
 
-        print('spend an rq… coin through coin selection (sendtoaddress), fee max(DEFAULT_FEE, pqfeerate x size, ZIP-317)')
-        others = [{'txid': u['txid'], 'vout': u['vout']} for u in n0.listunspent(0) if not u['address'].startswith('rq')]
-        n0.lockunspent(False, others)
+        print('spend an rq… coin with z_sendmany from its address, fee max(DEFAULT_FEE, pqfeerate x size, ZIP-317)')
         dest = n1.getnewaddress()
-        spend = n0.sendtoaddress(dest, Decimal('1.5'))
+        spend = wait_and_assert_operationid_status(n0, z_sendmany_opid(n0, a, [(dest, Decimal('1.5'))]))
         tx = n0.getrawtransaction(spend, 1)
         pq_in = [i for i in tx['vin'] if len(i['scriptSig']['hex']) // 2 == SLH_PQPKH_SCRIPTSIG]
         assert len(pq_in) >= 1, [len(i['scriptSig']['hex']) // 2 for i in tx['vin']]
@@ -272,7 +271,6 @@ class WalletPQAddressTest(BitcoinTestFramework):
         conv = conventional_fee(tx)
         assert zat(fee) >= max(DEFAULT_FEE, 100 * size // 1000, conv), (fee, size, conv)
         assert zat(fee) <= max(DEFAULT_FEE, 1000 * (size + 1000) // 1000, conv + 2 * MARGINAL_FEE), (fee, size, conv)
-        n0.lockunspent(True, others)
         self.mine(1)
         assert_equal(n1.getreceivedbyaddress(dest), Decimal('1.5'))
         spent = {(i['txid'], i['vout']) for i in tx['vin']}
