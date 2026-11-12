@@ -729,6 +729,9 @@ bool CWallet::AddPQKeyWithTime(const CPQKey& key, int64_t nCreateTime)
         nTimeFirstKey = nCreateTime;
     if (!CCryptoKeyStore::AddPQKey(key))     // encrypted: calls AddCryptedPQKey, which writes "cpqkey"
         return false;
+    // Beta2 (review L-6 / LOW-3): an output already in the wallet may pay this key (a lookahead top-up adds keys a
+    // transaction in the wallet already paid); its cached credit was computed without it.
+    MarkDirty();
     NotePQIndex(mapPQNextIndex, key.Scheme(), key.Index());
     if (!fFileBacked || IsCrypted())
         return true;
