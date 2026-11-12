@@ -49,8 +49,12 @@ checks live answers against it. Edit this document, then regenerate.
   (never a coinbase output where coinbase must be shielded; change to a new wallet address), unless
   `vault_lock` names a funding address (`from`, below). A small transaction pays 10,000 zatoshi.
   Coins chosen are locked in
-  the wallet (`lockunspent` semantics) so that a following build does not reuse them before the
-  first transaction confirms; when the call fails (a broadcast the node refuses, an unknown `setid`, a signing failure, a conflicting build), the coins the funding added in that call are released, and no other coin. `vault_ownerspend` prices its owner spend instead (below). Every
+  the wallet (`lockunspent` semantics) for the rest of the call, so nothing else picks them while the transaction is
+  signed and broadcast; when the call ends they are released, and no other coin: a transaction the node accepted is
+  recorded in the wallet first, which counts its inputs as spent while it is in the mempool or the chain and as
+  spendable again if it leaves the mempool unmined (beta2 audit L-1; they used to stay locked until a restart), and
+  on a failure (a broadcast the node refuses, an unknown `setid`, a signing failure, a conflicting build) they are
+  simply free. A remembered build (below) keeps its fee inputs locked. `vault_ownerspend` prices its owner spend instead (below). Every
   transaction these RPCs broadcast must pay a network fee within the vault/Yellowback cap,
   min(max(`-maxtxfee`, `-yellowbackmaxtxfeeusd` (default $2) at the attested price),
   `-yellowbackmaxtxfee` (default 10 YEC)), never below max(`-yellowbackfee`, 10,000 zat); the
@@ -329,13 +333,14 @@ with change to a new wallet address. With it:
 
 The owner (`owner`, or the new SLH-DSA default) does not depend on `from`. A transparent or PQ
 source spends at most 400 coins and 75,000 bytes of estimated inputs (the `yed_*` builders'
-caps), so the lock stays under 100 kB and the sigop limit; its coins are locked in the wallet only
-once the lock is in the mempool, so a refused lock leaves them free. A Sapling-funded lock is one
+caps), so the lock stays under 100 kB and the sigop limit; no coin is locked for it: an accepted lock is recorded
+in the wallet, which counts its coins as spent while it is in the mempool or the chain (beta2 audit L-1; they used to
+stay locked until a restart, also when the lock left the mempool unmined), and a refused lock leaves them free. A Sapling-funded lock is one
 transaction with Sapling spends, the V and the change note: the spend proofs are made with no
 wallet lock held, as for `yed_mint`, the selected notes are locked in the wallet (`LockNote`, as
-the `z_*` operations do) from selection until the lock is refused, or, once it is accepted, until
-the node restarts (the wallet learns of the spend only asynchronously, and another builder must not
-select the notes meanwhile; a lock on a spent note is harmless), and it carries
+the `z_*` operations do) from selection until the lock is broadcast or refused (an accepted lock is recorded in the
+wallet first, whose nullifiers keep the notes spent while it is in the mempool or the chain and free again when it
+expires unmined; beta2 audit L-1: they used to stay locked until a restart), and it carries
 the default expiry (next block + 20). On 6.20.0 the Sapling builder pads the bundle to two outputs
 (the change note and a dummy), and the ZIP-317 conventional fee counts both.
 The vault rules (V-1) read only the transparent outputs and inputs, so the shielded parts change

@@ -791,9 +791,10 @@ std::vector<std::pair<COutPoint, CAmount>> EligibleCoins(const std::set<COutPoin
 }
 
 /** Beta2 item 21b, review LOW-4: the coins Fund locked during one vault RPC call. Every vault RPC that writes runs
- *  inside one (FundScoped, the command table; BuildYedIntentCancel for yed_buildcancel). A transaction the mempool
- *  accepts (Broadcast) or a build the wallet remembers (RememberBuild) takes its inputs off; when the call ends, by
- *  any return or throw, the coins still listed are unlocked. So a refused broadcast, an unknown setid after the
+ *  inside one (FundScoped, the command table; BuildYedIntentCancel for yed_buildcancel). A build the wallet remembers
+ *  (RememberBuild) takes its inputs off; when the call ends, by any return or throw, the coins still listed are
+ *  unlocked, including the inputs of a transaction the mempool accepted, which Broadcast has recorded in the wallet
+ *  as spent by it (audit L-1). So a refused broadcast, an unknown setid after the
  *  funding, a signing failure or a conflicting build leaves them free instead of locked until restart. Only coins
  *  Fund locked in this call are listed: Fund picks unlocked coins only, so a coin locked with lockunspent is never
  *  released here. cs_wallet is taken for the release. */
@@ -829,8 +830,9 @@ UniValue FundScoped(const UniValue& params, bool fHelp)
 /** Add wallet P2PKH inputs (and a change output) so that inputs = outputs + the fee, given `inputValue` already
  *  provided by the transaction's existing inputs. The fee is priced from the size (beta2 item 21b): max(VAULT_RPC_FEE,
  *  the relay fee, the ZIP-317 conventional fee) of the transaction as built, each added input counted at its signed
- *  size (YecInputBytes); 10,000 zatoshi for a small transaction, as before. Inputs are locked in the wallet so a
- *  following build does not pick them before this one confirms. */
+ *  size (YecInputBytes); 10,000 zatoshi for a small transaction, as before. Inputs are locked in the wallet for the
+ *  rest of the call (FundScope), so nothing else picks them while this one is signed and broadcast; once accepted the
+ *  wallet counts them spent (Broadcast, audit L-1). */
 void Fund(CMutableTransaction& mtx, CAmount inputValue, FundMode mode = FundMode::LARGEST_FIRST)
 {
     CAmount out = 0;
@@ -1259,12 +1261,31 @@ void RememberActBuild(const CMutableTransaction& mtx)
 
 uint256 BroadcastOrRefuse(const CTransaction& tx);
 
-/** Submit `tx` to the mempool and relay it; a refusal throws. An accepted transaction keeps the coin locks Fund took
- *  for its inputs; a refused one leaves them to the call's FundScope, which releases them (beta2 item 21b). */
+/** Beta2 audit L-1: an accepted transaction that spends this wallet's coins or notes is recorded in the wallet at once,
+ *  as CommitTransaction records a send, instead of when the notification thread delivers it. From then on the wallet's
+ *  own rule keeps its inputs out of every selection while it is in the mempool or the chain (IsSpent and
+ *  IsSaplingSpent count a spender at depth >= 0) and hands them back when it leaves the mempool unmined (expiry,
+ *  eviction, a conflict), so no coin or note lock is kept for it: such a lock outlived the transaction until a restart.
+ *  The notification thread's later delivery merges into this record (the change note's data, the block). cs_wallet. */
+void RecordInWallet(const CTransaction& tx)
+{
+    LOCK(pwalletMain->cs_wallet);
+    if (!pwalletMain->IsFromMe(tx)) return;
+    CWalletTx wtx(pwalletMain, tx);
+    wtx.fFromMe = true;
+    CWalletDB walletdb(pwalletMain->strWalletFile);
+    if (!pwalletMain->AddToWallet(wtx, &walletdb))
+        LogPrintf("vault: could not write %s to the wallet file; the notification thread records it\n", tx.GetHash().ToString());
+}
+
+/** Submit `tx` to the mempool and relay it; a refusal throws. An accepted transaction is recorded in the wallet
+ *  (RecordInWallet), so the coin locks Fund took for its inputs end with the call's FundScope on every path: a refused
+ *  one leaves its coins free (beta2 item 21b), an accepted one leaves them spent by an unconfirmed transaction (audit
+ *  L-1). */
 uint256 Broadcast(const CTransaction& tx)
 {
     const uint256 txid = BroadcastOrRefuse(tx);
-    FundScope::Kept(tx);
+    RecordInWallet(tx);
     return txid;
 }
 
@@ -2041,10 +2062,10 @@ void CheckLockFromSigned(const CMutableTransaction& mtx, const std::vector<CTxOu
                                                        (unsigned)size, FormatMoney(required), FormatMoney(in - signedTx.GetValueOut())));
 }
 
-/** Sapling notes of a lock, locked in the wallet (CWallet::LockNote, as the z_* operations do) from selection: the
- *  proving step runs with no wallet lock held, and another builder must not pick the same notes meanwhile. Released on
- *  every failure path; kept once the lock is accepted (the caller clears ops), since the wallet learns of the spend
- *  only asynchronously. */
+/** Sapling notes of a lock, locked in the wallet (CWallet::LockNote, as the z_* operations do) from selection until
+ *  the lock is broadcast or refused: the proving step runs with no wallet lock held, and another builder must not pick
+ *  the same notes meanwhile. Released on every path: an accepted lock is recorded in the wallet first (Broadcast,
+ *  RecordInWallet), whose nullifiers then keep the notes spent while it is in the mempool or the chain (audit L-1). */
 struct LockedNotes
 {
     std::vector<SaplingOutPoint> ops;
@@ -2130,7 +2151,7 @@ UniValue vault_lock(const UniValue& params, bool fHelp)
     VaultParams vp;
     CScript spk;
     std::unique_ptr<TransactionBuilder> sapling;   // a Sapling "from": proved below with no lock held
-    LockedNotes lockedNotes;                       // its notes, locked until the lock is refused (kept once accepted)
+    LockedNotes lockedNotes;                       // its notes, locked until the lock is broadcast or refused
     std::optional<CMutableTransaction> fromTx;     // a transparent or PQ "from": priced under the locks, signed without
     std::vector<CTxOut> fromPrevOuts;
     int fromHeight = 0;
@@ -2192,11 +2213,9 @@ UniValue vault_lock(const UniValue& params, bool fHelp)
         SignLockFromInputs(fromTx.value(), fromPrevOuts, fromHeight);
         LOCK2(cs_main, pwalletMain->cs_wallet);
         CheckLockFromSigned(fromTx.value(), fromPrevOuts, fromHeight, fromPQ);
+        // Not locked (audit L-1): Broadcast records the accepted lock in the wallet, which then counts its inputs as
+        // spent for as long as the lock is in the mempool or the chain.
         const uint256 txid = Broadcast(CTransaction(fromTx.value()));
-        for (const CTxIn& in : fromTx->vin) {   // locked only once accepted: a refusal leaves the coins free
-            COutPoint op = in.prevout;
-            pwalletMain->LockCoin(op);
-        }
         return LockResult(txid, spk, vp.owner);
     }
     // Sapling "from": one spend proof per note (seconds each), made with no lock held (as yed_mint, FinishSapling);
@@ -2208,11 +2227,9 @@ UniValue vault_lock(const UniValue& params, bool fHelp)
         throw JSONRPCError(RPC_WALLET_ERROR, e.what());
     }
     LOCK2(cs_main, pwalletMain->cs_wallet);
+    // Accepted: Broadcast has recorded the lock in the wallet, whose nullifiers keep the notes spent while it is in the
+    // mempool or the chain; the note locks end here, as on a refusal (audit L-1: they outlived an expired lock).
     const uint256 txid = Broadcast(CTransaction(mtx));
-    // Accepted: the notes stay locked (as a transparent "from"'s coins are locked once accepted). The wallet learns of
-    // the spend only when the notification thread delivers the transaction, and until then another builder could
-    // select the same notes; a lock on a spent note is harmless and ends with the process.
-    lockedNotes.ops.clear();
     return LockResult(txid, spk, vp.owner);
 }
 

@@ -455,6 +455,13 @@ void YellowbackWallet::CompletionLoop()
             wake = false;
         }
         if (Stopping()) break;
+        // Beta2 audit L-1: the YEC inputs LockSpentYec holds for a YED transaction (F-1) are handed back once that
+        // transaction settles, mined or gone from the mempool unmined (expired, evicted), within about a second; they
+        // used to wait for the next YED build's SelectYec, so an expired carrier's coins stayed locked for every send.
+        if (PendingYecLocks() > 0) {
+            LOCK2(cs_main, wallet->cs_wallet);
+            SettleYecLocks();
+        }
         // Snapshot the pending set, run each completion outside pendingMutex (a completion takes
         // cs_main, cs_wallet and cs_yellowback itself), then drop the finished ones.
         std::vector<std::pair<COutPoint, std::function<bool()>>> work;
