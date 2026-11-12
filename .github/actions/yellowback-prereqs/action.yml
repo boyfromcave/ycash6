@@ -27,9 +27,9 @@ runs:
       env:
         EXTRA: ${{ inputs.apt-extra }}
       run: |
-        sudo apt-get update -q
+        # Bounded and retried (the 2026-11-11 mirror outage): the same helper as the workflows' apt steps.
         # shellcheck disable=SC2086 # EXTRA is a word list on purpose
-        sudo apt-get install -y -q build-essential pkg-config libc6-dev m4 g++-multilib \
+        "$GITHUB_WORKSPACE/qa/yellowback-ci-apt.sh" build-essential pkg-config libc6-dev m4 g++-multilib \
           autoconf libtool ncurses-dev unzip git python3 python3-zmq zlib1g-dev curl bsdmainutils \
           automake $EXTRA
     # 3.11, not the runner's 3.10: the quote agent (yellowback_quote, the devnet role presets) reads
