@@ -95,7 +95,7 @@ class Sidecar(unittest.TestCase):
     TEXT = TEXT + "sidecar vault_primitive report W9 mirror\nsidecar yellowback_fees report W9 mempool\n"
 
     def test_parse_and_complete(self):
-        entries, excluded, errors = ms.parse(self.TEXT)
+        entries, excluded, errors = ms.parse(self.TEXT + 'excluded:sidecar vault_rpc no wallet RPC\n')
         self.assertEqual(errors, [])
         p = ms.check(entries, excluded, ['vault_primitive', 'vault_rpc', 'yellowback_fees'],
                      {'vault_primitive', 'vault_rpc', 'yellowback_fees'}, lambda s: True)
@@ -127,22 +127,42 @@ class Sidecar(unittest.TestCase):
         self.assertEqual([e.script for e in ms.select(entries, 'sidecar', of='attest')], [])
         self.assertEqual(ms.main(['run', 'vault', '--state', 'report', '--of', 'vault', '--dry-run']), 2)
 
+    def test_sidecar_completeness(self):
+        # every non-direct mixed-group script is in sidecar or excluded:sidecar, never both
+        entries, excluded, _ = ms.parse(self.TEXT)
+        known = {'vault_primitive', 'vault_rpc', 'yellowback_fees'}
+        p = ms.check(entries, excluded, [], known, lambda s: True)
+        self.assertTrue(any('vault_rpc is in mixed group vault but neither in sidecar nor excluded:sidecar' in x
+                            for x in p), p)
+        self.assertFalse(any('kogany_mixed_smoke' in x for x in p), p)            # direct: never a sidecar row
+        entries, excluded, _ = ms.parse(self.TEXT + 'excluded:sidecar vault_rpc reason\n'
+                                        'excluded:sidecar vault_primitive reason\nexcluded:sidecar vault_new reason\n')
+        p = ms.check(entries, excluded, [], known, lambda s: True)
+        self.assertTrue(any('vault_primitive is both in sidecar and excluded:sidecar' in x for x in p), p)
+        self.assertTrue(any('vault_new is excluded:sidecar but in no mixed group' in x for x in p), p)
+        self.assertFalse(any('vault_rpc' in x for x in p), p)
+
     def test_real_sidecar_group(self):
+        # No literal size: the group is derived (check) from the mixed groups less excluded:sidecar.
         entries, excluded, _ = ms.load()
         side = ms.select(entries, 'sidecar')
-        self.assertEqual(len(side), 59)
+        mixed = {e.script for e in entries if e.group in ms.MIXED_GROUPS and not e.direct}
+        no_side = ms.mode_excluded(excluded, 'sidecar')
+        self.assertEqual({e.script for e in side}, mixed - set(no_side))
+        self.assertEqual(len(side), len({e.script for e in side}))                # once each
         groups = ms.mixed_group_of(entries)
         flags = {e.script: e.flags for e in entries if e.group in ms.MIXED_GROUPS}
         for e in side:
             self.assertEqual(set(e.flags), set(flags[e.script]) - {'direct'}, e.script)   # the mixed group's flags
-        self.assertEqual(sum(len(ms.select(entries, 'sidecar', of=g)) for g in ms.MIXED_GROUPS), 59)
+        self.assertEqual(sum(len(ms.select(entries, 'sidecar', of=g)) for g in ms.MIXED_GROUPS), len(side))
         self.assertNotIn('yellowback_framework_smoke', {e.script for e in side})
         self.assertTrue({'yellowback_lifecycle', 'yellowback_claim', 'yellowback_interm', 'yellowback_fees',
                          'yellowback_attest'} <= {e.script for e in side})
         self.assertEqual(set(groups.values()), set(ms.MIXED_GROUPS))
 
     def test_pair_exclusions(self):
-        base = TEXT + 'sidecar vault_primitive report W9 mirror\nsidecar yellowback_fees report W9 mempool\n'
+        base = (TEXT + 'sidecar vault_primitive report W9 mirror\nsidecar yellowback_fees report W9 mempool\n'
+                'excluded:sidecar vault_rpc no wallet RPC\n')
         known = {'vault_primitive', 'vault_rpc', 'yellowback_fees'}
         scripts = ['vault_primitive', 'vault_rpc', 'yellowback_fees']
         text = base + 'pair vault_primitive report W9\nexcluded:pair yellowback_fees F-S5-15: by decision\n'
@@ -163,10 +183,11 @@ class Sidecar(unittest.TestCase):
         self.assertEqual(len(errors), 2, errors)
 
     def test_real_pair_group(self):
-        # column 3 (S5): the sidecar group's 59 scripts less the excluded:pair rows, no MixedLine
+        # column 3 (S5): the sidecar group's scripts less the excluded:pair rows, no MixedLine
         # flags, no KOGANY_SIDECAR
         entries, excluded, _ = ms.load()
         pair = ms.select(entries, 'pair')
+        side = ms.select(entries, 'sidecar')
         out = ms.mode_excluded(excluded, 'pair')
         self.assertEqual(set(out), {'yellowback_wr_flags'})                   # F-S5-15, by decision
         self.assertEqual({e.script for e in pair} | set(out), {e.script for e in ms.select(entries, 'sidecar')})
@@ -175,7 +196,7 @@ class Sidecar(unittest.TestCase):
         cmds = ms.commands(pair, 'report', 2, '/s', '/t')
         self.assertEqual(len(cmds), 1)
         self.assertEqual(cmds[0][0], {})
-        self.assertEqual(sum(len(ms.select(entries, 'pair', of=g)) for g in ms.MIXED_GROUPS), 59 - len(out))
+        self.assertEqual(sum(len(ms.select(entries, 'pair', of=g)) for g in ms.MIXED_GROUPS), len(side) - len(out))
         os.environ.pop('YEWD_KOGANY', None)
         self.assertEqual(ms.main(['run', 'pair', '--state', 'report']), 1)
 

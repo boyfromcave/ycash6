@@ -81,7 +81,7 @@ name: yellowback tests
 #     vaults/kogany-compat and upgrade/vault (push, pull_request, dispatch tier all) and on a
 #     dispatch with tier mixed. It is never part of the `push tier` check.
 #   The sidecar nightly (kogany plan W9-a; K-3 as amended): tier `sidecar` runs `build`, `sidecars`,
-#     `koganyd` and `sidecar-rig`, the 59 wallet-needing scripts of qa/kogany-mixed-shards.txt's
+#     `koganyd` and `sidecar-rig`, the wallet-needing scripts of qa/kogany-mixed-shards.txt's
 #     sidecar group with KOGANY_SIDECAR=1 (every node a kogany plus a ycashd -connect'ed to it, the
 #     ycash6 test rig), one job per mixed group, report-only. `sidecar-fanout` dispatches it on
 #     vaults/kogany-compat every night when KOGANY_MIXED is 'true' (from the default branch's copy).
@@ -189,11 +189,17 @@ env:
   # vault_lock_from joined on 2026-11-11 (beta2 D-3: vault_lock funded from a P2PKH, PQ or Sapling "from"; ported from ycash-dd #165).
   YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_activation_reorg yellowback_reorg_restart yellowback_redeem_boundary yellowback_interm yellowback_cancel_limit yellowback_pq yellowback_pq_dayone yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_attest_bond yellowback_attest_evict yellowback_attest_rejoin yellowback_attest_live yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke yellowback_fee yellowback_fees yellowback_fees_reaccept yellowback_mempool_limits yellowback_wr_flags vault_upgrade vault_activation_restart stopatheight ycash_bootstrap testnet_ceremony vault_rpc vault_rpc_contract vault_refee vault_primitive vault_slashing vault_bridge vault_pq_reorg vault_pq vault_pq_wallet vault_pq_wallet_restore vault_undo_prune vault_policy vault_dos vault_pq_relay vault_lock_from wallet_pq_address wallet_balance_by_type wallet_getnewaddress_type wallet_yed_held_guard wallet_seed_restore_ecc wallet_seed_lookahead_exposure lightwalletd_only yellowback_lightwalletd z_validateaddress_nowallet wallet_address_matrix wallet_pq_fee_cap wallet_yed_ecc_token
   SANITIZER_SCRIPTS: yellowback_index
+  # The functional scripts the nightly job runs by name, each in its own step (the Rust attest agent, the devnet,
+  # a ycash6-stock build, the prune floor). qa/yellowback-audit.sh counts them as run by CI.
+  NIGHTLY_SCRIPTS: yellowback_attest_agent yellowback_cancel_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity yellowback_demo_v6 vault_prune_floor
   # Audit 07/F-11: the files whose change runs the PR legs lockorder-pr and sanitizers-pr (an extended
   # regex over `git diff --name-only` of the PR), and the functional subset lockorder-pr runs (each also
   # in YELLOWBACK_SCRIPTS; the full suite stays in the nightly lockorder job).
-  OVERLAY_PATHS: '^(src/(vault/|yellowback/|rpc/vault\.cpp|rpc/yellowback[^/]*\.cpp|main\.cpp|miner\.cpp|txmempool\.cpp|sync\.(cpp|h))|qa/yellowback-lockorder-(check\.py|logonly\.sh))'
-  LOCKORDER_PR_SCRIPTS: vault_primitive vault_rpc_contract vault_slashing vault_upgrade yellowback_index yellowback_void_mint yellowback_attest_live wallet_pq_fee_cap vault_lock_from
+  # src/wallet/ and the three beta2 wallet scripts joined on 2026-11-11 (combined security audit: a
+  # wallet-only PR skipped this leg, and most of the new lock-taking code is in src/wallet/). Run time
+  # of the PR subset at -j2 grows by about four minutes (weights in qa/yellowback-ci-shard.py).
+  OVERLAY_PATHS: '^(src/(vault/|yellowback/|wallet/|rpc/vault\.cpp|rpc/yellowback[^/]*\.cpp|main\.cpp|miner\.cpp|txmempool\.cpp|sync\.(cpp|h))|qa/yellowback-lockorder-(check\.py|logonly\.sh))'
+  LOCKORDER_PR_SCRIPTS: vault_primitive vault_rpc_contract vault_slashing vault_upgrade yellowback_index yellowback_void_mint yellowback_attest_live wallet_pq_fee_cap vault_lock_from wallet_address_matrix wallet_yed_ecc_token wallet_balance_by_type
   # yellowback_stratum drives the real pool software: boyfromcave/yolo (Rust), checked out at this
   # commit and built in the main job, exported as YOLO_BIN. Without the binary the script SKIPs.
   YOLO_REPO: boyfromcave/yolo
@@ -245,7 +251,10 @@ env:
   # `txn_doublespend.py --mineblock` is one ALL_SCRIPTS entry with an argument: an unquoted
   # space-separated variable would split it and hand `--mineblock` to every script as a pass-on
   # flag, so it is its own variable, always passed quoted.
-  STOCK_BASELINE: wallet walletbackup fundrawtransaction reorg_limit getrawtransaction_insight spentindex timestampindex key_import_export zapwallettxes feature_logging feature_walletfile rawtransactions threeofthreerestore rest wallet_deprecation nodehandling reindex listtransactions merkle_blocks sapling_rewind_check sapling_v4_value_balance wallet_parsing_amounts wallet_zero_value wallet_broadcast proxy_test errors keypool txn_doublespend mempool_reorg mempool_resurrect_test mempool_spendcoinbase regtest_signrawtransaction httpbasics multi_rpc blockchain getmininginfo decodescript getchaintips invalidateblock zmq_test zmq_concurrent_test
+  # wallet_changeaddresses joined on 2026-11-11 (beta2 list item 59: an upstream wallet test in no CI list; it now
+  # waits for the wallet after generate and lets the node pick its conventional fee). The other five of
+  # that item stay out, with the reason, in qa/yellowback-audit.sh's UPSTREAM_NOT_RUN.
+  STOCK_BASELINE: wallet walletbackup fundrawtransaction reorg_limit getrawtransaction_insight spentindex timestampindex key_import_export zapwallettxes feature_logging feature_walletfile rawtransactions threeofthreerestore rest wallet_deprecation nodehandling reindex listtransactions merkle_blocks sapling_rewind_check sapling_v4_value_balance wallet_parsing_amounts wallet_changeaddresses wallet_zero_value wallet_broadcast proxy_test errors keypool txn_doublespend mempool_reorg mempool_resurrect_test mempool_spendcoinbase regtest_signrawtransaction httpbasics multi_rpc blockchain getmininginfo decodescript getchaintips invalidateblock zmq_test zmq_concurrent_test
   STOCK_BASELINE_MINEBLOCK: txn_doublespend.py --mineblock
   # The upgrade line's audit compares against the other node line and the workspace generator:
   # ycash-dd (public) at the same branch, and boyfromcave/yellowback at a commit that carries
@@ -547,9 +556,9 @@ jobs:
         # vault_pq_reorg's Falcon spends come from the framework's signer, compiled with $CC on the fly;
         # without a compiler the script would SKIP. Two packages, not the prereqs action's full apt list.
         if: matrix.suite == 'yellowback'
+        timeout-minutes: 20   # apt is bounded (qa/yellowback-ci-apt.sh); never the job's whole budget
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q gcc libc6-dev
+          qa/yellowback-ci-apt.sh gcc libc6-dev
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: node-bin
@@ -749,9 +758,9 @@ jobs:
         with:
           apt: 'false'
       - name: Install a C compiler (the Falcon signer of test_framework/pq.py) and librocksdb (koganyd)
+        timeout-minutes: 20   # apt is bounded (qa/yellowback-ci-apt.sh); never the job's whole budget
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q gcc libc6-dev librocksdb-dev
+          qa/yellowback-ci-apt.sh gcc libc6-dev librocksdb-dev
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: node-bin
@@ -812,7 +821,7 @@ jobs:
 
   # The W9-a test-rig nightly (kogany plan §3 W9-a; K-3 as amended: the ycash6 `connect=` sidecar is
   # the test rig, the product's wallet is yewd): the sidecar group of qa/kogany-mixed-shards.txt, the
-  # 59 wallet-needing scripts, with KOGANY_SIDECAR=1. Every node is a koganyd on the node's
+  # wallet-needing scripts, with KOGANY_SIDECAR=1. Every node is a koganyd on the node's
   # P2P port plus the unchanged ycashd with -connect=<that kogany> -listen=0 serving the scripts' RPC,
   # so every block and transaction between nodes passes kogany's validation and ycashd's again
   # (test_framework/kogany.py "The ycash6 test rig"). One job per mixed group (`--of`), each
@@ -838,9 +847,9 @@ jobs:
         with:
           apt: 'false'
       - name: Install a C compiler (the Falcon signer of test_framework/pq.py) and librocksdb (koganyd)
+        timeout-minutes: 20   # apt is bounded (qa/yellowback-ci-apt.sh); never the job's whole budget
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q gcc libc6-dev librocksdb-dev
+          qa/yellowback-ci-apt.sh gcc libc6-dev librocksdb-dev
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: node-bin
@@ -930,9 +939,9 @@ jobs:
         with:
           apt: 'false'
       - name: Install a C compiler (the Falcon signer of test_framework/pq.py)
+        timeout-minutes: 20   # apt is bounded (qa/yellowback-ci-apt.sh); never the job's whole budget
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q gcc libc6-dev
+          qa/yellowback-ci-apt.sh gcc libc6-dev
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: node-bin
@@ -1100,16 +1109,17 @@ jobs:
           echo "fees=$fees" >> "$GITHUB_OUTPUT"
           echo "fees line: $fees"
 
-      - name: Frozen set at zero delta and the line budgets (plan §2)
+      - name: qa/yellowback-audit.sh (frozen set and line budgets, registration, the other script legs)
         # One script so the gate a developer runs locally is the gate CI runs. On the upgrade line
         # the frozen and budget legs are REPORT-ONLY (upgrade plan §7 G-9, §9): they print the
         # delta and the consensus review gate (the consensus-diff artifact below, two reviewers)
-        # judges it; the script's rpcCvtTable leg still fails.
+        # judges it; every other leg still fails. Attribution and cross-line run as their own steps
+        # below (the same script, --only), so each shows on the run page.
         env:
           LINE: ${{ steps.line.outputs.line }}
         run: |
-          if [ "$LINE" = upgrade ]; then qa/yellowback-audit.sh --report-only ycash6-baseline
-          else qa/yellowback-audit.sh ycash6-baseline; fi
+          if [ "$LINE" = upgrade ]; then qa/yellowback-audit.sh --report-only --skip attribution,cross-line ycash6-baseline
+          else qa/yellowback-audit.sh --skip attribution,cross-line ycash6-baseline; fi
 
       - name: Consensus-diff report for the two-reviewer gate (upgrade plan §7 G-9)
         # Every changed line under the consensus paths, against this line's pristine pin
@@ -1196,37 +1206,10 @@ jobs:
         # Ycash line too; no existing copyright line is ever removed. Naming: the software is
         # Ycash (no "ycash6" in src/), and no DigiDollar/ydollar naming enters the code
         # (AGENTS.md rule 6; in code DigiDollar is allowed only in comments that cite the upstream file).
+        # The rules live in qa/yellowback-audit.sh's attribution leg (beta2 list item 73: this step held its
+        # own copy, so a local audit passed what CI failed); the step runs that leg alone.
         if: ${{ !cancelled() }}
-        run: |
-          rc=0
-          base=ycash6-baseline
-          # Vendored third-party code (the quantum line's src/crypto/pq/falcon and src/crypto/pq/slhdsa,
-          # briefing rule 7) keeps its own notices unchanged and is exempt from the added-file rule,
-          # provided src/crypto/pq/README.md records each one's LICENSE (ycash-dd 877e49617).
-          vendored='^src/crypto/pq/(falcon|slhdsa)/'
-          if git diff --name-only --diff-filter=A "$base" HEAD -- src | grep -qE "$vendored"; then
-            for d in falcon slhdsa; do
-              grep -q "$d/LICENSE" src/crypto/pq/README.md 2>/dev/null || { echo "vendored src/crypto/pq/$d without a licence record ($d/LICENSE) in src/crypto/pq/README.md"; rc=1; }
-            done
-            echo "vendored files exempt from the added-file rule (own notices): $(git diff --name-only --diff-filter=A "$base" HEAD -- src | grep -cE "$vendored") under src/crypto/pq/{falcon,slhdsa}/"
-          fi
-          while read -r f; do
-            grep -q 'The Ycash developers' "$f" || { echo "new file without the Ycash notice: $f"; rc=1; }
-          done < <(git diff --name-only --diff-filter=A "$base" HEAD -- src qa contrib | grep -E '\.(cpp|h|c|py|sh|rs)$' | grep -v '^src/fuzzing/' | grep -Ev "$vendored")
-          while read -r f; do
-            if grep -q 'Copyright' "$f" && ! grep -q 'Ycash developers' "$f"; then echo "modified upstream file without a Ycash line: $f"; rc=1; fi
-          done < <(git diff --name-only --diff-filter=M "$base" HEAD -- src qa contrib | grep -E '\.(cpp|h|c|py|sh|rs)$')
-          removed=$(git diff "$base" HEAD | grep -E '^-[^-].*Copyright' || true)
-          [ -z "$removed" ] || { echo "copyright lines removed (never allowed):"; echo "$removed"; rc=1; }
-          hits=$(git grep -n -i 'ycash6' -- src || true)
-          [ -z "$hits" ] || { echo "'ycash6' in src/ (the software is Ycash):"; echo "$hits"; rc=1; }
-          added=$(git diff "$base" HEAD -- src qa contrib doc | grep -E '^\+[^+]' || true)
-          hits=$(printf '%s\n' "$added" | grep -E 'ydollar|YDollar|\byd_' || true)
-          [ -z "$hits" ] || { echo "retired YDollar naming:"; echo "$hits"; rc=1; }
-          # Code only (doc/ prose may name the retired `feature/digidollar` branch).
-          hits=$(git diff "$base" HEAD -- src qa contrib | grep -E '^\+[^+]' | grep -E -i 'digidollar' | grep -vE '^\+[[:space:]]*(//|#|\*|/\*)' || true)
-          [ -z "$hits" ] || { echo "DigiDollar naming outside a citing comment:"; echo "$hits"; rc=1; }
-          exit $rc
+        run: qa/yellowback-audit.sh --only attribution ycash6-baseline
 
       - name: Cross-line identity (qa/yellowback-cross-line.manifest) and Vault chain parameters
         # Both node lines carry identical behaviour (upgrade plan §9): the vault golden vector and
@@ -1239,6 +1222,7 @@ jobs:
         env:
           REF: ${{ github.base_ref || github.ref_name }}
           HEAD_REF: ${{ github.head_ref }}
+          GITHUB_TOKEN: ${{ github.token }}   # read-only: lists the other line's pull requests (public repository)
           INTERM: ${{ steps.line.outputs.interm }}
           QUANTUM: ${{ steps.line.outputs.quantum }}
         run: |
@@ -1256,24 +1240,19 @@ jobs:
           fi
           # A pull request into upgrade/vault carries a rule change the other line's upgrade/vault does not
           # have yet. When that same branch exists on the other line, compare with it (both lines land the
-          # change together). A missing branch keeps the upgrade/vault comparison above.
-          if [ "$other" = upgrade/vault ] && [ -n "$HEAD_REF" ] && git ls-remote --exit-code --heads "$url" "$HEAD_REF" >/dev/null; then
-            other=$HEAD_REF
+          # change together). A missing branch keeps the upgrade/vault comparison above, and so does a
+          # stale one (beta2 list item 63: the head of an already merged pull request, or a branch that adds
+          # nothing to upgrade/vault); qa/yellowback-other-line-branch.py decides and prints why.
+          if [ "$other" = upgrade/vault ] && [ -n "$HEAD_REF" ]; then
+            other=$(python3 qa/yellowback-other-line-branch.py --repo "$OTHER_LINE_REPO" --branch "$HEAD_REF")
           fi
           git fetch --no-tags --depth 1 "$url" "+refs/heads/$other:refs/remotes/other-line/head"
           echo "comparing with $OTHER_LINE_REPO $other @ $(git rev-parse --short other-line/head)"
-          rc=0
-          # Vectors, qa goldens, pqkey, the spec, src/crypto/pq, src/vault and src/yellowback
-          # (audit W3-P-2). The manifest is the list; this step has no path list of its own.
-          python3 qa/yellowback-cross-line.py --this-line y6 --other-ref other-line/head || rc=1
-          # The overlay-tree checker still pins the same 11 shims in qa/yellowback-cross-line-allow.txt.
-          python3 qa/yellowback-cross-line-trees.py --this-line y6 --other-ref other-line/head || rc=1
-          # Every Vault chain parameter (all three networks, PROTOCOL_VERSION, the yellowback params bodies)
-          # must agree with the other line (audit W3-P-1); read from the other line's git objects.
-          python3 qa/yellowback-vault-params.py extract --root . > "$RUNNER_TEMP/vault-params-mine.json" || rc=1
-          python3 qa/yellowback-vault-params.py extract --git-ref other-line/head > "$RUNNER_TEMP/vault-params-theirs.json" || rc=1
-          python3 qa/yellowback-vault-params.py compare "$RUNNER_TEMP/vault-params-mine.json" "$RUNNER_TEMP/vault-params-theirs.json" || rc=1
-          exit $rc
+          # Vectors, qa goldens, pqkey, the spec, src/crypto/pq, src/vault and src/yellowback (audit W3-P-2;
+          # the manifest is the list), the overlay trees against qa/yellowback-cross-line-allow.txt, and every
+          # Vault chain parameter (audit W3-P-1), read from the other line's git objects: the audit's
+          # cross-line leg, the same one a local run uses.
+          YB_OTHER_LINE_REF=other-line/head qa/yellowback-audit.sh --only cross-line --require-cross-line ycash6-baseline
 
       - name: RPC contract at rpcversion 5 (6 in term, 7 post-quantum, 8 fees) through the workspace generator (findings (39), (44))
         # The upgrade line's doc/yellowback-rpc-contract.json must be exactly what the workspace's
@@ -1340,27 +1319,8 @@ jobs:
           test -z "$homes" || { echo "GetTime outside its three homes: $homes"; exit 1; }
           # In that third home the only clock symbol is GetTimeMillis, and only for the wait timeout.
           ! grep -n "GetTime\|GetAdjustedTime" src/rpc/yellowbackwallet.cpp | grep -v "GetTimeMillis" || exit 1
-          # Every yellowback script the runner knows must be executable (rpc-tests.py exec's it
-          # directly) and must be run by some job: registered-but-never-run is how the v2
-          # enforcement suite and then the whole v3 attestation suite sat silent in CI.
-          # The allow-list names only the scripts a nightly step runs by name (audit I-1).
-          for f in qa/rpc-tests/yellowback_*.py qa/rpc-tests/vault_*.py; do
-            test -x "$f" || { echo "$f is registered but not executable; chmod +x it"; exit 1; }
-            n=$(basename "$f" .py)
-            grep -q "'$n\.py'" qa/pull-tester/rpc-tests.py || { echo "$n is not registered in qa/pull-tester/rpc-tests.py"; exit 1; }
-            case " $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS yellowback_attest_agent yellowback_cancel_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity yellowback_demo_v6 vault_prune_floor " in
-              *" $n "*) ;;
-              *) echo "$n is in qa/rpc-tests/ but no CI job runs it"; exit 1 ;;
-            esac
-          done
-          # rpc-tests.py silently drops a named script it does not list (ALL_SCRIPTS filter), so every
-          # name a job passes it must be registered there.
-          # Either quote: ZMQ_SCRIPTS registers zmq_test with double quotes.
-          for n in $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS $STOCK_BASELINE yellowback_attest_agent yellowback_cancel_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity yellowback_demo_v6 vault_prune_floor; do
-            test -f "qa/rpc-tests/$n.py" || { echo "$n is in a CI list but qa/rpc-tests/$n.py does not exist"; exit 1; }
-            grep -qE "[\"']$n\.py[\"']" qa/pull-tester/rpc-tests.py || { echo "$n is in a CI list but not in qa/pull-tester/rpc-tests.py"; exit 1; }
-          done
-          grep -qF "'$STOCK_BASELINE_MINEBLOCK'" qa/pull-tester/rpc-tests.py || { echo "$STOCK_BASELINE_MINEBLOCK is not in qa/pull-tester/rpc-tests.py"; exit 1; }
+          # Registration (executable in git, registered, run by a CI job, grouped in the mixed shard
+          # manifest) is qa/yellowback-audit.sh's registration leg, run by the frozen-set step above.
           # EDGES is the topology declaration (it names the v3 attestor slots 6-7); a six-node v2
           # script that iterates it raw indexes self.nodes out of range.  Walk live_edges() instead.
           ! grep -rn "in self\.EDGES" qa/rpc-tests/ | grep -v 'yellowback_util\.py:.*a < n and b < n' || exit 1
@@ -1626,9 +1586,9 @@ jobs:
         with:
           apt: 'false'
       - name: Install a C compiler (the Falcon signer test_pq.py exercises; audit 04/F-1)
+        timeout-minutes: 20   # apt is bounded (qa/yellowback-ci-apt.sh); never the job's whole budget
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q gcc libc6-dev
+          qa/yellowback-ci-apt.sh gcc libc6-dev
       - name: rpc-tests.py SKIP detection (--fail-on-skip; audit 04/F-1, 04/N-4)
         run: python3 qa/pull-tester/test_rpc_tests_classify.py -v
       - name: Vault chain-parameter extractor unit tests (audit W3-P-1)
@@ -1648,6 +1608,13 @@ jobs:
       - name: kogany mixed shard manifest (every YELLOWBACK_SCRIPTS entry grouped or excluded)
         if: ${{ !cancelled() }}
         run: python3 qa/test_kogany_mixed_shards.py -v
+      - name: Index profiles the functional scripts run under (report only; beta2 list item 17)
+        # P0 default, P1 txindex, P2 insight, P3 lightwalletd, P4 module live (the address plan's section 6),
+        # read from each script's flags or its "# index-profiles:" line, so a run says which profiles it tested.
+        if: ${{ !cancelled() }}
+        run: |
+          # shellcheck disable=SC2086  # the lists are space-separated names, split on purpose
+          python3 qa/yellowback-index-profiles.py $YELLOWBACK_SCRIPTS $STOCK_BASELINE $NIGHTLY_SCRIPTS
       - name: Testnet tooling unit tests (testnet plan N2; offline)
         if: ${{ !cancelled() }}
         run: python3 -m unittest contrib/yellowback/profiles/test_ybprofile.py contrib/bootstrap/test_ycash_bootstrap.py contrib/testnet/ceremony/test_ceremony.py contrib/docker/ycashd/test_entrypoint.py contrib/yellowback/devnet/test_testnet_join.py
@@ -2024,7 +1991,7 @@ jobs:
         # every file copied into <Target>/crashes/ is replayed by yellowback_fuzz_tests forever.
         run: |
           set -e
-          sudo apt-get install -y clang
+          qa/yellowback-ci-apt.sh clang
           # -fsanitize=fuzzer links libFuzzer's main(), so configure's own "C++ compiler works"
           # program (int main) fails to link with it in CXXFLAGS ("cannot create executables").
           # Instrument with fuzzer-no-link at configure time and add the runtime on the ycashd

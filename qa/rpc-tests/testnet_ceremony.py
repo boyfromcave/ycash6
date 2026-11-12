@@ -46,7 +46,10 @@ class TestnetCeremonyTest(BitcoinTestFramework):
             return json.load(f), out
 
     def run_test(self):
-        seed = os.getpid() % 1500 + 2000
+        # The rehearsal's nodes take the ports of this test's own seed (the runner gives each concurrent
+        # test a distinct one, and this test starts no framework node of its own), so they never land on
+        # another test's node (a seed of its own here once did: 401 Unauthorized from a sibling's RPC port).
+        seed = self.options.port_seed
         record, out = self.rehearse("fast", seed)
         release = record["release"]
         assert_equal(record["format"], "ycash-ceremony/1")
@@ -64,7 +67,7 @@ class TestnetCeremonyTest(BitcoinTestFramework):
         with open(os.path.join(out, "ceremony-rehearsal.json")) as f:
             assert "wif" not in f.read()
 
-        record, _ = self.rehearse("legacy", seed + 37)
+        record, _ = self.rehearse("legacy", seed)   # the fast rehearsal has stopped its nodes
         assert_equal(record["release"]["attestorSetId"], None)
         assert_equal(record["release"]["UPGRADE_VAULT.nActivationHeight"], None)
         assert all(record["rehearsal"]["rc1_node"]["checks"].values()), record["rehearsal"]["rc1_node"]["checks"]
