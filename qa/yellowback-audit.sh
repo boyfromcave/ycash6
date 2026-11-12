@@ -172,6 +172,17 @@ kogany_pruned_edge     # by hand only: needs a pruned koganyd (KOGANY_PRUNED=1);
 EOF_EXCLUDE
 )
 
+# Upstream wallet scripts that no CI list runs, and why (beta2 list item 59). The registration leg
+# checks each still exists and is still in no CI list, so the list cannot go stale silently.
+UPSTREAM_NOT_RUN=$(sed 's/[[:space:]]*#.*$//' <<'EOF_UPSTREAM' | grep -v '^$' || true
+wallet_accounts        # Zcash NU5 unified accounts: Ycash refuses z_getnewaccount ("require the NU5 network upgrade, which is not active on Ycash")
+wallet_addresses       # unified and Orchard addresses throughout (NU5 at height 2); Orchard is not part of Ycash
+wallet_listreceived    # Orchard and unified receivers (NU5 at height 225)
+wallet_import_export   # walletconfirmbackup's optional acknowledge_imports has no rpcCvtTable column ({{s}, {}} in src/rpc/common.h), so the call is refused; node defect, reported
+show_help              # its expected text is upstream zcashd's --help; it needs a Ycash expected text
+EOF_UPSTREAM
+)
+
 # Every functional script the fork owns: each top-level qa/rpc-tests/*.py added relative to the base
 # (including what is staged, modified or untracked in the working tree), plus the yellowback_*/vault_*
 # prefixes, minus REGISTRATION_EXCLUDE. Derived mechanically, so a wallet_*.py or any other new name is covered.
@@ -217,6 +228,12 @@ leg_registration() {
   for n in $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS $STOCK_BASELINE $NIGHTLY_SCRIPTS; do
     [ -f "qa/rpc-tests/$n.py" ] || { echo "$n is in a CI list but qa/rpc-tests/$n.py does not exist"; return 1; }
     grep -qE "[\"']$n\.py[\"']" qa/pull-tester/rpc-tests.py || { echo "$n is in a CI list but not in qa/pull-tester/rpc-tests.py"; return 1; }
+  done
+  for x in $UPSTREAM_NOT_RUN; do
+    [ -e "qa/rpc-tests/$x.py" ] || { echo "UPSTREAM_NOT_RUN names $x, which is not in qa/rpc-tests/"; return 1; }
+    case " $YELLOWBACK_SCRIPTS $SANITIZER_SCRIPTS $NIGHTLY_SCRIPTS $STOCK_BASELINE " in
+      *" $x "*) echo "UPSTREAM_NOT_RUN names $x, which a CI list now runs: drop it from UPSTREAM_NOT_RUN"; return 1 ;;
+    esac
   done
   grep -qF "'$STOCK_BASELINE_MINEBLOCK'" qa/pull-tester/rpc-tests.py || { echo "$STOCK_BASELINE_MINEBLOCK is not in qa/pull-tester/rpc-tests.py"; return 1; }
   # Every YELLOWBACK_SCRIPTS entry has its rows in the mixed shard manifest (a group or excluded; the
