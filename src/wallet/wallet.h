@@ -35,6 +35,7 @@
 #include "base58.h"
 
 #include <algorithm>
+#include <atomic>
 #include <map>
 #include <optional>
 #include <set>
@@ -1822,6 +1823,13 @@ public:
     std::set<CKeyID> setVaultPendingKeys;
     //! S3: a SET_JOIN of a pending imported key in a connected block sets the restore marker (07/F-5).
     void VaultCheckJoins(const CTransaction& tx, const CBlock* pblock);
+
+    //! beta2 item 32: this wallet has held YED or issued a YED holder key ("yedheld", write-once). Start-up refuses
+    //! such a wallet where Yellowback is not live unless -yellowback=0 acknowledges it (src/init.cpp).
+    std::atomic<bool> fYedHeld{false};
+    //! Set the marker and write it once; later calls are no-ops. Returns false only when the write failed.
+    bool MarkYedHeld();
+    bool IsYedHeld() const { return fYedHeld.load(); }
 
     std::map<uint256, std::vector<RecipientMapping>> sendRecipients;
 

@@ -434,7 +434,7 @@ std::string HelpMessage(HelpMessageMode mode)
 #endif
     strUsage += HelpMessageOpt("-txexpirynotify=<cmd>", _("Execute command when transaction expires (%s in cmd is replaced by transaction id)"));
     strUsage += HelpMessageOpt("-txindex", strprintf(_("Maintain a full transaction index, used by the getrawtransaction rpc call (default: %u)"), DEFAULT_TXINDEX));
-    strUsage += HelpMessageOpt("-yellowback", _("Accepted and ignored: Yellowback is consensus wherever the vault upgrade and a YED attestor set are configured; -yellowback=0 only acknowledges a leftover index"));
+    strUsage += HelpMessageOpt("-yellowback", _("Accepted and ignored: Yellowback is consensus wherever the vault upgrade and a YED attestor set are configured; -yellowback=0 only acknowledges a leftover index or a wallet that has held YED"));
     strUsage += HelpMessageOpt("-reindex-yellowback", _("Wipe and rebuild the Yellowback index from the start height on startup"));
     strUsage += HelpMessageOpt("-yellowbackfee=<zat>", strprintf(_("Flat fee for Yellowback transactions in zatoshi (default and minimum: %d)"), yellowback::DEFAULT_YELLOWBACK_FEE));
     strUsage += HelpMessageOpt("-yellowbackmintlag=<n>", strprintf(_("Blocks below the index tip at which a mint is evaluated (default: %d, max %d)"), yellowback::DEFAULT_REF_LAG, yellowback::MAX_REF_LAG));
@@ -2336,6 +2336,22 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         CWallet::InitLoadWallet(chainparams, clearWitnessCaches || fReindex);
         if (!pwalletMain)
             return false;
+        // beta2 item 32, H6 from the wallet side: a wallet that has held YED carries the "yedheld" marker. Where
+        // Yellowback is not live there is no index to rebuild its YED coin locks from (a copied wallet.dat, a fresh
+        // datadir), so an ordinary send could burn them. -yellowback=0 given explicitly is the same acknowledgement as H6's.
+        if (pwalletMain->IsYedHeld() && !yellowback::g_yellowbackLive) {
+            if (!(mapArgs.count("-yellowback") && !GetBoolArg("-yellowback", true))) {
+                return InitError(_("This wallet has held YED, but Yellowback is not live with these options, so its YED outputs cannot be locked. "
+                                   "Start with the network's attestor set (regtest -yellowbackattestorset) to keep those outputs locked, "
+                                   "or with -yellowback=0 to acknowledge that they are spendable as plain YEC."));
+            }
+            const std::string heldWarning = _("This wallet has held YED and Yellowback is not live (-yellowback=0): its YED outputs are not locked, "
+                                              "and any send that spends one destroys the YED it carries.");
+            InitWarning(heldWarning);
+            // The acknowledgement may sit in the config file, so the warning also stays visible for the life of the
+            // process: getinfo "errors" (the misc warning) and getwalletinfo "yed_unlocked".
+            SetMiscWarning(heldWarning, GetTime());
+        }
     }
 #else // ENABLE_WALLET
     LogPrintf("No wallet support compiled in!\n");
