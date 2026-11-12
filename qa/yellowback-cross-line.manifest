@@ -68,6 +68,7 @@ identical qa/rpc-tests/wallet_pq_fee_cap.py
 identical qa/rpc-tests/wallet_yed_ecc_token.py
 identical qa/rpc-tests/wallet_getnewaddress_type.py
 identical qa/rpc-tests/vault_lock_from.py
+identical qa/rpc-tests/wallet_yed_held_guard.py
 tree contrib/bootstrap
 tree contrib/testnet
 tree contrib/yellowback/profiles
