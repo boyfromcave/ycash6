@@ -2312,10 +2312,13 @@ void CWallet::ChainTip(const CBlockIndex *pindex,
     if (added.has_value()) {
         ChainTipAdded(pindex, pblock, added.value(), true);
         // Review 3 (M-c LOW): a restore made during initial block download completes its scan only at a start after
-        // the sync; once the node is out of it, say so where the user looks (getinfo errors, the GUI status bar). Only a
-        // wallet with a pending restore takes cs_main here, once per block until the node has synced.
-        if (RestoreInProgress() && !fWalletRestoreWarned) {
-            LOCK(cs_main);
+        // the sync; once the node is out of it, say so where the user looks (getinfo errors, the GUI status bar).
+        // Review 4 (LOW): IsInitialBlockDownload takes cs_main until it has latched to false, which wallet sync must not
+        // do on every block (see below). The node cannot leave IBD before its tip is within nMaxTipAge of now, so ask
+        // only for a block that recent, or once every 1000 blocks (a node that left IBD and then fell behind, or a
+        // notification queue running behind the tip); no lock otherwise.
+        if (RestoreInProgress() && !fWalletRestoreWarned &&
+            (pblock->GetBlockTime() >= GetTime() - nMaxTipAge || pindex->nHeight % 1000 == 0)) {
             if (!IsInitialBlockDownload(consensus)) {
                 fWalletRestoreWarned = true;
                 SetWalletRestorePending(true);
