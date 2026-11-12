@@ -24,6 +24,7 @@
 #include <vector>
 
 class CReserveKey;
+struct SaplingNoteEntry;
 
 /**
  * Yellowback v2 transaction builder (plan §3.5, §4.2a, §4.6). Built by hand
@@ -521,6 +522,34 @@ void DryRunBuilt(YellowbackWallet& yw, const BuiltTx& out);
 
 /** Sapling shape: run TransactionBuilder::Build() (proofs, binding signature). No lock may be held. */
 void FinishSapling(BuiltTx& out);
+
+/** Sapling shape: TransactionBuilder::Build() (proofs, binding signature) of `builder`; throws "Sapling build failed: …".
+ *  No lock may be held. FinishSapling() and vault_lock's Sapling funding both prove through it. */
+CMutableTransaction ProveSapling(TransactionBuilder& builder);
+
+/** A funding source or collateral destination given as an address string (§4.6); shared by the yed_* builders and
+ *  vault_lock's "from" (beta2 D-3). */
+struct AddressChoice
+{
+    enum Kind { NONE, TRANSPARENT_ADDR, SAPLING, PQ_ADDR } kind;
+    CKeyID keyId;                                   //!< TRANSPARENT_ADDR
+    libzcash::SaplingPaymentAddress sapling;        //!< SAPLING
+    CPQKeyID pqKeyId;                               //!< PQ_ADDR (only with allowPQ)
+    std::string text;
+    AddressChoice() : kind(NONE) {}
+};
+
+/** Parse "" / s1… / ys1…; with allowPQ also a plain-YEC post-quantum address (sq…/tq…/rq…, TX_PQPKH). Anything else
+ *  (a Yellowback yb… address, a P2SH or Sprout address) throws "bad-address: <what>: …". The yed_* builders pass
+ *  allowPQ = false (their messages are unchanged). */
+AddressChoice ParseAddressChoice(const std::string& s, const char* what, bool allowPQ = false);
+
+/** The confirmed Sapling notes of `addr` (minconf 1), largest first as z_sendmany, covering `needed` (at most 20:
+ *  "too-many-notes"); fills the spending key, the anchor and one witness per note. Throws "bad-address: no spending
+ *  key for <addr> in this wallet", "insufficient-yec: need X, have Y in confirmed Sapling notes at <addr>".
+ *  cs_main and wallet.cs_wallet held. */
+void SelectSaplingNotes(CWallet& wallet, const AddressChoice& addr, CAmount needed, libzcash::SaplingExtendedSpendingKey& extsk,
+                        std::vector<SaplingNoteEntry>& sel, std::vector<SaplingWitness>& witnesses, uint256& anchor);
 
 /**
  * SignerBranchId() and VerifyAllInputs() stay in policy.h (libbitcoin_server): the node-context

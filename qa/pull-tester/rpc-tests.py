@@ -129,9 +129,23 @@ BASE_SCRIPTS= [
     'vault_pq_wallet.py',
     # The PQ key lookahead and quantum review F-1: a restored wallet re-finds its PQ keys; foreign keys never move the index.
     'vault_pq_wallet_restore.py',
+    # vault_lock's funding address "from" (beta2 D-3): P2PKH, PQ (both schemes) and Sapling sources, a reorg,
+    # the owner spend of each V, the refusals.
+    'vault_lock_from.py',
     # Chain-wide plain-YEC post-quantum addresses rq…/sq… (D-Q-20, the SQ task): getnewaddress pq, pay / receive /
     # spend, the insight address index, vault_release to a wallet PQ key, z_importpqkey, -mnemonicfile.
     'wallet_pq_address.py',
+    # Balances and listings by address type (beta2 item 15): ECC / post-quantum (by scheme) / Sapling splits in
+    # getwalletinfo and z_gettotalbalance, z_getbalance of a PQ address, the scheme in listings, unconfirmed rule.
+    'wallet_balance_by_type.py',
+    # getnewaddress argument shapes (beta2 item 10): the type first (pq | pqslh | p2pkh) and the old "" + type.
+    'wallet_getnewaddress_type.py',
+    # beta2 D-2/D-6: z_sendmany and z_mergetoaddress between ECC, Sapling and PQ (both schemes), the address matrix.
+    'wallet_address_matrix.py',
+    # beta2 audit H1 / A-M2: a PQ send's fee cap at the RPC and the commit, no rebroadcast of a refused send; uneconomic PQ coins.
+    'wallet_pq_fee_cap.py',
+    # beta2 review M1/m2: a YED token at an ECC holder key (minted before Falcon) is never spent by the stock paths.
+    'wallet_yed_ecc_token.py',
     # Longest test should go first, to favor running tests in parallel
     # vv Tests less than 5m vv
     'wallet.py',

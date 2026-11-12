@@ -1,4 +1,5 @@
 // Copyright (c) 2017-2025 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -143,15 +144,31 @@ std::string GetAllowableDeprecatedFeatures() {
     return result;
 }
 
-std::string Deprecated(bool enabled, std::string method, std::string instead) {
-    auto status = enabled ? "DEPRECATED" : "DISABLED";
-    auto reenable = enabled
-            ? std::string("")
-            : (std::string("You can restart the node with `-allowdeprecated=") + method + "`\n"
-               "to re-enable this method during its deprecation period.\n");
-
+// The message an RPC method gives when -allowdeprecated turned it off. On Ycash every deprecated
+// feature is allowed by default and an explicit -allowdeprecated=<feature> only adds to that
+// default (LoadAllowedDeprecatedFeatures), so the one way to turn a method off is
+// -allowdeprecated=none, which takes no other value. Only the methods whose flag that function
+// sets can be turned off at all (the list is in deprecation.h, above SupportedOnYcash).
+static std::string DisabledByAllowDeprecated(const std::string& method) {
     return std::string("\n")
-           + method + " is " + status + " and will be removed in a future release.\n"
-           + instead + "\n"
-           + reenable;
+           + method + " is DISABLED on this node, which was started with -allowdeprecated=none.\n"
+           "Restart the node without -allowdeprecated=none to enable it (every deprecated\n"
+           "feature is allowed by default on Ycash).\n";
+}
+
+std::string Deprecated(bool enabled, std::string method, std::string instead) {
+    if (!enabled) {
+        return DisabledByAllowDeprecated(method) + (instead.empty() ? "" : instead + "\n");
+    }
+    return std::string("\n")
+           + method + " is DEPRECATED. Ycash keeps it for existing integrations; prefer the alternative below.\n"
+           + instead + "\n";
+}
+
+std::string SupportedOnYcash(bool enabled, std::string method, std::string note) {
+    if (!enabled) {
+        return DisabledByAllowDeprecated(method);
+    }
+    return std::string("\n")
+           + "Supported on Ycash. " + note + "\n";
 }

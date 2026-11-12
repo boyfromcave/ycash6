@@ -1,4 +1,5 @@
 // Copyright (c) 2017-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -190,7 +191,10 @@ main_impl(
         auto tx = buildResult.GetTxOrThrow();
         LogPrint("zrpc", "%s, conventional fee: %s\n", id, FormatMoney(tx.GetConventionalFee()));
 
-        UniValue sendResult = SendTransaction(tx, payments.GetResolvedPayments(), std::nullopt, testmode);
+        // A post-quantum merge is committed under the fee cap re-checked at commit, and is not left behind if refused (H1).
+        UniValue sendResult = !SpendsPQCoin(spendable)
+            ? SendTransaction(tx, payments.GetResolvedPayments(), std::nullopt, testmode)
+            : SendPQTransaction(tx, payments.GetResolvedPayments(), testmode);
 
         effects.UnlockSpendable(wallet);
         return {tx.GetHash(), sendResult};

@@ -9,9 +9,9 @@ Base58Check(4C51 || scheme || keyHash), 53 characters, the TX_PQPKH script a PQ 
 
 - getnewaddress "" "pq" / "pqslh": refused before the vault upgrade; after it an rq… address of the wallet's PQ key
   chain (SLH-DSA while Falcon is inactive), in the address book; validateaddress pqscheme / pqkeyhash;
-- refusals: a scheme-2 rq… before Falcon (sendtoaddress), PQ dust, dumpprivkey / signmessage, z_sendmany /
-  z_shieldcoinbase / z_mergetoaddress from an rq… (A-15), -mineraddress=rq…;
-- pay to rq… with sendtoaddress and sendmany (z_sendmany refuses it, below); receive (listunspent,
+- refusals: a scheme-2 rq… before Falcon (sendtoaddress), PQ dust, dumpprivkey / signmessage, z_shieldcoinbase
+  from an rq… (D-7; z_sendmany and z_mergetoaddress spend one since beta2 D-2/D-6), -mineraddress=rq…;
+- pay to rq… with sendtoaddress, sendmany and z_sendmany; receive (listunspent,
   getreceivedbyaddress, listreceivedbyaddress); spend through coin selection (sendtoaddress) at
   max(the wallet's fee, LEGACY_DEFAULT_FEE, -pqfeerate x size, the ZIP-317 conventional fee);
 - the insight address index: getaddressbalance / utxos / txids / deltas / mempool by rq… and by the yr… YED form;
@@ -25,9 +25,9 @@ Base58Check(4C51 || scheme || keyHash), 53 characters, the TX_PQPKH script a PQ 
   the PQ spend size (B-4), and vault_release names a pqkeyid passed as the recipient. (yed_validateaddress / yed_listtokens transparentAddress = the rq… form is
   checked in yellowback_pq.py, where the YED module is live.)
 
-6.20.0 (ported from ycash-dd d16e02345..d7b2dee30): the z_* RPCs take a libzcash::PaymentAddress, which has no
-post-quantum alternative, so z_sendmany and z_mergetoaddress refuse an rq… recipient by name (v4.5.0 pays it from
-z_sendmany) and z_getbalance does not take one (getreceivedbyaddress stands in); the seed-only restore is
+6.20.0 (ported from ycash-dd d16e02345..d7b2dee30): z_getbalance does not take an rq… address (getreceivedbyaddress
+stands in); z_sendmany and z_mergetoaddress pay and spend one since beta2 D-2/D-6 (quantum spec A-15 reversed,
+wallet_address_matrix.py); the seed-only restore is
 -mnemonicfile, the wallet's recovery phrase (z_exportwallet's recovery_phrase= line), where ycash-dd's -hdseedfile
 takes a 32-byte HD seed (two names, two file formats).
 
@@ -35,6 +35,7 @@ takes a 32-byte HD seed (two names, two file formats).
 """
 
 import os
+import time
 from decimal import Decimal
 
 from test_framework.authproxy import JSONRPCException
@@ -71,6 +72,23 @@ def assert_raises_rpc(substr, fn, *args):
         assert substr in e.error['message'], 'expected %r in %r' % (substr, e.error['message'])
         return e.error['message']
     raise AssertionError('expected an RPC error containing %r' % substr)
+
+
+def merge_fails(node, srcs, dst, policy, substr):
+    """z_mergetoaddress under ``policy`` fails with ``substr``: refused by the RPC itself, or by its operation."""
+    try:
+        opid = node.z_mergetoaddress(srcs, dst, None, None, None, None, policy)['opid']
+    except JSONRPCException as e:
+        assert substr in e.error['message'], 'expected %r in %r' % (substr, e.error['message'])
+        return
+    for _ in range(300):
+        res = node.z_getoperationresult([opid])
+        if res:
+            assert_equal(res[0]['status'], 'failed')
+            assert substr in res[0]['error']['message'], 'expected %r in %r' % (substr, res[0]['error']['message'])
+            return
+        time.sleep(1)
+    raise AssertionError('timeout waiting for %s' % opid)
 
 
 def zat(x):
@@ -134,6 +152,15 @@ class WalletPQAddressTest(BitcoinTestFramework):
         assert_raises_rpc('vault upgrade', n0.getnewaddress, '', 'pq')
         self.mine(ACTIVATION - n0.getblockcount())
 
+        print('help: the address RPCs are supported on Ycash; the unified-account RPCs need NU5 (beta2 item 9)')
+        for m in ('getnewaddress', 'z_getnewaddress', 'z_getbalance', 'z_gettotalbalance', 'getrawchangeaddress'):
+            text = n0.help(m)
+            assert 'Supported on Ycash.' in text and (m + ' is DEPRECATED') not in text and 'will be removed' not in text, (m, text)
+        for m in ('z_getnewaccount', 'z_getaddressforaccount', 'z_listaccounts', 'z_getbalanceforaccount'):
+            assert 'Not available on Ycash (needs NU5)' in n0.help(m), m
+        assert_raises_rpc('require the NU5 network upgrade', n0.z_getnewaccount)
+        assert_raises_rpc('require the NU5 network upgrade', n0.z_listaccounts)
+
         print('getnewaddress "" "pq": an rq… address of the PQ key chain, in the address book')
         a = n0.getnewaddress('', 'pq')
         a2 = n0.getnewaddress('', 'pq')
@@ -165,23 +192,28 @@ class WalletPQAddressTest(BitcoinTestFramework):
         assert_raises_rpc('does not refer to key', n0.signmessage, a, 'hello')
         assert_equal(n0.z_listaddresses(), [])
         zaddr = n0.z_getnewaddress('sapling')   # node 0's first Sapling key (m/32'/coin'/0'): restored by B-1
-        assert_raises_rpc('z_sendmany cannot spend from a post-quantum address', n0.z_sendmany, a, [{'address': zaddr, 'amount': 1}])
+        # z_sendmany and z_mergetoaddress spend from a PQ address (beta2 D-2, D-6: wallet_address_matrix.py);
+        # z_shieldcoinbase still refuses one (D-7).
         assert_raises_rpc('z_shieldcoinbase cannot spend from a post-quantum address', n0.z_shieldcoinbase, a, zaddr)
-        assert_raises_rpc('z_mergetoaddress cannot spend from a post-quantum address', n0.z_mergetoaddress, [a], zaddr)
 
-        print('pay to rq…: sendtoaddress, sendmany (z_sendmany refuses it on 6.20.0)')
+        print('pay to rq…: sendtoaddress, sendmany, z_sendmany')
         t1 = n1.getnewaddress()
         n1.sendtoaddress(t1, 5)
         self.mine(1)
-        assert_raises_rpc('z_sendmany cannot pay a post-quantum address', n1.z_sendmany, t1, [{'address': a3, 'amount': Decimal('0.75')}], 1, None)
-        assert_raises_rpc('z_mergetoaddress cannot pay a post-quantum address', n1.z_mergetoaddress, [t1], a3)
-        tx_z = n1.sendtoaddress(a3, Decimal('0.75'))
+        op = n1.z_sendmany(t1, [{'address': a3, 'amount': Decimal('0.75')}], 1, None, 'AllowFullyTransparent')
+        tx_z = wait_and_assert_operationid_status(n1, op)
         tx_a = n1.sendtoaddress(a, 2)
         tx_m = n1.sendmany('', {a2: 1, n1.getnewaddress(): Decimal('0.5')})
+        # getunconfirmedbalance had no argument-table row on 6.22.0-beta1, so every call failed (beta2 item 12).
+        # A payment from another wallet is untrusted until mined: node 2 (whose wallet is replaced below) sees it.
+        assert_equal(n2.getunconfirmedbalance(), Decimal('0'))
+        n1.sendtoaddress(n2.getnewaddress(), Decimal('0.25'))
         self.sync_all()
+        assert_equal(n2.getunconfirmedbalance(), Decimal('0.25'))
         mem = n0.getaddressmempool({'addresses': [a]})
         assert_equal([(m['txid'], m['satoshis'], m['address']) for m in mem], [(tx_a, zat(2), a)])
         self.mine(1)
+        assert_equal(n2.getunconfirmedbalance(), Decimal('0'))
         utx = {u['txid']: u for u in n0.listunspent(1, 9999999, [a, a2, a3])}
         assert_equal(sorted(utx), sorted([tx_a, tx_m, tx_z]))
         assert_equal((utx[tx_a]['address'], utx[tx_a]['amount'], utx[tx_a]['spendable']), (a, Decimal('2'), True))
@@ -206,6 +238,22 @@ class WalletPQAddressTest(BitcoinTestFramework):
             assert_equal([(x['txid'], x['satoshis'], x['address']) for x in d], [(tx_a, zat(2), form)])
         both = n0.getaddressbalance({'addresses': [a, a2]})
         assert_equal(both['balance'], zat(3))
+
+        print('z_mergetoaddress of a PQ address: the 6.x privacy policy (D-5) refuses a weaker shape than it allows')
+        # A PQ coin is a transparent coin: merging one address's coins into Sapling reveals the sender
+        # (AllowRevealedSenders), into a transparent or PQ address it is fully transparent (AllowFullyTransparent),
+        # and merging two addresses links them (AllowLinkingAccountAddresses; NoPrivacy to a transparent address).
+        locks = n0.listlockunspent()
+        for srcs, dst, policy, substr in (
+                ([a], zaddr, 'FullPrivacy', 'set to `AllowRevealedAmounts` or weaker'),
+                ([a], zaddr, 'AllowRevealedRecipients', 'Select AllowRevealedSenders or weaker'),
+                ([a], n0.getnewaddress(), 'AllowRevealedSenders', 'transparent recipient'),
+                ([a], a3, 'AllowRevealedSenders', 'transparent recipient'),
+                ([a, a2], zaddr, 'AllowRevealedSenders', 'Select AllowLinkingAccountAddresses or weaker'),
+                ([a, a2], n0.getnewaddress(), 'AllowFullyTransparent', 'Select NoPrivacy')):
+            merge_fails(n0, srcs, dst, policy, substr)
+        assert_equal(n0.listlockunspent(), locks)            # a refused merge leaves no coin locked
+        assert_equal(n0.getaddressbalance({'addresses': [a, a2]})['balance'], zat(3))
 
         print('spend an rq… coin through coin selection (sendtoaddress), fee max(DEFAULT_FEE, pqfeerate x size, ZIP-317)')
         others = [{'txid': u['txid'], 'vout': u['vout']} for u in n0.listunspent(0) if not u['address'].startswith('rq')]

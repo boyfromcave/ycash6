@@ -2023,6 +2023,15 @@ public:
     void TopUpPQKeys(std::optional<uint8_t> scheme = std::nullopt);
     void MarkPQKeyUsed(const CPQKeyID& id);
     void NotePQKeysUsed(const CTransaction& tx);
+    /**
+     * Beta2 (review m7): file, once at load, the post-quantum keys of this wallet paid by a TX_PQPKH output of a wallet
+     * transaction that have no address-book entry (purpose "receive"; wallets made before NotePQKeysUsed filed them).
+     * Runs NotePQKeysUsed over every wallet transaction in wallet order; idempotent. cs_wallet held.
+     */
+    void FilePaidPQKeys();
+    //! Beta2 (review m8): keys of this wallet seen as the owner of a vault or intent, or the client of a channel, in a
+    //! wallet transaction (NotePQKeysUsed, FilePaidPQKeys): never filed in the address book on a TX_PQPKH payment.
+    std::set<CPQKeyID> pqOwnerKeysSeen;
     uint32_t PQIssued(uint8_t scheme) const;
     //! True when key was derived from this wallet's seed at its stored index (DerivePQSeed; quantum review F-1).
     bool IsOwnPQKey(const CPQKey& key) const;
@@ -2262,6 +2271,14 @@ public:
             bool fUpdate
             );
     void EraseFromWallet(const uint256 &hash);
+    /**
+     * Erase a wallet transaction that was recorded by CommitTransaction but never reached the mempool or a block
+     * (Yellowback: the refused post-quantum send, YellowbackWallet::RemoveOrphan), together with every index that
+     * names it, so that no later lookup recreates it as an empty entry (review H-1). The caller has established
+     * that the transaction is neither in the mempool nor in a block. Returns false, changing nothing, only when
+     * the wallet file record could not be erased. Requires cs_wallet.
+     */
+    bool EraseUnbroadcastTx(const uint256& txid);
 
     // deletetx machinery (gated by -deletetx; see wallet.cpp for details).
     void ReorderWalletTransactions(std::map<std::pair<int,int>, const uint256>& mapSorted, int64_t& maxOrderPos);
@@ -2786,5 +2803,22 @@ bool ImportVaultSetSigs(CWallet& wallet, const std::vector<VaultSetSigRecord>& r
  *  restore marker now; any other key is remembered as pending, and a later SET_JOIN of it in a connected block (IBD,
  *  reindex, a join not yet mined) sets the marker then. False when the wallet database cannot be written. */
 bool MarkVaultKeyImported(CWallet& wallet, const CPubKey& key);
+
+/**
+ * Defence in depth for a plain-YEC spend whose inputs this wallet selected itself (beta2: z_sendmany, z_mergetoaddress,
+ * sendtoaddress/sendmany through CreateTransaction, vault_lock "from"). The Yellowback wallet layer keeps every
+ * YED-bearing output locked, so AvailableCoins never offers one; this is the second check, the one the YED builders
+ * make (yellowback/txbuilder.cpp SelectYec), for an outpoint whose lock was removed (yed_unlockcoin): an input the
+ * Yellowback index knows as a token or a vault, an output of a transaction the index has not judged yet (unconfirmed)
+ * that its Yellowback payload assigns YED (what the wallet layer pre-locks), or a carrier the wallet layer holds is a
+ * Yellowback outpoint, since consensus would accept its plain spend and burn its YED. Where Yellowback is live and
+ * the index is unhealthy, a `strict` caller (the post-quantum source paths, vault_lock "from") is refused outright --
+ * the coin locks are then not reconciled and cannot be trusted --, while the stock paths (strict false) fall back to
+ * the payload check for every input. Where Yellowback is not live there is nothing to check. Returns "" when no input
+ * is a Yellowback outpoint, else the refusal (RPC_WALLET_ERROR at the callers); `refusedOut`, when given, receives
+ * the Yellowback outpoints (empty for the unhealthy-index refusal). Takes cs_main, cs_wallet, then cs_yellowback
+ * (lock order N25; 6.x takes cs_main first).
+ */
+std::string YellowbackInputRefusal(const std::vector<COutPoint>& inputs, bool strict = true, std::vector<COutPoint>* refusedOut = nullptr);
 
 #endif // BITCOIN_WALLET_WALLET_H
