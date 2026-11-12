@@ -22,7 +22,7 @@ _stock_node, _stockparity); this script strings them together on one chain.
      so node 1 runs it below VAULT_ACTIVATION only -- compared fork-vs-stock against node 5 as the
      fork binary without the overlay (yellowback_stockparity's comparison), its block and a pool's
      block followed both ways -- and is then restarted on the fork binary for items 1-10
-  1  every Yellowback node starts with the attestor set, index synced, yed_getinfo rpcversion 8
+  1  every Yellowback node starts with the attestor set, index synced, yed_getinfo rpcversion 9
      healthy; node 1 has no yed_* command
   2  pools tag quotes; yed_getprice median; forged tags from a non-pool change nothing
   3  activation is UPGRADE_VAULT at a height plus the attestor set (U-22): one branch id and one
@@ -425,7 +425,7 @@ class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
         rows = []
         for i in YELLOWBACK:
             info = wait_yed_healthy(self.nodes[i], timeout=60)
-            assert_equal(info['rpcversion'], 8)   # the fee structure (D-Q-23, rpcversion 8); 7 was post-quantum owners, 6 in-term claims (IT-7)
+            assert_equal(info['rpcversion'], 9)   # scheme-visible PQ prefixes (D-9, rpcversion 9); 8 the fee structure (D-Q-23); 7 was post-quantum owners, 6 in-term claims (IT-7)
             assert_equal(info['healthy'], True)
             assert_equal(info['height'], self.nodes[i].getblockcount())
             assert_equal(info['startHeight'], VAULT_ACTIVATION)
@@ -440,7 +440,7 @@ class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
         off = overlay_off(stock)
         sub = stock.getnetworkinfo()['subversion']
         self.say(item, 'node 1 (stock, no attestor set): %s, height %d, %s' % (sub, stock.getblockcount(), off))
-        self.passed(item, 'every Yellowback node starts with the attestor set, syncs the index, rpcversion 8 healthy; node 1 has no yed_* command',
+        self.passed(item, 'every Yellowback node starts with the attestor set, syncs the index, rpcversion 9 healthy; node 1 has no yed_* command',
                     '7 Yellowback nodes at height %d, one state hash %s; node 1 stock (%s)' % (rows[0], short(h), sub))
 
     # ------------------------------------------------------------------ 2
@@ -1007,7 +1007,7 @@ class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
 
     def item10_pointer(self):
         msg = ('every vault_*.py and yellowback_*.py (unarmed and --armed), the full test_bitcoin, the audit script (registration, '
-               'attribution, naming, the DoS gate, determinism, the rpcversion 8 contract, vault_vectors.json and '
+               'attribution, naming, the DoS gate, determinism, the rpcversion 9 contract, vault_vectors.json and '
                'yellowback_golden.json byte-identical to ycash-dd, the consensus-diff report for the two-reviewer gate; the frozen-file '
                'and budget legs report-only on the upgrade line) and the lockorder / sanitizer / coverage jobs are the CI gates '
                '(.github/workflows/yellowback-tests.yml, qa/yellowback-audit.sh) -- not run here')

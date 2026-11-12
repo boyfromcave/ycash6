@@ -14,12 +14,31 @@
 #include <script/standard.h>
 #include <zcash/Address.hpp>
 
+#include <map>
 #include <vector>
 #include <string>
 
-/** The plain-YEC PQ address version (D-Q-20) of a network ID: 4dd9 "sq…" main, 4f61 "tq…" test, 4c51 "rq…"
- *  regtest; empty for any other network. */
-std::vector<unsigned char> PlainPQAddressVersion(const std::string& networkID);
+/** A post-quantum address's Base58Check versions (D-9): one 3-byte version per registered scheme, so the
+ *  prefix names the scheme. The address is Base58Check(version || 32-byte keyHash), 53 characters. */
+typedef std::map<uint8_t, std::vector<unsigned char>> PQAddressVersions;
+
+/** The plain-YEC PQ address versions (D-Q-20, D-9) of a network ID: main 4ddd04 "sqf…" (FN-DSA-512) and
+ *  4dde6a "sqs…" (SLH-DSA-SHA2-128s), test 4f6519 "tqf…" / 4f667f "tqs…", regtest 4c54ef "rqf…" / 4c5655
+ *  "rqs…" (quantum spec §4); empty for any other network. */
+const PQAddressVersions& PlainPQAddressVersions(const std::string& networkID);
+
+/** Base58Check(versions[id.scheme] || id.hash); "" for a scheme without a version or outside the registry. */
+std::string EncodePQAddress(const CPQKeyID& id, const PQAddressVersions& versions);
+
+/** True, and id set, iff data (a decoded Base58Check payload) is versions[s] || 32-byte keyHash for a
+ *  registered scheme s. Any other version, length or scheme is refused, the pre-D-9 form among them. */
+bool DecodePQAddressData(const std::vector<unsigned char>& data, const PQAddressVersions& versions, CPQKeyID& id);
+bool DecodePQAddress(const std::string& str, const PQAddressVersions& versions, CPQKeyID& id);
+
+/** The pre-D-9 form (2-byte version || scheme || keyHash: "sq…"/"tq…"/"rq…" plain, "yb…"/"yt…"/"yr…" YED),
+ *  never produced and never accepted as input. Only the wallet reads it, to load an address-book record
+ *  written before D-9 and to check a key-dump line from before it. */
+bool DecodeLegacyPQAddress(const std::string& str, const std::string& networkID, bool yed, CPQKeyID& id);
 
 class KeyIO {
 private:

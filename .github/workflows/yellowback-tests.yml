@@ -278,7 +278,10 @@ env:
   # copy and the contract's new fields come from.
   # 698870c (#22) amends fees spec section 5.1: fee publication follows price trust, so HALT-2 alone keeps the
   # dollar fee price. The spec copy and the contract it generates are unchanged by it.
-  YB_WORKSPACE_COMMIT: ${{ inputs.workspace_commit || '698870c998e2534f45461f5bb98773d014e96829' }}
+  # 0c95229 (yellowback#43's merge, D-9) adds the generator's prefix line (rpcversion 9: yed_getinfo's
+  # pqAddressVersion / pq.plainAddressVersion as objects keyed by scheme, docs/plans/yellowback-pq-prefix-rpc-delta.md
+  # section 4.12).
+  YB_WORKSPACE_COMMIT: ${{ inputs.workspace_commit || '0c952297195a00494ee0a41b6bb930b2c85b63e4' }}
   # The mixed tier's pins (workspace docs/plans/kogany/ci-design.md; bump by PR, never a branch tip).
   # kogany: vaults/kogany-compat at dd834da8b (the koganyd identity); its koganyd-bin artifact (any
   # kogany workflow) or, when that has expired or does not exist, a build at this commit (dev
@@ -1108,6 +1111,12 @@ jobs:
           if [ "$quantum" = 1 ] && head -1 doc/yellowback-rpc.md | grep -Eq 'rpcversion ([89]|[1-9][0-9])$'; then fees=1; fi
           echo "fees=$fees" >> "$GITHUB_OUTPUT"
           echo "fees line: $fees"
+          # The prefix line (the fees line after D-9, quantum spec section 4.1): the rpc doc's title states rpcversion 9;
+          # the contract comes from the workspace's prefix mode (--check-prefix), as ycash-dd's audit decides it.
+          prefix=0
+          if [ "$fees" = 1 ] && head -1 doc/yellowback-rpc.md | grep -Eq 'rpcversion (9|[1-9][0-9])$'; then prefix=1; fi
+          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
+          echo "prefix line: $prefix"
 
       - name: qa/yellowback-audit.sh (frozen set and line budgets, registration, the other script legs)
         # One script so the gate a developer runs locally is the gate CI runs. On the upgrade line
@@ -1267,6 +1276,7 @@ jobs:
           INTERM: ${{ steps.line.outputs.interm }}
           QUANTUM: ${{ steps.line.outputs.quantum }}
           FEES: ${{ steps.line.outputs.fees }}
+          PREFIX: ${{ steps.line.outputs.prefix }}
         run: |
           git init -q "$RUNNER_TEMP/ws"
           git -C "$RUNNER_TEMP/ws" fetch -q --depth 1 "https://github.com/$YB_WORKSPACE_REPO.git" "$YB_WORKSPACE_COMMIT"
@@ -1279,6 +1289,7 @@ jobs:
           line, ver = ("interm", 6) if os.environ.get("INTERM") == "1" else ("upgrade", 5)
           if os.environ.get("QUANTUM") == "1": line, ver = ("quantum", 7)
           if os.environ.get("FEES") == "1": line, ver = ("fees", 8)
+          if os.environ.get("PREFIX") == "1": line, ver = ("prefix", 9)
           if x.doc_line(doc) != line:
               sys.exit("doc/yellowback-rpc.md is rpcversion %s; the %s line is rpcversion %d" % (x.rpcdoc_version(doc), line, ver))
           want = x.contract_text(x.read_plan(), x.read_plan_v3(), doc, x.RPCDOC6_REL)
@@ -1287,7 +1298,7 @@ jobs:
               sys.exit("contract rpcversion is not %d" % ver)
           if have != want:
               sys.stdout.writelines(difflib.unified_diff(have.splitlines(True), want.splitlines(True), "committed", "generated"))
-              sys.exit("doc/yellowback-rpc-contract.json is not the generator's output: regenerate it (make spec%s in the workspace)" % ({"interm": "-in-term", "quantum": "-quantum", "fees": "-fees"}.get(line, "-upgrade")))
+              sys.exit("doc/yellowback-rpc-contract.json is not the generator's output: regenerate it (make spec%s in the workspace)" % ({"interm": "-in-term", "quantum": "-quantum", "fees": "-fees", "prefix": "-prefix"}.get(line, "-upgrade")))
           print("contract: rpcversion %d, identical to the generator's output (%d bytes)" % (ver, len(have)))
           PY
 
@@ -1376,6 +1387,8 @@ jobs:
           if [ "$want" = 6 ] && grep -q '"falconActive"' src/rpc/yellowback.cpp; then want=7; fi
           # rpcversion 8 on the fee line (quantum fees spec §3.4: params.fees, maxMintCents, supplyCap).
           if [ "$want" = 7 ] && grep -q '"maxMintCents"' src/rpc/yellowback.cpp; then want=8; fi
+          # rpcversion 9 on the prefix line (D-9, quantum spec §4.1: the PQ address versions per scheme).
+          if [ "$want" = 8 ] && grep -q 'PQAddressVersionsJSON' src/rpc/yellowback.cpp; then want=9; fi
           export want
           test -f doc/yellowback-rpc.md && grep -q "rpcversion $want" doc/yellowback-rpc.md
           # rpcversion 5 (the vault upgrade, upgrade plan §15.10): yed_getinfo carries the upgrade object

@@ -59,7 +59,7 @@
 
 using namespace yellowback;
 
-static const int YELLOWBACK_RPC_VERSION = 8;   // 8: the fee structure (D-Q-23/24/25: params.fees, maxMintCents, supplyCap, vault.pMint, yed_estimatefee's signature; feeMinZat/feeBps gone); 7: post-quantum owners; 5: the vault upgrade (upgrade plan §15.10): no activation/enforcement fields, V vaults, claim intents;
+static const int YELLOWBACK_RPC_VERSION = 9;   // 9: scheme-visible post-quantum address prefixes (D-9): params.pqAddressVersion and params.pq.plainAddressVersion are objects keyed by scheme; 8: the fee structure (D-Q-23/24/25: params.fees, maxMintCents, supplyCap, vault.pMint, yed_estimatefee's signature; feeMinZat/feeBps gone); 7: post-quantum owners; 5: the vault upgrade (upgrade plan §15.10): no activation/enforcement fields, V vaults, claim intents;
                                                // 6: in-term claims (in-term plan IT-7): yed_listclaimable rows in term with `claimable`, the early-redeem fee;
                                                // 7: post-quantum owners (quantum spec §6.2): ownerScheme/ownerHash replace ownerPubKey/ownerKeyId,
                                                //    the v4 MINT, params.pq, PQ yb… addresses
@@ -69,6 +69,14 @@ namespace {
 /** C-6: paging defaults and the yed_listminers window bound (the launch bar reads 2016; a day of 75 s blocks is 1152). */
 const int DEFAULT_LIST_COUNT = 1000;
 const int MAX_LISTMINERS_WINDOW = 4032;
+
+/** A PQ address's versions as {"<scheme>": "<hex>"} (D-9: one 3-byte version per scheme). */
+UniValue PQAddressVersionsJSON(const PQAddressVersions& versions)
+{
+    UniValue o(UniValue::VOBJ);
+    for (const auto& [scheme, ver] : versions) o.pushKV(strprintf("%d", (int)scheme), HexStr(ver));
+    return o;
+}
 
 YellowbackIndex& EnsureIndex()
 {
@@ -790,9 +798,10 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
         prm.pushKV("fees", fees);
     }
     // the Base58Check version bytes of this network's YED addresses (hex), so clients need not hard-code them:
-    // the 20-byte P2PKH form (D10; mainnet 1fdd "yb…", D-Q-21) and the 33-byte PQ form (quantum spec §4; 56ab)
+    // the 20-byte P2PKH form (D10; mainnet 1fdd "yb…", D-Q-21) and the PQ form, one 3-byte version per scheme
+    // keyed by scheme number (quantum spec §4, D-9; mainnet "2": 56aede "ybf…", "1": 56b044 "ybs…")
     prm.pushKV("addressVersion", HexStr(p.addressVersion));
-    prm.pushKV("pqAddressVersion", HexStr(p.pqAddressVersion));
+    prm.pushKV("pqAddressVersion", PQAddressVersionsJSON(p.pqAddressVersions));
     UniValue windows(UniValue::VOBJ);
     windows.pushKV("fast", p.pFastWindow);
     windows.pushKV("mid", p.pMidWindow);
@@ -838,7 +847,7 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
         pqo.pushKV("falconActive", falcon);
         pqo.pushKV("falconHeight", p.pqFalconHeight);
         pqo.pushKV("feeRateZatPerKB", PQFeeRateZatPerKB());
-        pqo.pushKV("plainAddressVersion", HexStr(PlainPQAddressVersion(::Params().NetworkIDString())));   // D-Q-20: sq/tq/rq
+        pqo.pushKV("plainAddressVersion", PQAddressVersionsJSON(PlainPQAddressVersions(::Params().NetworkIDString())));   // D-Q-20, D-9: sqf/sqs, tqf/tqs, rqf/rqs
         prm.pushKV("pq", pqo);
     }
     UniValue policy(UniValue::VOBJ);

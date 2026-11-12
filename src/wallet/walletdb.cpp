@@ -520,6 +520,10 @@ public:
     bool fAnyUnordered;
     int nFileVersion;
     vector<uint256> vWalletUpgrade;
+    // D-9 (quantum spec §4.1): address-book records keyed by a pre-D-9 post-quantum address string, rewritten under
+    // the current string once the load is done; and the current-form keys seen, whose value wins over a legacy one.
+    std::set<std::string> legacyPQNames, legacyPQPurposes;
+    std::set<std::string> currentNames, currentPurposes;
 
     CWalletScanState() {
         nKeys = nCKeys = nKeyMeta = nZKeys = nCZKeys = nZKeyMeta = nSapZAddrs = 0;
@@ -528,6 +532,21 @@ public:
         nFileVersion = 0;
     }
 };
+
+/** An address-book record's key: its address string. A post-quantum record written before D-9 holds the
+ *  2-byte-version form, which DecodeDestination refuses; it still names its key (quantum spec §4.1), and `legacy` is
+ *  set so LoadWallet rewrites the record under the current string. */
+static CTxDestination DecodeAddressBookKey(KeyIO& keyIO, const std::string& strAddress, bool& legacy)
+{
+    legacy = false;
+    CTxDestination dest = keyIO.DecodeDestination(strAddress);
+    CPQKeyID old;
+    if (!IsValidDestination(dest) && DecodeLegacyPQAddress(strAddress, Params().NetworkIDString(), false, old)) {
+        dest = old;
+        legacy = true;
+    }
+    return dest;
+}
 
 bool
 ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
@@ -542,15 +561,35 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
         ssKey >> strType;
         if (strType == "name")
         {
-            string strAddress;
+            string strAddress, strName;
             ssKey >> strAddress;
-            ssValue >> pwallet->mapAddressBook[keyIO.DecodeDestination(strAddress)].name;
+            ssValue >> strName;
+            bool legacy;
+            const CTxDestination dest = DecodeAddressBookKey(keyIO, strAddress, legacy);
+            if (legacy) {
+                wss.legacyPQNames.insert(strAddress);
+                if (!wss.currentNames.count(keyIO.EncodeDestination(dest)))   // a current-form record wins
+                    pwallet->mapAddressBook[dest].name = strName;
+            } else {
+                wss.currentNames.insert(strAddress);
+                pwallet->mapAddressBook[dest].name = strName;
+            }
         }
         else if (strType == "purpose")
         {
-            string strAddress;
+            string strAddress, strPurpose;
             ssKey >> strAddress;
-            ssValue >> pwallet->mapAddressBook[keyIO.DecodeDestination(strAddress)].purpose;
+            ssValue >> strPurpose;
+            bool legacy;
+            const CTxDestination dest = DecodeAddressBookKey(keyIO, strAddress, legacy);
+            if (legacy) {
+                wss.legacyPQPurposes.insert(strAddress);
+                if (!wss.currentPurposes.count(keyIO.EncodeDestination(dest)))
+                    pwallet->mapAddressBook[dest].purpose = strPurpose;
+            } else {
+                wss.currentPurposes.insert(strAddress);
+                pwallet->mapAddressBook[dest].purpose = strPurpose;
+            }
         }
         else if (strType == "tx")
         {
@@ -1326,6 +1365,32 @@ DBErrors CWalletDB::LoadWallet(CWallet* pwallet)
 
     for (uint256 hash : wss.vWalletUpgrade)
         WriteTx(pwallet->mapWallet[hash]);
+
+    // D-9 (quantum spec §4.1): rewrite each pre-D-9 post-quantum address-book record under the current string, in one
+    // transaction (all or none), so a later DelAddressBook (which erases the current key) is final. Idempotent: once
+    // committed no legacy record is left; a failure leaves the wallet as it was and is retried at the next load.
+    if (!wss.legacyPQNames.empty() || !wss.legacyPQPurposes.empty()) {
+        KeyIO keyIO(Params());
+        bool ok = TxnBegin();
+        size_t n = 0;
+        for (const auto& [legacyKeys, isName] : {std::make_pair(&wss.legacyPQNames, true), std::make_pair(&wss.legacyPQPurposes, false)}) {
+            for (const std::string& oldKey : *legacyKeys) {
+                CPQKeyID id;
+                if (!ok || !DecodeLegacyPQAddress(oldKey, Params().NetworkIDString(), false, id)) continue;
+                const std::string newKey = keyIO.EncodeDestination(id);
+                const CAddressBookData& entry = pwallet->mapAddressBook[id];
+                ok = !newKey.empty() && (isName ? WriteName(newKey, entry.name) && EraseName(oldKey)
+                                                : WritePurpose(newKey, entry.purpose) && ErasePurpose(oldKey));
+                n++;
+            }
+        }
+        if (ok && TxnCommit()) {
+            LogPrintf("Rewrote %u pre-D-9 post-quantum address-book records under the current address form\n", (unsigned)n);
+        } else {
+            TxnAbort();
+            LogPrintf("Rewriting the pre-D-9 post-quantum address-book records failed; the wallet keeps them and retries at the next load\n");
+        }
+    }
 
     // Rewrite encrypted wallets of versions 0.4.0 and 0.5.0rc:
     if (wss.fIsEncrypted && (wss.nFileVersion == 40000 || wss.nFileVersion == 50000))

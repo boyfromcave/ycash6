@@ -39,7 +39,7 @@ src/yellowback/index.h 241446bc6a427a7d4ef4f44fe0f510511840f9caefbd805844155512d
 # Comment only: DEFAULT_YELLOWBACK_FEE still 1000; the note names the 6.20.0
 # P-2 rule max(-yellowbackfee, ZIP-317 conventional fee). TestFastParams is
 # declared on both lines (testnet plan Revision 3, 2026-10-29); pins updated then.
-src/yellowback/params.h 5aa875e281412cb8e7811e1761319961624dd154b55506e08781e39d5f6d36e5 43bc1bad3eec748e156aadfb12e426a3a05859f19c723881c45c69881033a4a5
+src/yellowback/params.h 167a0256b73c5b0c3745ed37636e80d5c72b76525ea9f37409c80f2810db0f2f 1e5a5092ab7e8124147c48f02334859923efa204f4f70d6ddd9b8f49befba669
 
 # util/time.h, PrecomputedTransactionData(tx, prevouts), and
 # TransactionSignatureChecker(tx, txdata, nIn, amount).
