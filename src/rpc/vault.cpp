@@ -790,10 +790,41 @@ std::vector<std::pair<COutPoint, CAmount>> EligibleCoins(const std::set<COutPoin
     return eligible;
 }
 
-/** Beta2 item 21b: the coins Fund locked for a transaction not yet broadcast and not remembered as a build
- *  (RememberBuild). Broadcast releases those among a refused transaction's inputs, so a refusal leaves them free
- *  instead of locked until restart; an accepted transaction, or a remembered build, takes them off. cs_wallet. */
-std::set<COutPoint> g_fundLocked;
+/** Beta2 item 21b, review LOW-4: the coins Fund locked during one vault RPC call. Every vault RPC that writes runs
+ *  inside one (FundScoped, the command table; BuildYedIntentCancel for yed_buildcancel). A transaction the mempool
+ *  accepts (Broadcast) or a build the wallet remembers (RememberBuild) takes its inputs off; when the call ends, by
+ *  any return or throw, the coins still listed are unlocked. So a refused broadcast, an unknown setid after the
+ *  funding, a signing failure or a conflicting build leaves them free instead of locked until restart. Only coins
+ *  Fund locked in this call are listed: Fund picks unlocked coins only, so a coin locked with lockunspent is never
+ *  released here. cs_wallet is taken for the release. */
+class FundScope
+{
+public:
+    FundScope() : prev(current) { current = this; }
+    ~FundScope()
+    {
+        current = prev;
+        if (locked.empty() || !pwalletMain) return;
+        LOCK(pwalletMain->cs_wallet);
+        for (COutPoint op : locked) pwalletMain->UnlockCoin(op);
+    }
+    FundScope(const FundScope&) = delete;
+    FundScope& operator=(const FundScope&) = delete;
+    static void Locked(const COutPoint& op) { if (current) current->locked.insert(op); }
+    static void Kept(const CTransaction& tx) { if (current) for (const CTxIn& in : tx.vin) current->locked.erase(in.prevout); }
+private:
+    static thread_local FundScope* current;
+    FundScope* prev;
+    std::set<COutPoint> locked;
+};
+thread_local FundScope* FundScope::current = nullptr;
+
+template <rpcfn_type F>
+UniValue FundScoped(const UniValue& params, bool fHelp)
+{
+    FundScope scope;
+    return F(params, fHelp);
+}
 
 /** Add wallet P2PKH inputs (and a change output) so that inputs = outputs + the fee, given `inputValue` already
  *  provided by the transaction's existing inputs. The fee is priced from the size (beta2 item 21b): max(VAULT_RPC_FEE,
@@ -837,7 +868,7 @@ void Fund(CMutableTransaction& mtx, CAmount inputValue, FundMode mode = FundMode
         if (got < needed && !yedRefusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);   // review L-3
         if (got < needed)
             throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, strprintf("insufficient confirmed transparent funds: need %s more%s", FormatMoney(needed - got),
-                coinbaseValue > 0 ? strprintf(" (%s of coinbase outputs must be shielded first: z_shieldcoinbase)", FormatMoney(coinbaseValue)) : std::string()));
+                coinbaseValue > 0 ? strprintf(" (%s of coinbase outputs must be shielded first: z_shieldcoinbase, then z_sendmany to a transparent address, or vault_lock \"from\" the shielded address)", FormatMoney(coinbaseValue)) : std::string()));
         for (const COutPoint& op : chosen) mtx.vin.push_back(CTxIn(op, CScript(), CTxIn::SEQUENCE_FINAL));
         const CAmount change = got - needed;
         if (change >= VAULT_RPC_MIN_CHANGE) {
@@ -856,7 +887,7 @@ void Fund(CMutableTransaction& mtx, CAmount inputValue, FundMode mode = FundMode
     }
     for (COutPoint& op : chosen) {
         pwalletMain->LockCoin(op);
-        g_fundLocked.insert(op);
+        FundScope::Locked(op);
     }
 }
 
@@ -938,7 +969,7 @@ void RememberBuild(const COutPoint& templ, CMutableTransaction mtx)
     for (CTxIn& in : mtx.vin)
         if (in.prevout == templ) in.scriptSig = CScript();
     pwalletMain->mapVaultBuilds[templ] = mtx;
-    for (const CTxIn& in : mtx.vin) g_fundLocked.erase(in.prevout);   // the build's registry holds its fee inputs now
+    FundScope::Kept(CTransaction(mtx));   // the build's registry holds its fee inputs now
     if (!CWalletDB(pwalletMain->strWalletFile).WriteVaultBuild(templ, mtx))
         throw JSONRPCError(RPC_WALLET_ERROR, "cannot record the vault build in the wallet");
 }
@@ -1133,6 +1164,7 @@ UniValue HandoffSend(CMutableTransaction& mtx, const COutPoint& buildKey, const 
 
     UniValue sign(UniValue::VARR), foreign(UniValue::VARR);
     CAmount signedIn = 0;
+    std::vector<COutPoint> named;   // the wallet coins signed only because allowinputs names them
     std::string refuse;
     for (unsigned int i = 0; i < mtx.vin.size(); i++) {
         CTxOut prev;
@@ -1156,8 +1188,13 @@ UniValue HandoffSend(CMutableTransaction& mtx, const COutPoint& buildKey, const 
         if (chosen || opt.allowinputs.count(mtx.vin[i].prevout)) {
             sign.push_back(row);
             signedIn += prev.nValue;
+            if (!chosen) named.push_back(mtx.vin[i].prevout);
         }
     }
+    // Beta2 audit L-3: a coin `allowinputs` names is the caller's choice, but never a Yellowback outpoint (a YED token,
+    // vault or carrier of this wallet, as the wallet's own fee coins are checked); its YED would burn. A deliberate burn
+    // goes through sendrawtransaction ... allowyedburn.
+    if (refuse.empty()) refuse = YellowbackInputRefusal(named, true);
 
     std::set<unsigned int> own;
     UniValue actField(UniValue::VNULL);
@@ -1222,22 +1259,13 @@ void RememberActBuild(const CMutableTransaction& mtx)
 
 uint256 BroadcastOrRefuse(const CTransaction& tx);
 
-/** Submit `tx` to the mempool and relay it. A refusal throws, first releasing the coin locks Fund took for its inputs
- *  (g_fundLocked; beta2 item 21b). */
+/** Submit `tx` to the mempool and relay it; a refusal throws. An accepted transaction keeps the coin locks Fund took
+ *  for its inputs; a refused one leaves them to the call's FundScope, which releases them (beta2 item 21b). */
 uint256 Broadcast(const CTransaction& tx)
 {
-    try {
-        const uint256 txid = BroadcastOrRefuse(tx);
-        for (const CTxIn& in : tx.vin) g_fundLocked.erase(in.prevout);
-        return txid;
-    } catch (...) {
-        for (const CTxIn& in : tx.vin) {
-            if (!g_fundLocked.erase(in.prevout)) continue;
-            COutPoint op = in.prevout;
-            pwalletMain->UnlockCoin(op);
-        }
-        throw;
-    }
+    const uint256 txid = BroadcastOrRefuse(tx);
+    FundScope::Kept(tx);
+    return txid;
 }
 
 uint256 BroadcastOrRefuse(const CTransaction& tx)
@@ -1797,7 +1825,7 @@ UniValue set_equivocation(const UniValue& params, bool fHelp)
 // ---- vault_lock's funding address ("from", beta2 decision D-3) ----------------------------------
 // vault_lock is funded, by default, from the wallet's confirmed transparent P2PKH coins (Fund). With "from" it is
 // funded from one address of this wallet only: a transparent P2PKH address (its coins), a plain-YEC post-quantum
-// address (its TX_PQPKH coins, signed under the next block's vault flags, the fee priced by size as sendtoaddress
+// address (its TX_PQPKH coins, signed under the next block's vault flags, the fee priced by size as z_sendmany
 // prices a PQ input) or a Sapling address (its notes, through the Sapling machinery yed_mint uses:
 // yellowback::ParseAddressChoice / SelectSaplingNotes / ProveSapling). Change returns to the same address (D-4).
 // 6.20.0: built by hand like every vault RPC (no WalletTxBuilder, no privacy policy: a vault lock always reveals its
@@ -1822,22 +1850,23 @@ CScript LockFromScript(const yellowback::AddressChoice& from)
 }
 
 /** Refuse a "from" this wallet cannot spend at the next block: a scheme-2 address before Falcon, an address of
- *  another wallet, a watch-only one. cs_main and cs_wallet held. */
+ *  another wallet, a watch-only one. cs_main and cs_wallet held. The first two answer RPC_INVALID_ADDRESS_OR_KEY, the
+ *  code z_sendmany gives the same conditions (beta2 audit L-5). */
 void CheckLockFrom(const yellowback::AddressChoice& from)
 {
     if (from.kind == yellowback::AddressChoice::SAPLING) {
         if (pwalletMain->HaveSaplingSpendingKeyForAddress(from.sapling)) return;
         if (pwalletMain->HaveSaplingIncomingViewingKey(from.sapling))
             throw JSONRPCError(RPC_WALLET_ERROR, "from: a watch-only address of this wallet (no spending key)");
-        throw JSONRPCError(RPC_WALLET_ERROR, "from: not an address of this wallet");
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "from: not an address of this wallet");
     }
     if (from.kind == yellowback::AddressChoice::PQ_ADDR && from.pqKeyId.scheme == pq::SCHEME_FN_DSA_512 &&
         !IsPQFalconActive(Params().GetConsensus(), NextHeight()))
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "from: an FN-DSA-512 (scheme 2) address cannot be spent before Falcon is active at the next block");
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "from: an FN-DSA-512 (scheme 2) address cannot be spent before Falcon is active at the next block");
     const isminetype mine = IsMine(*pwalletMain, LockFromScript(from));
     if (mine == ISMINE_SPENDABLE) return;
     if (mine != ISMINE_NO) throw JSONRPCError(RPC_WALLET_ERROR, "from: a watch-only address of this wallet (no spending key)");
-    throw JSONRPCError(RPC_WALLET_ERROR, "from: not an address of this wallet");
+    throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "from: not an address of this wallet");
 }
 
 CMutableTransaction DummySignedLockFrom(const CMutableTransaction& mtx, size_t inputBytes);
@@ -3002,6 +3031,7 @@ UniValue vault_app(const UniValue& params, bool fHelp)
  *  since CAN-2, the CANCEL_COSIGN marker (`extra` follows vout[0] in order). */
 UniValue BuildYedIntentCancel(const COutPoint& intent, const std::vector<CTxOut>& extra)
 {
+    FundScope scope;
     return BuildIntentCancel(intent, extra, true, false, false);
 }
 #endif
@@ -3015,28 +3045,28 @@ static const CRPCCommand commands[] =
     { "vault",   "vault_list",          &vault_list,           true  },
     { "vault",   "vault_decodescript",  &vault_decodescript,   true  },
 #ifdef ENABLE_WALLET
-    { "vault",   "set_create",          &set_create,           false },
-    { "vault",   "set_join",            &set_join,             false },
-    { "vault",   "set_heartbeat",       &set_heartbeat,        false },
-    { "vault",   "set_leave",           &set_leave,            false },
-    { "vault",   "set_buildact",        &set_buildact,         false },
-    { "vault",   "set_signact",         &set_signact,          false },
-    { "vault",   "set_sendact",         &set_sendact,          false },
-    { "vault",   "set_equivocation",    &set_equivocation,     false },
-    { "vault",   "vault_lock",          &vault_lock,           false },
-    { "vault",   "vault_getnewowner",   &vault_getnewowner,    false },
-    { "vault",   "vault_buildunlock",   &vault_buildunlock,    false },
-    { "vault",   "set_signunlock",      &set_signunlock,       false },
-    { "vault",   "vault_buildcancel",   &vault_buildcancel,    false },
-    { "vault",   "set_signcancel",      &set_signcancel,       false },
-    { "vault",   "vault_refee",         &vault_refee,          false },
-    { "vault",   "set_listsigned",      &set_listsigned,       false },
-    { "vault",   "set_importsigned",    &set_importsigned,     false },
-    { "vault",   "set_acknowledgerestore", &set_acknowledgerestore, false },
-    { "vault",   "vault_send",          &vault_send,           false },
-    { "vault",   "vault_release",       &vault_release,        false },
-    { "vault",   "vault_ownerspend",    &vault_ownerspend,     false },
-    { "vault",   "vault_app",           &vault_app,            false },
+    { "vault",   "set_create",          &FundScoped<set_create>, false },
+    { "vault",   "set_join",            &FundScoped<set_join>, false },
+    { "vault",   "set_heartbeat",       &FundScoped<set_heartbeat>, false },
+    { "vault",   "set_leave",           &FundScoped<set_leave>, false },
+    { "vault",   "set_buildact",        &FundScoped<set_buildact>, false },
+    { "vault",   "set_signact",         &FundScoped<set_signact>, false },
+    { "vault",   "set_sendact",         &FundScoped<set_sendact>, false },
+    { "vault",   "set_equivocation",    &FundScoped<set_equivocation>, false },
+    { "vault",   "vault_lock",          &FundScoped<vault_lock>, false },
+    { "vault",   "vault_getnewowner",   &FundScoped<vault_getnewowner>, false },
+    { "vault",   "vault_buildunlock",   &FundScoped<vault_buildunlock>, false },
+    { "vault",   "set_signunlock",      &FundScoped<set_signunlock>, false },
+    { "vault",   "vault_buildcancel",   &FundScoped<vault_buildcancel>, false },
+    { "vault",   "set_signcancel",      &FundScoped<set_signcancel>, false },
+    { "vault",   "vault_refee",         &FundScoped<vault_refee>, false },
+    { "vault",   "set_listsigned",      &FundScoped<set_listsigned>, false },
+    { "vault",   "set_importsigned",    &FundScoped<set_importsigned>, false },
+    { "vault",   "set_acknowledgerestore", &FundScoped<set_acknowledgerestore>, false },
+    { "vault",   "vault_send",          &FundScoped<vault_send>, false },
+    { "vault",   "vault_release",       &FundScoped<vault_release>, false },
+    { "vault",   "vault_ownerspend",    &FundScoped<vault_ownerspend>, false },
+    { "vault",   "vault_app",           &FundScoped<vault_app>, false },
 #endif
 };
 

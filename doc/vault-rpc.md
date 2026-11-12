@@ -49,7 +49,7 @@ checks live answers against it. Edit this document, then regenerate.
   `vault_lock` names a funding address (`from`, below). A small transaction pays 10,000 zatoshi.
   Coins chosen are locked in
   the wallet (`lockunspent` semantics) so that a following build does not reuse them before the
-  first transaction confirms; a broadcast the node refuses releases them. `vault_ownerspend` prices its owner spend instead (below). Every
+  first transaction confirms; when the call fails (a broadcast the node refuses, an unknown `setid`, a signing failure, a conflicting build), the coins the funding added in that call are released, and no other coin. `vault_ownerspend` prices its owner spend instead (below). Every
   transaction these RPCs broadcast must pay a network fee within the vault/Yellowback cap,
   min(max(`-maxtxfee`, `-yellowbackmaxtxfeeusd` (default $2) at the attested price),
   `-yellowbackmaxtxfee` (default 10 YEC)), never below max(`-yellowbackfee`, 10,000 zat); the
@@ -272,6 +272,7 @@ when it returned a hex) and broadcasts. Without `dryrun`, the result is the txid
 that build chose are signed, and only while the outputs are the ones it chose (act signatures
 added later do not make a different output). Any other spendable coin of this wallet is refused
 (`vault-send-foreign-input`) unless `allowinputs` names that outpoint, and nothing is signed.
+A coin `allowinputs` names that is a Yellowback outpoint (a YED token, vault or carrier of this wallet) is refused with the Yellowback refusal (`refusing to spend a Yellowback outpoint as plain YEC: …`, -4; audit L-3); a deliberate burn goes through `sendrawtransaction … allowyedburn`.
 The wallet's net outflow — the value of the inputs it would sign, minus outputs it can spend, and
 minus a `SET_JOIN` bond when this wallet holds that act's member key — above the fee cap is refused
 (`vault-send-outflow`) unless `allowoutflow` is at least that outflow. `dryrun: true` signs and
@@ -345,9 +346,9 @@ testnet). The wallet must be unlocked. Refusals (also under *Error reasons*):
 | -8 | `from must be an address string` |
 | -5 | `bad-address: from: not a transparent P2PKH, post-quantum or Sapling address of this network` (a P2SH, a Yellowback `yb…` or a malformed string) |
 | -5 | `bad-address: from: Sprout addresses are not supported` |
-| -4 | `from: not an address of this wallet` |
+| -5 | `from: not an address of this wallet` |
 | -4 | `from: a watch-only address of this wallet (no spending key)` |
-| -8 | `from: an FN-DSA-512 (scheme 2) address cannot be spent before Falcon is active at the next block` |
+| -5 | `from: an FN-DSA-512 (scheme 2) address cannot be spent before Falcon is active at the next block` |
 | -6 | `insufficient confirmed funds at <from>: need <x> more` (transparent and PQ; with ` (its <y> of coinbase outputs must be shielded first: z_shieldcoinbase)` when coinbase outputs were left out) |
 | -6 | `insufficient-yec: need <x>, have <y> in confirmed Sapling notes at <from>` |
 | -4 | `from: too-many-coins: covering <x> at <from> would take more than 400 coins or 75000 bytes of inputs; consolidate the address's coins first, then retry` |
@@ -540,7 +541,7 @@ broadcasts. Without `dryrun`, the result is the txid. The node that funded the s
 only coins this wallet's builders (`vault_buildunlock`, `vault_buildcancel`, `yed_buildcancel`,
 `vault_app`, `set_buildact`, `vault_refee`) chose for these exact outputs are signed. Any other
 spendable coin of this wallet is refused (`vault-send-foreign-input`) unless `allowinputs` names
-that outpoint, and nothing is signed. The same net-outflow cap as `set_sendact` applies
+that outpoint, and nothing is signed. A coin `allowinputs` names that is a Yellowback outpoint (a YED token, vault or carrier of this wallet) is refused with the Yellowback refusal (`refusing to spend a Yellowback outpoint as plain YEC: …`, -4; audit L-3); a deliberate burn goes through `sendrawtransaction … allowyedburn`. The same net-outflow cap as `set_sendact` applies
 (`vault-send-outflow`, overridden by `allowoutflow`). `dryrun: true` returns `HandoffPreview` and
 signs nothing. A transaction with no unspent vault or intent input is refused: `vault_send` is not
 a general signer. The coins a build chose are the wallet's `vaultbuild` record (dumped, imported,
@@ -613,9 +614,9 @@ code. `qa/rpc-tests/vault_rpc_contract.py` provokes each one.
 | -8 | `unregistered post-quantum scheme` | `vault_lock`, `vault_list` | an `owner` with scheme `03` |
 | -8 | `a scheme-2 (FN-DSA-512) owner before Falcon is active` | `vault_lock` | an `owner` with scheme `02` while Falcon is inactive at the next block |
 | -5 | `bad-address: from: not a transparent P2PKH, post-quantum or Sapling address of this network` | `vault_lock` | `from` `"nonsense"` |
-| -4 | `from: not an address of this wallet` | `vault_lock` | `from` another wallet's address |
+| -5 | `from: not an address of this wallet` | `vault_lock` | `from` another wallet's address |
 | -4 | `from: a watch-only address of this wallet` | `vault_lock` | `from` an address imported with `importaddress` |
-| -8 | `from: an FN-DSA-512 (scheme 2) address cannot be spent before Falcon is active` | `vault_lock` | `from` the address of a scheme-2 key imported with `z_importpqkey`, while Falcon is inactive at the next block |
+| -5 | `from: an FN-DSA-512 (scheme 2) address cannot be spent before Falcon is active` | `vault_lock` | `from` the address of a scheme-2 key imported with `z_importpqkey`, while Falcon is inactive at the next block |
 | -6 | `insufficient confirmed funds at` | `vault_lock` | `from` an empty transparent or post-quantum address of this wallet |
 | -6 | `in confirmed Sapling notes at` | `vault_lock` | `from` an empty Sapling address of this wallet |
 | -4 | `not a post-quantum key of this wallet` | `vault_ownerspend` | a vault with an external owner |

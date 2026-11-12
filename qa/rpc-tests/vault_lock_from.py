@@ -195,9 +195,9 @@ class VaultLockFromTest(BitcoinTestFramework):
                           n0.vault_lock, self.params(1, 'nonsense'))
         assert_raises_rpc(-5, 'bad-address: from: not a transparent P2PKH', n0.vault_lock,
                           self.params(1, n0.vault_getnewowner()['address']))    # the Yellowback form names an owner, not coins
-        assert_raises_rpc(-4, 'from: not an address of this wallet', n0.vault_lock, self.params(1, n1.getnewaddress()))
-        assert_raises_rpc(-4, 'from: not an address of this wallet', n0.vault_lock, self.params(1, n1.getnewaddress('', 'pqslh')))
-        assert_raises_rpc(-4, 'from: not an address of this wallet', n0.vault_lock, self.params(1, n1.z_getnewaddress('sapling')))
+        assert_raises_rpc(-5, 'from: not an address of this wallet', n0.vault_lock, self.params(1, n1.getnewaddress()))
+        assert_raises_rpc(-5, 'from: not an address of this wallet', n0.vault_lock, self.params(1, n1.getnewaddress('', 'pqslh')))
+        assert_raises_rpc(-5, 'from: not an address of this wallet', n0.vault_lock, self.params(1, n1.z_getnewaddress('sapling')))
         watch = n1.getnewaddress()
         n0.importaddress(watch, '', False)
         assert_raises_rpc(-4, 'from: a watch-only address of this wallet', n0.vault_lock, self.params(1, watch))
@@ -205,7 +205,7 @@ class VaultLockFromTest(BitcoinTestFramework):
         n0.z_importviewingkey(n1.z_exportviewingkey(zwatch), 'no')
         assert_raises_rpc(-4, 'from: a watch-only address of this wallet', n0.vault_lock, self.params(1, zwatch))
         assert n0.getblockcount() + 1 < FALCON
-        assert_raises_rpc(-8, 'from: an FN-DSA-512 (scheme 2) address cannot be spent before Falcon is active at the next block',
+        assert_raises_rpc(-5, 'from: an FN-DSA-512 (scheme 2) address cannot be spent before Falcon is active at the next block',
                           n0.vault_lock, self.params(1, falcon_imported))
         empty = n0.getnewaddress()
         assert_raises_rpc(-6, 'insufficient confirmed funds at %s: need 1.0001 more' % empty, n0.vault_lock, self.params(1, empty))
