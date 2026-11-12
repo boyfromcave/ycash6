@@ -18,7 +18,13 @@ Wallet follow-ups found during beta2 (wt list items 21, 41, 44), one case each:
   select the same note, and one of the two failed late).
 - ecc_send (audit M-1, list item 21d, review L-4): sendtoaddress / sendmany select ordinary (ECC) coins only; with
   too few of them and post-quantum coins in the wallet they are refused, naming the PQ value and z_sendmany; an
-  ECC send's inputs and change are ECC and leave the post-quantum balance as it was.
+  ECC send's inputs and change are ECC and leave the post-quantum balance as it was. fundrawtransaction adds ECC coins
+  only (review LOW-1); a post-quantum input the transaction names stays.
+- vault_funding (iv) (review LOW-4): a vault RPC that fails after its funding (set_buildact of an unknown set) releases
+  the coins it locked in that call, and never a coin locked with lockunspent.
+- allowinputs_guard (audit L-3): vault_send / set_sendact never sign a YED token named in allowinputs.
+- asof_cache (review LOW-8, 6.x only): getbalance asOfHeight leaves the cached credit alone, so a later getbalance
+  equals getwalletinfo.balance.
 
 Node 0 runs on a fresh wallet file (no coinbase of its own); node 1 mines and pays. The keys ahead of node 0's
 lookahead are issued by a copy of node 0's wallet taken before any post-quantum key was issued (same HD seed).
@@ -49,6 +55,8 @@ from test_framework.util import (
     stop_node,
     sync_blocks,
     sync_mempools,
+    wait_and_assert_operationid_status,
+    z_sendmany_opid,
     z_sendmany_wait,
 )
 from test_framework.yellowback_util import MIN_MINT, activate_yed_late
@@ -204,6 +212,14 @@ class WalletBeta2FollowupsTest(BitcoinTestFramework):
         lock['amount'] = Decimal('0.001')           # one input: within the cap, and the coins are still free to use
         n0.vault_lock(lock)
         self.mine()
+
+        print('(iv) any failure after the funding releases what it locked in that call, and nothing else (review LOW-4)')
+        mine = n0.listunspent()[0]
+        user_lock = {'txid': mine['txid'], 'vout': mine['vout']}
+        assert n0.lockunspent(False, [user_lock])
+        assert_raises_rpc('unknown set', n0.set_buildact, 'winddown', {'setid': '11' * 32})   # funded, then refused
+        assert_equal(self.unspent_locked(), [user_lock])
+        assert n0.lockunspent(True, [user_lock])
         self.restart(0)
 
     # ---- item 3: yed_mint holds its Sapling notes ----------------------------------------------------------------
@@ -246,6 +262,26 @@ class WalletBeta2FollowupsTest(BitcoinTestFramework):
         self.mine(2)                                  # the carrier, then the MINT the wallet commits on it
         self.mine()
 
+    # ---- audit L-3: vault_send's allowinputs never signs a Yellowback outpoint ----------------------------------------
+
+    def allowinputs_guard(self):
+        print('allowinputs_guard: a coin vault_send signs because allowinputs names it is never a YED token (audit L-3)')
+        n0 = self.nodes[0]
+        tokens = [o for o in n0.listlockunspent() if o['vout'] == 1 and n0.gettxout(o['txid'], 1) is not None
+                  and D(n0.gettxout(o['txid'], 1)['value']) == Decimal('0.0001')]
+        assert_equal(len(tokens), 1)                  # the token of the MINT above (the MINT's vault is vout 0)
+        token = tokens[0]
+        assert n0.gettxout(token['txid'], 0) is not None
+        spend = n0.createrawtransaction([{'txid': token['txid'], 'vout': 0}, {'txid': token['txid'], 'vout': 1}],
+                                        {n0.getnewaddress(): Decimal('0.0001')})
+        named = {'allowinputs': ['%s:1' % token['txid']]}
+        refusal = ('refusing to spend a Yellowback outpoint as plain YEC: %s:1 (its YED would burn; lock it again with '
+                   'yed_lockcoins)' % token['txid'])
+        preview = n0.vault_send(spend, {'allowinputs': named['allowinputs'], 'dryrun': True})
+        assert_equal(preview['wouldrefuse'], refusal)
+        assert_equal(assert_raises_rpc(refusal, n0.vault_send, spend, named), refusal)
+        assert n0.gettxout(token['txid'], 1) is not None
+
     # ---- item 4 / 11: the stock sends spend ECC coins only ----------------------------------------------------------
 
     PQ_REFUSAL = re.compile(r'^Insufficient funds in ordinary transparent addresses; this wallet also holds ([0-9.]+) YEC at '
@@ -275,6 +311,21 @@ class WalletBeta2FollowupsTest(BitcoinTestFramework):
                 assert m, e.error['message']
                 assert_equal(D(m.group(1)), pq_free)
         assert_equal(D(n0.getwalletinfo()['balance_pq']), pq_before)
+        print('fundrawtransaction adds ECC coins only; a post-quantum input the transaction names stays (review LOW-1)')
+        try:
+            n0.fundrawtransaction(n0.createrawtransaction([], {own: ecc_free + 1}))
+            raise AssertionError('expected the ECC-only refusal')
+        except JSONRPCException as e:
+            m = self.PQ_REFUSAL.match(e.error['message'])
+            assert m, e.error['message']
+            assert_equal(D(m.group(1)), pq_free)
+        pq_coin = [u for u in unspent if 'pqscheme' in types[u['address']]][0]
+        raw = n0.createrawtransaction([{'txid': pq_coin['txid'], 'vout': pq_coin['vout']}], {own: Decimal('0.4')})
+        funded = n0.decoderawtransaction(n0.fundrawtransaction(raw)['hex'])
+        assert_equal((funded['vin'][0]['txid'], funded['vin'][0]['vout']), (pq_coin['txid'], pq_coin['vout']))
+        for i in funded['vin'][1:]:
+            prev = n0.getrawtransaction(i['txid'], 1)['vout'][i['vout']]['scriptPubKey']
+            assert_equal(prev['type'], 'pubkeyhash')
         print('an ECC send: ECC inputs, ECC change, the post-quantum balance unchanged')
         txid = n0.sendtoaddress(n1.getnewaddress(), 1)
         tx = n0.getrawtransaction(txid, 1)
@@ -286,12 +337,32 @@ class WalletBeta2FollowupsTest(BitcoinTestFramework):
         self.mine()
         assert_equal(D(n0.getwalletinfo()['balance_pq']), pq_before)
 
+    # ---- review LOW-8: getbalance asOfHeight and the cached credit (6.x; ycash-dd has no asOfHeight) ------------------
+
+    def asof_cache(self):
+        n0, n1 = self.nodes
+        if 'asOfHeight' not in n0.help('getbalance'):
+            print('asof_cache: getbalance takes no asOfHeight on this line; nothing to check')
+            return
+        print('asof_cache: getbalance asOfHeight neither reads nor writes the cached credit (review LOW-8)')
+        a = n0.getnewaddress()
+        n1.sendtoaddress(a, 2)
+        self.mine()
+        h = n0.getblockcount()
+        wait_and_assert_operationid_status(n0, z_sendmany_opid(n0, a, [(n1.getnewaddress(), Decimal('1.9'))]))
+        self.mine()
+        n0.getbalance('*', 1, False, False, h)        # the 2 YEC coin was unspent at h
+        now = D(n0.getbalance())                       # read before getwalletinfo, which rewrites the cache
+        assert_equal(now, D(n0.getwalletinfo()['balance']))
+
     def run_test(self):
         self.mine(ACTIVATION - self.nodes[0].getblockcount())
         self.topup_balance()
         self.vault_funding()
         self.note_locks()
+        self.allowinputs_guard()
         self.ecc_send()
+        self.asof_cache()
 
 
 if __name__ == '__main__':
