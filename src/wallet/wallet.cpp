@@ -36,6 +36,7 @@
 #include "timedata.h"
 #include "util/moneystr.h"
 #include "util/match.h"
+#include "warnings.h"
 #include "zcash/Address.hpp"
 #include "zcash/JoinSplit.hpp"
 #include "zcash/Note.hpp"
@@ -2310,6 +2311,17 @@ void CWallet::ChainTip(const CBlockIndex *pindex,
     const auto& consensus = Params().GetConsensus();
     if (added.has_value()) {
         ChainTipAdded(pindex, pblock, added.value(), true);
+        // Review 3 (M-c LOW): a restore made during initial block download completes its scan only at a start after
+        // the sync; once the node is out of it, say so where the user looks (getinfo errors, the GUI status bar). Only a
+        // wallet with a pending restore takes cs_main here, once per block until the node has synced.
+        if (RestoreInProgress() && !fWalletRestoreWarned) {
+            LOCK(cs_main);
+            if (!IsInitialBlockDownload(consensus)) {
+                fWalletRestoreWarned = true;
+                SetWalletRestorePending(true);
+                LogPrintf("The wallet's restore from its recovery phrase has not completed its scan of older blocks: restart the node to finish it\n");
+            }
+        }
         // Prevent migration transactions from being created when node is syncing after launch,
         // and also when node wakes up from suspension/hibernation and incoming blocks are old.
         // We do not call IsInitialBlockDownload() because during IBD that locks on cs_main,
@@ -9028,6 +9040,8 @@ bool CWallet::InitLoadWallet(const CChainParams& params, bool clearWitnessCaches
                           chainActive.Height());
             } else if (!CWalletDB(walletFile).EraseRestoreScan()) {
                 LogPrintf("Error: the restore's scan is complete, but erasing the restore marker failed: the next start scans again\n");
+                walletInstance->fWalletRestoreWarned = true;
+                SetWalletRestorePending(true);
             } else {
                 walletInstance->LoadRestoreScan(-1);
                 LogPrintf("The restore's scan from height %d is complete\n", pindexRescan->nHeight);

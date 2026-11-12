@@ -285,7 +285,8 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
   out of initial block download) every start of the node scans from genesis again, whatever the
   wallet's best block and its keys' birthday (the time of the restore); `getwalletinfo`
   `restore_in_progress` is true meanwhile. A restore made on a node that does not have the chain yet
-  completes at the first restart after the sync. A shutdown request stops a pass at a block boundary
+  completes at the first restart after the sync; once the node has synced, `getinfo` `errors` says
+  `Wallet restore in progress: restart the node after it has synced to finish scanning for older coins`. A shutdown request stops a pass at a block boundary
   (`Still rescanning (pass n)` in the log every minute). An older binary ignores the marker: it
   starts from the wallet's best block and the keys' birthday, so it does not resume an unfinished
   restore (coins not found before the interruption stay unseen there), and it leaves the marker in

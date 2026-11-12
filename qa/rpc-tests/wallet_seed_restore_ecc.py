@@ -36,7 +36,8 @@ from the phrase, with getnewaddress past the gap and -rescan, finds every coin (
 Last (reviews M-a, M-c): a restore interrupted in its main pass, then (resumed) in the middle of a re-pass, stops at
 that block (-stoprescanat, regtest only) and every start scans from genesis again until a scan completes, though the
 keys' birthday (the restore's time, the node's clock 3 h ahead) is later than every block; getwalletinfo
-restore_in_progress is true for a restore made on a node with no chain until a start after the sync has scanned.
+restore_in_progress is true for a restore made on a node with no chain until a start after the sync has scanned, and
+getinfo errors asks for that restart once the node has synced.
 Review L-b: a re-pass that adds a transaction without growing the lookahead is the last (no wasted chain read).
 
 Run: ZCASHD=<ycashd> .venv/bin/python -u qa/rpc-tests/wallet_seed_restore_ecc.py --tmpdir=<dir> --portseed=<n>
@@ -417,9 +418,12 @@ class WalletSeedRestoreEccTest(BitcoinTestFramework):
         connect_nodes_bi(self.nodes, 1, 2)
         sync_blocks(self.nodes)
         assert_equal(n2.getwalletinfo()['restore_in_progress'], True)
+        # review 3 (M-c LOW): out of initial block download, the node's warnings ask for the restart
+        assert 'Wallet restore in progress: restart the node after it has synced' in n2.getinfo()['errors']
         stop_node(n2, 2)
         self.nodes[2] = n2 = start_node(2, self.options.tmpdir, ['-keypool=%d' % KEYPOOL])
         assert_equal(n2.getwalletinfo()['restore_in_progress'], False)
+        assert 'Wallet restore in progress' not in n2.getinfo()['errors']
         assert_equal(sorted((u['txid'], u['vout'], u['address'], Decimal(u['amount'])) for u in n2.listunspent(0)),
                      restored_utxos)
         stop_node(n2, 2)

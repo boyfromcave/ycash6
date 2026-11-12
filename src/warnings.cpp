@@ -1,6 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2016 The Bitcoin Core developers
 // Copyright (c) 2020-2025 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -15,6 +16,7 @@ std::string strMiscWarning;
 int64_t timestampWarning;
 bool fLargeWorkForkFound = false;
 bool fLargeWorkInvalidChainFound = false;
+bool fWalletRestorePending = false;
 
 void SetMiscWarning(const std::string& strWarning, int64_t timestamp)
 {
@@ -27,6 +29,12 @@ std::pair<std::string, int64_t> GetMiscWarning()
 {
     LOCK(cs_warnings);
     return std::make_pair(strMiscWarning, timestampWarning);
+}
+
+void SetWalletRestorePending(bool flag)
+{
+    LOCK(cs_warnings);
+    fWalletRestorePending = flag;
 }
 
 void SetfLargeWorkForkFound(bool flag)
@@ -67,6 +75,11 @@ std::pair<std::string, int64_t> GetWarnings(const std::string& strFor)
 
     if (GetBoolArg("-testsafemode", DEFAULT_TESTSAFEMODE))
         statusbar.first = rpc.first = "testsafemode enabled";
+
+    // Review 3 (M-c): a wallet restored from its recovery phrase on a node in initial block download finishes its scan
+    // for older coins only at a start after the sync; the wallet sets this once the node is out of it.
+    if (fWalletRestorePending)
+        statusbar.first = _("Wallet restore in progress: restart the node after it has synced to finish scanning for older coins");
 
     // Misc warnings like out of disk space and clock is wrong
     if (strMiscWarning != "")

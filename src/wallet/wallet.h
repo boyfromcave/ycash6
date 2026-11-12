@@ -2139,6 +2139,8 @@ public:
     int nRestoreScanFrom = -1;
     void LoadRestoreScan(int nFromHeight) { nRestoreScanFrom = nFromHeight; }
     bool RestoreInProgress() const { return nRestoreScanFrom >= 0; }
+    //! Review 3 (M-c LOW): the pending restore was announced in the node's warnings (SetWalletRestorePending).
+    bool fWalletRestoreWarned = false;
     //! Keys added by the transparent and PQ lookaheads since load (ScanForWalletTransactions' re-pass test).
     uint64_t nKeyLookaheadGrowth = 0;
     //! The keypool's keys by pool index and pool index by key (kept beside setKeyPool, for the mark-used path).
