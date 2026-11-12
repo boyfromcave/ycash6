@@ -15,12 +15,21 @@
 #                 a CI job (and grouped in qa/kogany-mixed-shards.txt)
 #   attribution   The Ycash developers on every fork file and every modified upstream file with a
 #                 copyright line, no copyright line removed, no ycash6/YDollar/DigiDollar naming
+#   cross-line    the other node line: the manifest, the overlay trees and the Vault chain parameters
 #
-# Usage: qa/yellowback-audit.sh [--report-only] [--only LEG,..] [--skip LEG,..] [base]
+# Usage: qa/yellowback-audit.sh [--report-only] [--only LEG,..] [--skip LEG,..] [--require-cross-line] [base]
 #   base defaults to ycash6-baseline.
 #   --report-only: the frozen-set and line-budget legs print their delta and never fail (the
 #   upgrade/vault line, upgrade plan §7 G-9 / §9: the consensus review gate replaces them, and the
 #   CI audit uploads the consensus-diff report for it); every other leg still fails.
+#   --require-cross-line: the cross-line leg fails instead of printing NOT CHECKED.
+# The other line for the cross-line leg (the same rules as ycash-dd's audit):
+#   YB_OTHER_LINE_REF    a ref in THIS repository holding ycash-dd (CI fetches it into one)
+#   YB_OTHER_LINE_DIR + YB_OTHER_LINE_REV   or another local repository and a revision in it
+#   neither set: the ycash-dd checkout at the conventional sibling path (../ycash-dd beside the main
+#   tree, ../up-<suffix> beside a wt/up6-<suffix> worktree), at the branch of this checkout's name
+#   unless it is merged already, else upgrade/vault (qa/yellowback-other-line-branch.py decides and
+#   says why). NOT CHECKED only when nothing is found.
 # The functional-test lists are read from the workflow file itself (its top-level env).
 # Never `cmd | grep -q` under pipefail: grep -q exits at the first match and SIGPIPEs cmd. Count with
 # grep -c, or use a herestring.
@@ -30,6 +39,7 @@ cd "$(dirname "$0")/.."
 report=0
 only=""
 skip=""
+require_cross_line=0
 base=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -38,13 +48,14 @@ while [ $# -gt 0 ]; do
     --only=*) only="${1#--only=}"; shift ;;
     --skip) skip="${2:-}"; shift 2 ;;
     --skip=*) skip="${1#--skip=}"; shift ;;
-    -h|--help) sed -n '6,26p' "$0"; exit 0 ;;
+    --require-cross-line) require_cross_line=1; shift ;;
+    -h|--help) sed -n '6,35p' "$0"; exit 0 ;;
     -*) echo "unknown argument: $1" >&2; exit 2 ;;
     *) base="$1"; shift ;;
   esac
 done
 base="${base:-ycash6-baseline}"
-LEGS="frozen pq-wipes ci-guards golden rpc-cvt registration attribution"
+LEGS="frozen pq-wipes ci-guards golden rpc-cvt registration attribution cross-line"
 for l in ${only//,/ } ${skip//,/ }; do
   case " $LEGS " in *" $l "*) ;; *) echo "unknown leg $l (one of: $LEGS)" >&2; exit 2 ;; esac
 done
@@ -250,6 +261,58 @@ leg_attribution() {
   return $fail
 }
 
+find_other_line() {   # find_other_line <other main-tree name> <other worktree prefix> <this worktree prefix>
+  # The same function on both node lines. Sets YB_OTHER_LINE_DIR and YB_OTHER_LINE_REV when the other
+  # line's checkout sits at the conventional sibling path; leaves them unset otherwise.
+  local here me branch dir="" rev
+  here=$(pwd -P); me=$(basename "$here")
+  case "$me" in
+    "$3"*) dir="$here/../$2${me#"$3"}" ;;
+    *) dir="$here/../$1" ;;
+  esac
+  git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 || { echo "no other line at the sibling path $dir"; return 0; }
+  dir=$(cd "$dir" && pwd -P)
+  branch=$(git symbolic-ref --short -q HEAD || echo upgrade/vault)
+  rev=$(python3 qa/yellowback-other-line-branch.py --dir "$dir" --branch "$branch") || return 0
+  YB_OTHER_LINE_DIR=$dir YB_OTHER_LINE_REV=$rev
+  echo "other line found at the sibling path (committed state only; uncommitted changes there are not read)"
+}
+
+leg_cross_line() {
+  # Both node lines carry identical behaviour (upgrade plan §9): the manifest's identical files, trees and
+  # pinned shims, the overlay trees, and every Vault chain parameter (audit W3-P-1, W3-P-2), as the
+  # workflow's cross-line step checked them before it called this leg.
+  [ -d src/vault ] || { echo "not the upgrade line (no src/vault): nothing to compare"; return 0; }
+  [ -n "${YB_OTHER_LINE_REF:-}" ] || [ -n "${YB_OTHER_LINE_DIR:-}" ] || find_other_line ycash-dd up- up6-
+  local fail=0 tmp f
+  tmp=$(mktemp -d)
+  if [ -n "${YB_OTHER_LINE_REF:-}" ]; then
+    echo "other line: $YB_OTHER_LINE_REF ($(git rev-parse --short "$YB_OTHER_LINE_REF^{commit}"))"
+    python3 qa/yellowback-cross-line.py --this-line y6 --other-ref "$YB_OTHER_LINE_REF" || fail=1
+    python3 qa/yellowback-cross-line-trees.py --this-line y6 --other-ref "$YB_OTHER_LINE_REF" || fail=1
+    python3 qa/yellowback-vault-params.py extract --git-ref "$YB_OTHER_LINE_REF" > "$tmp/theirs.json" || fail=1
+  elif [ -n "${YB_OTHER_LINE_DIR:-}" ] && [ -n "${YB_OTHER_LINE_REV:-}" ]; then
+    echo "other line: $YB_OTHER_LINE_DIR at $YB_OTHER_LINE_REV ($(git -C "$YB_OTHER_LINE_DIR" rev-parse --short "$YB_OTHER_LINE_REV^{commit}"))"
+    python3 qa/yellowback-cross-line.py --this-line y6 --other-dir "$YB_OTHER_LINE_DIR" --other-rev "$YB_OTHER_LINE_REV" || fail=1
+    python3 qa/yellowback-cross-line-trees.py --this-line y6 --other-dir "$YB_OTHER_LINE_DIR" --other-rev "$YB_OTHER_LINE_REV" || fail=1
+    # The extractor's FILES (qa/yellowback-vault-params.py), read from the other line's git objects.
+    for f in src/chainparams.cpp src/consensus/params.h src/version.h src/yellowback/params.cpp \
+             src/consensus/upgrades.h src/consensus/upgrades.cpp; do
+      mkdir -p "$tmp/other/$(dirname "$f")"
+      git -C "$YB_OTHER_LINE_DIR" show "$YB_OTHER_LINE_REV:$f" > "$tmp/other/$f" || fail=1
+    done
+    python3 qa/yellowback-vault-params.py extract --root "$tmp/other" > "$tmp/theirs.json" || fail=1
+  else
+    rm -rf "$tmp"
+    echo "NOT CHECKED: no other node line (set YB_OTHER_LINE_REF, or YB_OTHER_LINE_DIR + YB_OTHER_LINE_REV, or check it out at the sibling path)"
+    in_ci && return 1; [ "$require_cross_line" = 0 ] || { echo "--require-cross-line: NOT CHECKED is a failure"; return 1; }; return 0
+  fi
+  python3 qa/yellowback-vault-params.py extract --root . > "$tmp/mine.json" || fail=1
+  python3 qa/yellowback-vault-params.py compare "$tmp/mine.json" "$tmp/theirs.json" || fail=1
+  rm -rf "$tmp"
+  return $fail
+}
+
 leg frozen leg_frozen
 leg pq-wipes leg_pq_wipes
 leg ci-guards leg_ci_guards
@@ -257,4 +320,5 @@ leg golden leg_golden
 leg rpc-cvt leg_rpc_cvt
 leg registration leg_registration
 leg attribution leg_attribution
+leg cross-line leg_cross_line
 exit $rc

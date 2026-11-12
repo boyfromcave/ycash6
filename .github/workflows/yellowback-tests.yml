@@ -1103,13 +1103,13 @@ jobs:
         # One script so the gate a developer runs locally is the gate CI runs. On the upgrade line
         # the frozen and budget legs are REPORT-ONLY (upgrade plan §7 G-9, §9): they print the
         # delta and the consensus review gate (the consensus-diff artifact below, two reviewers)
-        # judges it; every other leg still fails. Attribution runs as its own step below (the same
-        # script, --only), so it shows on the run page.
+        # judges it; every other leg still fails. Attribution and cross-line run as their own steps
+        # below (the same script, --only), so each shows on the run page.
         env:
           LINE: ${{ steps.line.outputs.line }}
         run: |
-          if [ "$LINE" = upgrade ]; then qa/yellowback-audit.sh --report-only --skip attribution ycash6-baseline
-          else qa/yellowback-audit.sh --skip attribution ycash6-baseline; fi
+          if [ "$LINE" = upgrade ]; then qa/yellowback-audit.sh --report-only --skip attribution,cross-line ycash6-baseline
+          else qa/yellowback-audit.sh --skip attribution,cross-line ycash6-baseline; fi
 
       - name: Consensus-diff report for the two-reviewer gate (upgrade plan §7 G-9)
         # Every changed line under the consensus paths, against this line's pristine pin
@@ -1235,18 +1235,11 @@ jobs:
           fi
           git fetch --no-tags --depth 1 "$url" "+refs/heads/$other:refs/remotes/other-line/head"
           echo "comparing with $OTHER_LINE_REPO $other @ $(git rev-parse --short other-line/head)"
-          rc=0
-          # Vectors, qa goldens, pqkey, the spec, src/crypto/pq, src/vault and src/yellowback
-          # (audit W3-P-2). The manifest is the list; this step has no path list of its own.
-          python3 qa/yellowback-cross-line.py --this-line y6 --other-ref other-line/head || rc=1
-          # The overlay-tree checker still pins the same 11 shims in qa/yellowback-cross-line-allow.txt.
-          python3 qa/yellowback-cross-line-trees.py --this-line y6 --other-ref other-line/head || rc=1
-          # Every Vault chain parameter (all three networks, PROTOCOL_VERSION, the yellowback params bodies)
-          # must agree with the other line (audit W3-P-1); read from the other line's git objects.
-          python3 qa/yellowback-vault-params.py extract --root . > "$RUNNER_TEMP/vault-params-mine.json" || rc=1
-          python3 qa/yellowback-vault-params.py extract --git-ref other-line/head > "$RUNNER_TEMP/vault-params-theirs.json" || rc=1
-          python3 qa/yellowback-vault-params.py compare "$RUNNER_TEMP/vault-params-mine.json" "$RUNNER_TEMP/vault-params-theirs.json" || rc=1
-          exit $rc
+          # Vectors, qa goldens, pqkey, the spec, src/crypto/pq, src/vault and src/yellowback (audit W3-P-2;
+          # the manifest is the list), the overlay trees against qa/yellowback-cross-line-allow.txt, and every
+          # Vault chain parameter (audit W3-P-1), read from the other line's git objects: the audit's
+          # cross-line leg, the same one a local run uses.
+          YB_OTHER_LINE_REF=other-line/head qa/yellowback-audit.sh --only cross-line --require-cross-line ycash6-baseline
 
       - name: RPC contract at rpcversion 5 (6 in term, 7 post-quantum, 8 fees) through the workspace generator (findings (39), (44))
         # The upgrade line's doc/yellowback-rpc-contract.json must be exactly what the workspace's

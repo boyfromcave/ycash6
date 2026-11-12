@@ -47,6 +47,7 @@ identical qa/test_yellowback_release_heights.py
 identical qa/test_yellowback_cross_line.py
 identical qa/yellowback-cross-line.manifest
 identical qa/yellowback-cross-line.py
+identical qa/yellowback-other-line-branch.py
 identical qa/rpc-tests/vault_activation_restart.py
 identical qa/rpc-tests/vault_prune_floor.py
 identical qa/rpc-tests/stopatheight.py
