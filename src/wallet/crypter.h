@@ -203,6 +203,16 @@ public:
     }
     bool GetKey(const CKeyID &address, CKey& keyOut) const;
     bool GetPubKey(const CKeyID &address, CPubKey& vchPubKeyOut) const;
+    //! The stored encrypted secret of a key of an encrypted keystore (readable while locked).
+    bool GetCryptedKey(const CKeyID &address, std::vector<unsigned char>& vchCryptedSecretOut) const
+    {
+        LOCK(cs_KeyStore);
+        auto mi = mapCryptedKeys.find(address);
+        if (!fUseCrypto || mi == mapCryptedKeys.end())
+            return false;
+        vchCryptedSecretOut = mi->second.second;
+        return true;
+    }
     std::set<CKeyID> GetKeys() const
     {
         LOCK(cs_KeyStore);

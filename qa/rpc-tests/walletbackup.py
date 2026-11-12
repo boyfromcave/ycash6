@@ -103,7 +103,9 @@ class WalletBackupTest(BitcoinTestFramework):
 
     # As above, this mirrors the original bash test.
     def start_three(self, extra_args=[]):
-        extra_args = extra_args + ["-allowdeprecated=getnewaddress"]
+        # -keypool=100 as at setup: it is also the restore's gap limit (the transparent lookahead holds
+        # -keypool + 1 keys ahead), and a round's address may go unpaid
+        extra_args = extra_args + ["-keypool=100", "-allowdeprecated=getnewaddress"]
         self.nodes[0] = start_node(0, self.options.tmpdir, extra_args)
         self.nodes[1] = start_node(1, self.options.tmpdir, extra_args)
         self.nodes[2] = start_node(2, self.options.tmpdir, extra_args)
@@ -202,18 +204,25 @@ class WalletBackupTest(BitcoinTestFramework):
         sync_blocks(self.nodes)
 
         # We made extra transactions that involved addresses generated after the
-        # backups were taken, and external addresses do not use the keypool, so
-        # the balances shouldn't line up.
-        balance0backup = self.nodes[0].getbalance()
-        balance1backup = self.nodes[1].getbalance()
-        balance2backup = self.nodes[2].getbalance()
-        assert(balance0backup != balance0)
-        assert(balance1backup != balance1)
-        assert(balance2backup != balance2)
+        # backups were taken. Beta2 (seed-only restore of ECC coins): the wallet
+        # holds -keypool + 1 transparent keys of each HD chain ahead of the last
+        # one it issued (TopUpLegacyTKeys), so the restored backup recognises them
+        # in the startup rescan and the balances line up already (before the
+        # lookahead they did not, and the extra addresses had to be generated).
+        assert_equal(self.nodes[0].getbalance(), balance0)
+        assert_equal(self.nodes[1].getbalance(), balance1)
+        assert_equal(self.nodes[2].getbalance(), balance2)
 
-        # However, because addresses are derived deterministically, we can
-        # recover the balances by generating the extra addresses and then
-        # rescanning.
+        # What a wallet holding only the dumped keys sees (the dump has no key issued after it): the restored
+        # wallet's confirmed coins at the dump's addresses.
+        def dumped_balance(i):
+            with open(tmpdir + "/node%d/walletdump" % i, encoding='utf8') as f:
+                addrs = {w[len('addr='):] for line in f for w in line.split() if w.startswith('addr=')}
+            return sum(u['amount'] for u in self.nodes[i].listunspent(1) if u['address'] in addrs)
+        balance0backup, balance1backup, balance2backup = [dumped_balance(i) for i in range(3)]
+        assert balance0backup < balance0   # the extra transactions paid keys issued after the dump
+
+        # Generating the extra addresses and rescanning still gives the same result.
         for i in range(5):
             self.nodes[0].getnewaddress()
             self.nodes[1].getnewaddress()

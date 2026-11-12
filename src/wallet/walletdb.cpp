@@ -1005,6 +1005,7 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
             CKeyPool keypool;
             ssValue >> keypool;
             pwallet->setKeyPool.insert(nIndex);
+            pwallet->NoteKeyPoolEntry(nIndex, keypool.vchPubKey.GetID());   // beta2: the mark-used path
 
             // If no metadata exists yet, create a default with the pool key's
             // creation time. Note that this may be overwritten by actually
@@ -1163,6 +1164,30 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
             ssValue >> value;
             pwallet->LoadHasExternalImports(value);
         }
+        else if (strType == "lookaheadincomplete")
+        {
+            int nFromHeight;
+            ssValue >> nFromHeight;
+            pwallet->LoadLegacyTKeyLookaheadIncomplete(nFromHeight);
+        }
+        else if (strType == "legacytaccountpub")
+        {
+            // Review 3 H-1: an intermediate build of this release stored the legacy account's extended public key here
+            // (its chain code with it): never read into memory; CWallet::LoadWallet erases it from the file.
+            pwallet->fObsoleteLegacyTAccountPub = true;
+        }
+        else if (strType == "legacytlookahead")
+        {
+            CLegacyTLookahead record;
+            ssValue >> record;
+            pwallet->LoadLegacyTLookahead(record);
+        }
+        else if (strType == "restorescan")
+        {
+            int nFromHeight;
+            ssValue >> nFromHeight;
+            pwallet->LoadRestoreScan(nFromHeight);
+        }
         else if (strType == "networkinfo")
         {
             std::pair<std::string, std::string> networkInfo;
@@ -1227,6 +1252,7 @@ static bool IsSalvagedType(const std::string& strType)
            strType == "pqissued" || strType == "vaultsetsig" ||
            strType == "vaultsignrestored" || strType == "vaultbuild" ||
            strType == "vaultpendingkey" || strType == "vaultrecipient" ||
+           strType == "restorescan" ||   // review M-c: losing it makes an unfinished restore skip the history
            strType == "yedheld";
 }
 
@@ -1718,6 +1744,42 @@ bool CWalletDB::WriteHasExternalImports(bool value)
 {
     nWalletDBUpdateCounter++;
     return Write(std::string("hasexternalimports"), value);
+}
+
+bool CWalletDB::WriteLegacyTKeyLookaheadIncomplete(int nFromHeight)
+{
+    nWalletDBUpdateCounter++;
+    return Write(std::string("lookaheadincomplete"), nFromHeight);
+}
+
+bool CWalletDB::EraseLegacyTKeyLookaheadIncomplete()
+{
+    nWalletDBUpdateCounter++;
+    return Erase(std::string("lookaheadincomplete"));
+}
+
+bool CWalletDB::WriteLegacyTLookahead(const CLegacyTLookahead& record)
+{
+    nWalletDBUpdateCounter++;
+    return Write(std::string("legacytlookahead"), record);
+}
+
+bool CWalletDB::EraseObsoleteLegacyTAccountPub()
+{
+    nWalletDBUpdateCounter++;
+    return Erase(std::string("legacytaccountpub"));
+}
+
+bool CWalletDB::WriteRestoreScan(int nFromHeight)
+{
+    nWalletDBUpdateCounter++;
+    return Write(std::string("restorescan"), nFromHeight);
+}
+
+bool CWalletDB::EraseRestoreScan()
+{
+    nWalletDBUpdateCounter++;
+    return Erase(std::string("restorescan"));
 }
 
 void CWalletDB::IncrementUpdateCounter()

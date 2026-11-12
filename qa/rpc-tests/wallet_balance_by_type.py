@@ -358,11 +358,11 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
         assert_equal((r['balance_pq'], r['balance_pq_1'], r['balance_pq_2']), (settled['balance_pq'], 0, settled['balance_pq_2']))
         assert_equal((r['z1_transparent_pq'], r['z1_private'], r['fn@1'], r['slh@1'], r['z@1']),
                      (settled['z1_transparent_pq'], settled['z1_private'], 2, 0, 1))
-        # the getnewaddress ECC key is not re-found from the seed on either line: only a wallet.dat backup restores
-        # it. What ECC the restored wallet finds is a line difference (seed_restored_balance_ecc, test_framework/util.py):
-        # none on ycash-dd (random keypool keys); on 6.x the keypool keys come from the seed and the rescan re-finds
-        # some of them (change).
-        assert not n0.validateaddress(self.addrs['ecc'])['ismine']
+        # What ECC the restored wallet finds is a line difference (seed_restored_balance_ecc, test_framework/util.py):
+        # none on ycash-dd (random keypool keys: only a wallet.dat backup restores the getnewaddress key); on 6.x the
+        # transparent keys come from the seed and the restore re-finds every ECC coin (beta2 P0), the getnewaddress
+        # key's among them.
+        assert_equal(n0.validateaddress(self.addrs['ecc'])['ismine'], seed_restored_balance_ecc(settled) == settled['balance_ecc'])
         assert_equal(r['balance_ecc'], seed_restored_balance_ecc(settled))
         # the restored PQ keys are filed by the rescan (beta2); listreceivedbyaddress lists them
         self.check_listing(ecc=False)

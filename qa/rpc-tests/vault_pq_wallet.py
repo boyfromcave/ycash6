@@ -176,6 +176,20 @@ class VaultPQWalletTest(BitcoinTestFramework):
         mine = n0.vault_list({'mine': True})
         assert {near['outpoint'], far['outpoint'], by_id['outpoint'], by_obj['outpoint']} <= {r['outpoint'] for r in mine}
 
+        print('the funding change (a fresh external key, NewWalletKey) stays out of the address book (seed-restore review M-1)')
+        listed = set(n0.getaddressesbyaccount(''))
+        book = {a for e in n0.listaddresses() for a in e.get('transparent', {}).get('addresses', [])}
+        changes = 0
+        for lk in (near, far, by_id, by_obj):
+            gt = n0.gettransaction(lk['txid'])
+            for out in n0.decoderawtransaction(gt['hex'])['vout']:
+                for a in out['scriptPubKey'].get('addresses', []):
+                    changes += 1
+                    assert a not in listed and a not in book, a
+                    # as before the lookahead: an external key path is not change, so it is listed sent and received
+                    assert_equal(sorted(d['category'] for d in gt['details'] if d.get('address') == a), ['receive', 'send'])
+        assert changes > 0
+
         print('vault_ownerspend selector 3 (released set), the ZIP-317 conventional fee at the default rate')
         dest = n0.getnewaddress()
         r = n0.vault_ownerspend(far['outpoint'], dest)
