@@ -274,7 +274,8 @@ class WalletPQAddressTest(BitcoinTestFramework):
         self.mine(1)
         assert_equal(n1.getreceivedbyaddress(dest), Decimal('1.5'))
         # the 2 YEC coin of a is spent and the change returns to a (D-4)
-        assert (tx_a, utx[tx_a]['vout']) in {(i['txid'], i['vout']) for i in tx['vin']}
+        spent = {(i['txid'], i['vout']) for i in tx['vin']}
+        assert (tx_a, utx[tx_a]['vout']) in spent
         assert_equal(n0.getaddressbalance({'addresses': [a]})['balance'], zat(2) - zat(Decimal('1.5')) - zat(fee))
 
         print('vault_release of an intent paying the wallet PQ key: by a third party, then by the owner after a restart')

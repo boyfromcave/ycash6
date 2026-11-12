@@ -407,11 +407,9 @@ class WalletBalanceByTypeTest(BitcoinTestFramework):
         n0, n1 = self.nodes
         print('seed-only restore: receipts at restored PQ addresses are classified, listed and counted as on the original')
         n0.walletpassphrase(PASSPHRASE, 3600)
-        others = [{'txid': u['txid'], 'vout': u['vout']} for u in n0.listunspent(0) if u['address'] != self.addrs['fn']]
-        assert n0.lockunspent(False, others)
         p_own = n0.getnewaddress('', 'pqslh')
-        tx_own = n0.sendtoaddress(p_own, Decimal('0.5'))              # spends a coin of the FN-DSA address
-        assert n0.lockunspent(True, others)
+        # spends a coin of the FN-DSA address (z_sendmany from it: the stock sends select ECC coins only, audit M-1)
+        tx_own = wait_and_assert_operationid_status(n0, z_sendmany_opid(n0, self.addrs['fn'], [(p_own, Decimal('0.5'))]))
         p_in = n0.getnewaddress('', 'pq')
         tx_in = n1.sendtoaddress(p_in, Decimal('0.25'))
         self.mine(1)
