@@ -15,6 +15,7 @@
 #                 a CI job (and grouped in qa/kogany-mixed-shards.txt)
 #   attribution   The Ycash developers on every fork file and every modified upstream file with a
 #                 copyright line, no copyright line removed, no ycash6/YDollar/DigiDollar naming
+#   secops        the RustSec ignores of osv-scanner.toml and contrib/secops/deny-node.toml agree
 #   cross-line    the other node line: the manifest, the overlay trees and the Vault chain parameters
 #
 # Usage: qa/yellowback-audit.sh [--report-only] [--only LEG,..] [--skip LEG,..] [--require-cross-line] [base]
@@ -55,7 +56,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 base="${base:-ycash6-baseline}"
-LEGS="frozen pq-wipes ci-guards golden rpc-cvt registration attribution cross-line"
+LEGS="frozen pq-wipes ci-guards golden rpc-cvt registration attribution secops cross-line"
 for l in ${only//,/ } ${skip//,/ }; do
   case " $LEGS " in *" $l "*) ;; *) echo "unknown leg $l (one of: $LEGS)" >&2; exit 2 ;; esac
 done
@@ -262,6 +263,41 @@ leg_attribution() {
   return $fail
 }
 
+# RustSec IDs accepted in osv-scanner.toml that cargo-deny never sees, one per line with the reason
+# (SECURITY-CI.md: every other RustSec ID accepted there is also in contrib/secops/deny-node.toml).
+OSV_ONLY=$(sed 's/[[:space:]]*#.*$//' <<'EOF_OSV_ONLY' | grep -v '^$' || true
+RUSTSEC-2024-0436   # contrib/yellowback/attest/Cargo.lock only (the agent's own deny.toml accepts it); not in the root graph
+RUSTSEC-2023-0089   # atomic-polyfill: only for targets without native atomics, outside cargo-deny's target graph ([graph] targets)
+EOF_OSV_ONLY
+)
+
+leg_secops() {
+  # The two ignore lists cannot drift (combined security audit, 2026-11-11: RUSTSEC-2026-0486 was in
+  # osv-scanner.toml only): every RustSec ID cargo-deny ignores is accepted by OSV-Scanner too, and every
+  # RustSec ID OSV-Scanner accepts is ignored by cargo-deny unless OSV_ONLY names it. GHSA IDs are
+  # OSV-only by nature (cargo-deny reads the RustSec database).
+  local osv deny x bad=""
+  osv=$(grep -oE '^id = "RUSTSEC-[0-9]{4}-[0-9]{4}"' osv-scanner.toml | cut -d'"' -f2 | sort -u)
+  deny=$(grep -oE '\{ *id = "RUSTSEC-[0-9]{4}-[0-9]{4}"' contrib/secops/deny-node.toml | cut -d'"' -f2 | sort -u)
+  if [ -z "$osv" ] || [ -z "$deny" ]; then echo "could not read the ignore lists"; return 1; fi
+  for x in $deny; do
+    grep -qx -- "$x" <<< "$osv" || bad="$bad
+  $x is ignored in contrib/secops/deny-node.toml but not accepted in osv-scanner.toml"
+  done
+  for x in $osv; do
+    grep -qx -- "$x" <<< "$deny" && continue
+    grep -qx -- "$x" <<< "$OSV_ONLY" && continue
+    bad="$bad
+  $x is accepted in osv-scanner.toml but not ignored in contrib/secops/deny-node.toml (add it with the same reason, or to OSV_ONLY with why cargo-deny never sees it)"
+  done
+  for x in $OSV_ONLY; do
+    grep -qx -- "$x" <<< "$osv" || bad="$bad
+  OSV_ONLY names $x, which osv-scanner.toml does not accept"
+  done
+  echo "RustSec ignores: $(wc -l <<< "$osv" | tr -d ' ') in osv-scanner.toml, $(wc -l <<< "$deny" | tr -d ' ') in deny-node.toml, $(wc -w <<< "$OSV_ONLY" | tr -d ' ') OSV-only by name"
+  [ -z "$bad" ] || { echo "$bad"; return 1; }
+}
+
 find_other_line() {   # find_other_line <other main-tree name> <other worktree prefix> <this worktree prefix>
   # The same function on both node lines. Sets YB_OTHER_LINE_DIR and YB_OTHER_LINE_REV when the other
   # line's checkout sits at the conventional sibling path; leaves them unset otherwise.
@@ -321,5 +357,6 @@ leg golden leg_golden
 leg rpc-cvt leg_rpc_cvt
 leg registration leg_registration
 leg attribution leg_attribution
+leg secops leg_secops
 leg cross-line leg_cross_line
 exit $rc
