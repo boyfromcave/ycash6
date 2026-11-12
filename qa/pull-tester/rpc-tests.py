@@ -82,6 +82,7 @@ BASE_SCRIPTS= [
     'yellowback_pricefeed.py',
     'yellowback_hardening.py',
     'wallet_yed_held_guard.py',      # beta2 item 32: the wallet-side has-held-YED guard beside H6
+    'wallet_yed_output_guard.py',    # every kind of YED output (the claim cancel's refund too) against the wallet's sends
     'yellowback_stock_node.py',
     'yellowback_framework_smoke.py',
     # Real pool software (yolo, Rust); SKIPs without YOLO_BIN (plan Phase 7).

@@ -279,6 +279,22 @@ std::string CarrierOutcome(bool spenderLive, bool spenderHasPayload, int tipHeig
 std::string ExpiredRowType(uint8_t payloadType, bool spendsForeignVault);
 
 /**
+ * The outputs to which `tx`'s own Yellowback payload may give YED, read from the transaction alone: no index, so the
+ * same answer where Yellowback is not live. One list for the wallet (PreLock, YellowbackInputRefusal) of the state
+ * machine's YED-creating rules (src/yellowback/state.cpp), each as far as the transaction shows it:
+ *  - MINT (ApplyMint): vout 0, the vault, and vout 1, the token;
+ *  - TRANSFER, and REDEEM with or without a vault spent (ApplyTransfer, ApplyVaultSpend): the payload's assignments;
+ *  - CANCEL_COSIGN, a claim cancel (ApplyIntentSpend, CAN-1): vout 0, the re-created vault, and every output that can
+ *    be the refund token. The refund is the lowest index >= 1 that pays the claim's recorded holder a non-zero value;
+ *    the holder is an index record, not in the transaction, so each output at index >= 1 that is not the OP_RETURN,
+ *    pays a non-zero value and is the first such output paying its script is counted. Conservative: the cancel's own
+ *    YEC change is counted too (spent deliberately by a raw transaction, or fundrawtransaction, that names it).
+ * A claim's intents are templates no coin selection spends (IsMine); no other payload type gives an output YED. A
+ * coinbase: none (TX-0). A payload the state machine would judge invalid or a cenotaph is counted as it reads.
+ */
+std::set<uint32_t> PayloadYedOutputs(const CTransaction& tx);
+
+/**
  * H7: does this raw transaction destroy YED that belongs to this wallet? True when it spends a
  * `Tokens` outpoint the wallet owns and carries no payload assigning cents to any output — the
  * state machine then burns those cents. `reason` is filled with a human sentence naming the

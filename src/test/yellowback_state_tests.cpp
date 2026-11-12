@@ -18,6 +18,7 @@
 #include "yellowback/state.h"
 #include "yellowback/tag.h"
 #include "yellowback/view.h"
+#include "yellowback/wallet.h"
 
 #include "crypto/sha256.h"
 
@@ -323,6 +324,18 @@ struct Fixture
                 continue;
             }
             overlay.Commit();
+            // WALLET-FOLLOW-5: every output the module gives YED is one the wallet's transaction-only list counts
+            // (PayloadYedOutputs, read where Yellowback is not live and for a transaction the index has not judged)
+            for (const CTransaction& t : block.vtx) {
+                const std::set<uint32_t> listed = PayloadYedOutputs(t);
+                for (const auto& l : ev.txlogs) {
+                    if (l.first != t.GetHash()) continue;
+                    for (const AssignedOutput& a : l.second.assigned) {
+                        BOOST_CHECK_MESSAGE(listed.count(a.outpoint.n), strprintf("%s:%u gets YED (%s) but PayloadYedOutputs omits it",
+                                                                                 t.GetHash().GetHex(), a.outpoint.n, l.second.verdict));
+                    }
+                }
+            }
             undos[height] = ev.undo;
             evals[height] = ev;
             tip = height;

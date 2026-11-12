@@ -591,18 +591,45 @@ void YellowbackWallet::LockOwn(const std::vector<COutPoint>& outs)
         LogPrintf("yellowback: ERROR: LockOwn could not record in the wallet that it has held YED\n");
 }
 
+std::set<uint32_t> PayloadYedOutputs(const CTransaction& tx)
+{
+    std::set<uint32_t> out;
+    if (tx.IsCoinBase()) return out;            // TX-0: a coinbase registers nothing, whatever its outputs carry
+    std::optional<FoundPayload> fp = FindPayload(tx);
+    if (!fp.has_value()) return out;
+    switch (fp->payload.type) {
+    case PayloadType::MINT:
+        for (uint32_t n : { 0u, 1u }) {
+            if (n < tx.vout.size() && n != fp->opReturnIndex) out.insert(n);
+        }
+        break;
+    case PayloadType::TRANSFER:
+    case PayloadType::REDEEM:
+        for (const Assignment& a : fp->payload.assignments) out.insert(a.vout);
+        break;
+    case PayloadType::CANCEL_COSIGN: {
+        if (!tx.vout.empty() && fp->opReturnIndex != 0) out.insert(0u);
+        std::set<CScript> paid;
+        for (uint32_t n = 1; n < tx.vout.size(); n++) {
+            if (n == fp->opReturnIndex || tx.vout[n].nValue <= 0) continue;
+            if (paid.insert(tx.vout[n].scriptPubKey).second) out.insert(n);
+        }
+        break;
+    }
+    default:
+        break;
+    }
+    return out;
+}
+
 void YellowbackWallet::PreLock(const CTransaction& tx)
 {
-    std::optional<FoundPayload> fp = FindPayload(tx);
-    if (!fp.has_value()) return;
+    // every output the payload may give YED (PayloadYedOutputs: the claim cancel's refund included, review
+    // WALLET-FOLLOW-REVIEW-2 CRITICAL-1) that pays this wallet
     std::vector<COutPoint> mine;
     const uint256 txid = tx.GetHash();
-    if (fp->payload.type == PayloadType::MINT) {
-        if (tx.vout.size() > 1 && IsMineScript(tx.vout[1].scriptPubKey)) mine.push_back(COutPoint(txid, 1));
-    } else if (fp->payload.type == PayloadType::TRANSFER || fp->payload.type == PayloadType::REDEEM) {
-        for (const Assignment& a : fp->payload.assignments) {
-            if (IsMineScript(tx.vout[a.vout].scriptPubKey)) mine.push_back(COutPoint(txid, a.vout));
-        }
+    for (uint32_t n : PayloadYedOutputs(tx)) {
+        if (IsMineScript(tx.vout[n].scriptPubKey)) mine.push_back(COutPoint(txid, n));
     }
     if (!mine.empty()) {
         LogPrint("yellowback", "pre-locking %u output(s) of %s\n", mine.size(), txid.ToString());

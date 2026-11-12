@@ -734,6 +734,52 @@ BOOST_AUTO_TEST_CASE(history_carrier_outcome_and_expired_type)
     BOOST_CHECK_EQUAL(ExpiredRowType((uint8_t)PayloadType::CANCEL_COSIGN, false), "cancel");
 }
 
+// WALLET-FOLLOW-5 (review WALLET-FOLLOW-REVIEW-2 CRITICAL-1): a claim cancel's refund is located by an index record, so
+// PayloadYedOutputs counts the re-created vault (vout 0) and, at index >= 1, each non-zero output that is the first to
+// pay its script, the OP_RETURN never; a coinbase nothing (TX-0); a transaction without a payload nothing.
+BOOST_AUTO_TEST_CASE(payload_yed_outputs_cancel_and_coinbase)
+{
+    Payload p;
+    p.type = PayloadType::CANCEL_COSIGN;
+    p.version = VersionOf(p.type);
+    const std::vector<unsigned char> data = EncodePayload(p);
+    BOOST_REQUIRE(!data.empty());
+    const CKey k1 = CKey::TestOnlyRandomKey(true);
+    const CKey k2 = CKey::TestOnlyRandomKey(true);
+    const CScript a = GetScriptForDestination(k1.GetPubKey().GetID());
+    const CScript b = GetScriptForDestination(k2.GetPubKey().GetID());
+    CMutableTransaction m;
+    m.vin.push_back(CTxIn(COutPoint(uint256S("01"), 0)));
+    m.vout.push_back(CTxOut(500000, a));             // 0: the re-created vault's place
+    m.vout.push_back(CTxOut(0, a));                  // 1: a zero value is never the refund
+    m.vout.push_back(CTxOut(10000, b));              // 2: the first non-zero output paying b
+    m.vout.push_back(CTxOut(0, PayloadScript(data)));   // 3: the OP_RETURN
+    m.vout.push_back(CTxOut(20000, b));              // 4: b again: not the lowest index paying b
+    m.vout.push_back(CTxOut(30000, a));              // 5: the first non-zero output paying a
+    BOOST_CHECK(PayloadYedOutputs(CTransaction(m)) == std::set<uint32_t>({ 0, 2, 5 }));
+
+    CMutableTransaction plain = m;
+    plain.vout.erase(plain.vout.begin() + 3);
+    BOOST_CHECK(PayloadYedOutputs(CTransaction(plain)).empty());
+
+    CMutableTransaction cb = m;
+    cb.vin.clear();
+    cb.vin.push_back(CTxIn(COutPoint(), CScript() << OP_1 << OP_1));
+    BOOST_REQUIRE(CTransaction(cb).IsCoinBase());
+    BOOST_CHECK(PayloadYedOutputs(CTransaction(cb)).empty());
+
+    Payload t;
+    t.type = PayloadType::TRANSFER;
+    t.version = VersionOf(t.type);
+    Assignment as;
+    as.vout = 2;
+    as.cents = 100;
+    t.assignments.push_back(as);
+    CMutableTransaction x = plain;
+    x.vout.insert(x.vout.begin() + 3, CTxOut(0, PayloadScript(EncodePayload(t))));
+    BOOST_CHECK(PayloadYedOutputs(CTransaction(x)) == std::set<uint32_t>({ 2 }));
+}
+
 // F-1 and review H-1: a commit the mempool refuses (here: its input is not in the chain) is erased by RemoveOrphan
 // through CWallet::EraseUnbroadcastTx, spend entries included. Another transaction spending the same coin is then
 // recorded as itself: no empty entry is recreated for the erased txid (SyncMetaData on a stale spend entry did that,

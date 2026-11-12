@@ -6666,6 +6666,26 @@ CAmount CWallet::PQSelectableValue(std::string* yedRefusal) const
     return value;
 }
 
+std::string CWallet::YedLeftOutOfSelection(const CCoinControl* coinControl) const
+{
+    if (yellowback::g_yellowbackWallet || (coinControl && !coinControl->fAllowOtherInputs)) return "";
+    vector<COutput> coins;
+    AvailableCoins(coins, std::nullopt, true, coinControl, false, !Params().GetConsensus().fCoinbaseMustBeShielded);
+    std::vector<COutPoint> candidates, refused;
+    for (const COutput& o : coins) {
+        if (coinControl && coinControl->IsSelected(o.tx->GetHash(), o.i)) continue;   // a named input is the caller's
+        if (IsPQInputScript(o.tx->vout[o.i].scriptPubKey)) continue;                  // never selected (audit M-1)
+        candidates.emplace_back(o.tx->GetHash(), o.i);
+    }
+    YellowbackInputRefusal(candidates, false, &refused);
+    if (refused.empty()) return "";
+    std::string list;
+    for (const COutPoint& o : refused) list += (list.empty() ? "" : ", ") + o.hash.GetHex() + ":" + std::to_string(o.n);
+    return strprintf("this wallet also holds %u output(s) that carry YED, which no send spends as plain YEC while Yellowback "
+                     "is not live: %s (its YED would burn; to destroy it deliberately, name the outpoint in a raw transaction)",
+                     (unsigned)refused.size(), list);
+}
+
 bool CWallet::SelectCoins(const CAmount& nTargetValue, set<pair<const CWalletTx*,unsigned int> >& setCoinsRet, CAmount& nValueRet,  bool& fOnlyCoinbaseCoinsRet, bool& fNeedCoinbaseCoinsRet, const CCoinControl* coinControl) const
 {
     // Output parameter fOnlyCoinbaseCoinsRet is set to true when the only available coins are coinbase utxos.
@@ -6975,6 +6995,9 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
                         strFailReason = _("Insufficient funds, coinbase funds can only be spent after they have been sent to a zaddr");
                     } else {
                         strFailReason = _("Insufficient funds");
+                        // review WALLET-FOLLOW-REVIEW-2 LOW-4: say why getbalance and listunspent count more
+                        const std::string yed = YedLeftOutOfSelection(coinControl);
+                        if (!yed.empty()) strFailReason += "; " + yed;
                     }
                     return false;
                 }
@@ -9754,21 +9777,12 @@ void SpendableInputs::LogInputs(const AsyncRPCOperationId& id) const {
     }
 }
 
-// Does the payload of `tx` give output n YED (a MINT's vault and token outputs, a TRANSFER's or REDEEM's assignments)?
-// What stage (ii) of the Yellowback wallet layer pre-locks (YellowbackWallet::PreLock), for a transaction the index has
-// not judged yet: unconfirmed, or any transaction while the index is unhealthy.
+// Does the payload of `tx` give output n YED? yellowback::PayloadYedOutputs, the one list the Yellowback wallet layer's
+// stage (ii) pre-lock (YellowbackWallet::PreLock) also reads: for a transaction the index has not judged yet
+// (unconfirmed, or any transaction while the index is unhealthy) and wherever Yellowback is not live.
 static bool AssignedByYellowbackPayload(const CTransaction& tx, uint32_t n)
 {
-    if (tx.IsCoinBase()) return false;          // TX-0: a coinbase registers nothing, whatever its outputs carry
-    std::optional<yellowback::FoundPayload> fp = yellowback::FindPayload(tx);
-    if (!fp.has_value()) return false;
-    if (fp->payload.type == yellowback::PayloadType::MINT) return n == 0 || n == 1;
-    if (fp->payload.type == yellowback::PayloadType::TRANSFER || fp->payload.type == yellowback::PayloadType::REDEEM) {
-        for (const yellowback::Assignment& a : fp->payload.assignments) {
-            if (a.vout == n) return true;
-        }
-    }
-    return false;
+    return yellowback::PayloadYedOutputs(tx).count(n) != 0;
 }
 
 std::string YellowbackInputRefusal(const std::vector<COutPoint>& inputs, bool strict, std::vector<COutPoint>* refusedOut)
@@ -9776,7 +9790,7 @@ std::string YellowbackInputRefusal(const std::vector<COutPoint>& inputs, bool st
     if (refusedOut) refusedOut->clear();
     yellowback::YellowbackWallet* yw = yellowback::g_yellowbackWallet;
     if (!yw && pwalletMain && !inputs.empty()) {
-        // beta2 item 9: where Yellowback is not live (-yellowback=0, no attestor set) there is no index and no YED coin
+        // beta2 item 9: where Yellowback is not live (no attestor set configured) there is no index and no YED coin
         // lock; what each input's own payload assigns (no index needed) still keeps it out of every coin-selecting
         // send. This rests on the outputs, not on the wallet's "yedheld" mark, which a seed restore, an imported key
         // or a wallet that never saw Yellowback live does not carry. Burning it takes a second, explicit act: a raw

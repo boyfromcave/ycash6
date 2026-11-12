@@ -71,6 +71,7 @@ vault    wallet_address_matrix         report  W9
 vault    wallet_pq_fee_cap             report  W9
 vault    wallet_yed_ecc_token          report  W9
 vault    wallet_yed_held_guard         report  W9
+vault    wallet_yed_output_guard       report  W9
 vault    wallet_beta2_followups        report  W9
 
 # --- the YED module's lifecycle (W5-f, three-way with yellowback_model.py)
@@ -154,6 +155,7 @@ sidecar  wallet_address_matrix         report  W9     # vault
 sidecar  wallet_pq_fee_cap             report  W9     # vault
 sidecar  wallet_yed_ecc_token          report  W9     # vault
 sidecar  wallet_yed_held_guard         report  W9     # vault
+sidecar  wallet_yed_output_guard       report  W9     # vault
 sidecar  wallet_beta2_followups        report  W9     # vault
 sidecar  yellowback_lifecycle          report  W9     # yed
 sidecar  yellowback_activation_reorg   report  W9   mirror  # yed
@@ -224,6 +226,7 @@ pair     wallet_address_matrix         report  W9     # vault
 pair     wallet_pq_fee_cap             report  W9     # vault
 pair     wallet_yed_ecc_token          report  W9     # vault
 pair     wallet_yed_held_guard         report  W9     # vault
+pair     wallet_yed_output_guard       report  W9     # vault
 pair     wallet_beta2_followups        report  W9     # vault
 pair     yellowback_lifecycle          report  W9     # yed
 pair     yellowback_activation_reorg   report  W9     # yed

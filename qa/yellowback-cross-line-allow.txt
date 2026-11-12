@@ -56,4 +56,4 @@ src/yellowback/txbuilder.h 9ece9173f589471a26074b2aa8cf84ee8446b4c571f4e0f9a457d
 # util/system.h and util/moneystr.h. CommitTransaction and AcceptToMemoryPool
 # take CValidationState. RemoveOrphan erases through CWallet::EraseUnbroadcastTx.
 # GetDepthInMainChain and IsSpent take an anchor (std::nullopt).
-src/yellowback/wallet.cpp b4afaf1a5d6f475b3b673d3d87a1714c15b5312172a1f91241a25c5153210d66 22e719bd8f67a1993b07108fbec382340ee43dbd9a1f77511f34633085c92b66
+src/yellowback/wallet.cpp fe8e68ac0b2e58fae46e168ef0c29a080a953cde6ef8b36c63ab239c97dd6a6b 0a19430dacedb5a87993de132b97a53f55bb03940e5fa7670c68856730f9a0c7
