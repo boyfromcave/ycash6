@@ -812,6 +812,9 @@ public:
     FundScope& operator=(const FundScope&) = delete;
     static void Locked(const COutPoint& op) { if (current) current->locked.insert(op); }
     static void Kept(const CTransaction& tx) { if (current) for (const CTxIn& in : tx.vin) current->locked.erase(in.prevout); }
+    /** Review WALLET-FOLLOW-REVIEW-2 LOW-1: a coin the caller locked again for its own reason (Refee re-locks a replaced
+     *  fee input of a remembered build) is no longer this scope's to release. */
+    static void Forget(const COutPoint& op) { if (current) current->locked.erase(op); }
 private:
     static thread_local FundScope* current;
     FundScope* prev;
@@ -1028,7 +1031,10 @@ std::vector<COutPoint> Refee(CMutableTransaction& mtx, size_t idx, const CTxOut&
         if (needed > 0)
             mtx.vin.push_back(CTxIn(ExactCoin(needed, {templ.prevout}, std::set<COutPoint>(old.begin(), old.end())), CScript(), CTxIn::SEQUENCE_FINAL));
     } catch (...) {
-        for (COutPoint op : released) pwalletMain->LockCoin(op);
+        for (COutPoint op : released) {
+            pwalletMain->LockCoin(op);
+            FundScope::Forget(op);      // a failed split may have locked it in this scope: it stays the build's (LOW-1)
+        }
         throw;
     }
     if (SetSighash(mtx, 0, coin) != before)
@@ -2472,7 +2478,10 @@ UniValue vault_buildunlock(const UniValue& params, bool fHelp)
         }
     }
     if (build == "new") Fund(mtx, coin.nValue, FundMode::SMALL_CHANGE);
+    // review LOW-2: a build rebuilt after this wallet signed is not remembered, yet its fee coins stay reserved as every
+    // build's do (locked until they are spent, lockunspent releases them, or the node restarts)
     if (!keepSigned) RememberBuild(op, mtx);
+    else FundScope::Kept(CTransaction(mtx));
     auto k = Snapshot()->Threshold(vp.setId, ROLE_UNLOCK);
     const uint256 sighash = SetSighash(mtx, 0, coin);
     UniValue o(UniValue::VOBJ);
@@ -2588,7 +2597,10 @@ UniValue BuildIntentCancel(const COutPoint& op, const std::vector<CTxOut>& extra
         for (const CTxOut& o : extra) mtx.vout.push_back(o);
         Fund(mtx, coin.nValue, FundMode::SMALL_CHANGE);
     }
+    // review LOW-2: a build rebuilt after this wallet signed is not remembered, yet its fee coins stay reserved as every
+    // build's do (locked until they are spent, lockunspent releases them, or the node restarts)
     if (!keepSigned) RememberBuild(op, mtx);
+    else FundScope::Kept(CTransaction(mtx));
     const uint256 sighash = SetSighash(mtx, 0, coin);
     auto k = Snapshot()->Threshold(ip.cancelSetId, ROLE_CANCEL);
     UniValue o(UniValue::VOBJ);

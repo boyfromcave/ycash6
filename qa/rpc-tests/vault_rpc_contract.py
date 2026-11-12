@@ -241,6 +241,10 @@ class VaultRpcContractTest(BitcoinTestFramework):
         bu_a = c.call(n, 'vault_buildunlock', relock, [{'address': addr, 'amount': 1}])
         a = c.call(n, 'set_signunlock', bu_a['hex'])
         bu_b = c.call(n, 'vault_buildunlock', relock, [{'address': addr, 'amount': 2}], True)   # rebuild after signing: the hazard
+        # review LOW-2: the rebuilt hex is not remembered, yet its fee coins stay reserved (locked) as every build's do
+        locked = [(l['txid'], l['vout']) for l in n.listlockunspent()]
+        for i in n.decoderawtransaction(bu_b['hex'])['vin'][1:]:
+            assert (i['txid'], i['vout']) in locked, ('the rebuilt build\'s fee coin is not locked', i, locked)
         c.error('set-sign-once', n, 'set_signunlock', bu_b['hex'])         # the wallet never equivocates (sign once)
         # 07/F-5: a second host that imports the member key has no sign-once history: it refuses until it imports one
         m = self.nodes[1]
