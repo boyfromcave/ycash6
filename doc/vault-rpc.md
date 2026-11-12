@@ -42,11 +42,14 @@ checks live answers against it. Edit this document, then regenerate.
 - **Amounts** are YEC (decimal) like every other Ycash RPC, the set's rate fields
   (`lockedvalue`, `epochbasis`, `epochused`, `unlockavailable`) and `bondmin` included, although
   the set state stores zatoshi (plan §15.4); `valuezat` fields are zatoshi.
-- **Fees**: every transaction these RPCs build pays a flat 10,000 zatoshi from the wallet's
-  confirmed transparent P2PKH coins (change to a new wallet address), unless `vault_lock` names a
-  funding address (`from`, below). Coins chosen are locked in
+- **Fees**: every transaction these RPCs build pays max(10,000 zatoshi, the relay fee, the ZIP-317
+  conventional fee) of its size as built (each fee input counted at its signed size; signatures a
+  set-signed spend gathers later are not counted) from the wallet's confirmed transparent P2PKH coins
+  (never a coinbase output where coinbase must be shielded; change to a new wallet address), unless
+  `vault_lock` names a funding address (`from`, below). A small transaction pays 10,000 zatoshi.
+  Coins chosen are locked in
   the wallet (`lockunspent` semantics) so that a following build does not reuse them before the
-  first transaction confirms. `vault_ownerspend` prices its owner spend instead (below). Every
+  first transaction confirms; a broadcast the node refuses releases them. `vault_ownerspend` prices its owner spend instead (below). Every
   transaction these RPCs broadcast must pay a network fee within the vault/Yellowback cap,
   min(max(`-maxtxfee`, `-yellowbackmaxtxfeeusd` (default $2) at the attested price),
   `-yellowbackmaxtxfee` (default 10 YEC)), never below max(`-yellowbackfee`, 10,000 zat); the

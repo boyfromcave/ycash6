@@ -54,7 +54,7 @@ bool EnsureWalletIsAvailable(bool avoidException);
 
 namespace {
 
-/** The flat fee every vault RPC pays (zatoshi), as the conventional transparent fee. */
+/** The least fee a vault RPC pays (zatoshi), as the conventional transparent fee; Fund prices a larger transaction by size. */
 // VAULT_RPC_FEE (10,000 zat) is policy.h's: the floor of the vault/Yellowback fee cap too
 /** Change below this goes to the fee. */
 static const CAmount VAULT_RPC_MIN_CHANGE = 1000;
@@ -748,10 +748,14 @@ enum class FundMode { LARGEST_FIRST, SMALL_CHANGE };
  *  node's UTXO view (pcoinsTip + mempool, GetCoin): the wallet learns of a block's spends on its own notification
  *  thread, so right after a block it can still count a coin the block spent as unspent (refee-utxo). A Yellowback
  *  outpoint whose coin lock was removed (YellowbackInputRefusal, beta2 review L-3) is left out; `yedRefusal`, when
- *  given, receives the refusal naming it ("" when there was none). */
-std::vector<std::pair<COutPoint, CAmount>> EligibleCoins(const std::set<COutPoint>& used, std::string* yedRefusal = nullptr)
+ *  given, receives the refusal naming it ("" when there was none). An immature coinbase output is never one
+ *  (AvailableCoins), nor any coinbase output where coinbase must be shielded (the stock wallet's SelectCoins rule;
+ *  beta2 item 21b): `coinbaseValue`, when given, receives the value of those left out for that reason. */
+std::vector<std::pair<COutPoint, CAmount>> EligibleCoins(const std::set<COutPoint>& used, std::string* yedRefusal = nullptr, CAmount* coinbaseValue = nullptr)
 {
     AssertLockHeld(cs_main);
+    const bool shieldCoinbase = Params().GetConsensus().fCoinbaseMustBeShielded;
+    if (coinbaseValue) *coinbaseValue = 0;
     std::vector<COutput> coins;
     pwalletMain->AvailableCoins(coins, std::nullopt, true, NULL, false, true);
     std::sort(coins.begin(), coins.end(), [](const COutput& a, const COutput& b) { return a.Value() > b.Value(); });
@@ -767,6 +771,10 @@ std::vector<std::pair<COutPoint, CAmount>> EligibleCoins(const std::set<COutPoin
         CTxOut utxo;
         int height;
         if (!GetCoin(op, utxo, height) || height < 0 || utxo != c.tx->vout[c.i]) continue;   // spent, or not confirmed
+        if (c.fIsCoinbase && shieldCoinbase) {
+            if (coinbaseValue) *coinbaseValue += c.Value();
+            continue;
+        }
         eligible.emplace_back(op, c.Value());
     }
     // Defence in depth (the coin locks already keep every YED output out of AvailableCoins): a token, an unconfirmed
@@ -782,43 +790,74 @@ std::vector<std::pair<COutPoint, CAmount>> EligibleCoins(const std::set<COutPoin
     return eligible;
 }
 
-/** Add wallet P2PKH inputs (and a change output) so that inputs = outputs + VAULT_RPC_FEE, given
- *  `inputValue` already provided by the transaction's existing inputs. Inputs are locked in the
- *  wallet so a following build does not pick them before this one confirms. */
+/** Beta2 item 21b: the coins Fund locked for a transaction not yet broadcast and not remembered as a build
+ *  (RememberBuild). Broadcast releases those among a refused transaction's inputs, so a refusal leaves them free
+ *  instead of locked until restart; an accepted transaction, or a remembered build, takes them off. cs_wallet. */
+std::set<COutPoint> g_fundLocked;
+
+/** Add wallet P2PKH inputs (and a change output) so that inputs = outputs + the fee, given `inputValue` already
+ *  provided by the transaction's existing inputs. The fee is priced from the size (beta2 item 21b): max(VAULT_RPC_FEE,
+ *  the relay fee, the ZIP-317 conventional fee) of the transaction as built, each added input counted at its signed
+ *  size (YecInputBytes); 10,000 zatoshi for a small transaction, as before. Inputs are locked in the wallet so a
+ *  following build does not pick them before this one confirms. */
 void Fund(CMutableTransaction& mtx, CAmount inputValue, FundMode mode = FundMode::LARGEST_FIRST)
 {
     CAmount out = 0;
     for (const CTxOut& o : mtx.vout) out += o.nValue;
-    CAmount needed = out + VAULT_RPC_FEE - inputValue;
     std::set<COutPoint> used;
     for (const CTxIn& in : mtx.vin) used.insert(in.prevout);
     std::string yedRefusal;
-    const std::vector<std::pair<COutPoint, CAmount>> eligible = EligibleCoins(used, &yedRefusal);
-    CAmount got = 0;
+    CAmount coinbaseValue = 0;
+    const std::vector<std::pair<COutPoint, CAmount>> eligible = EligibleCoins(used, &yedRefusal, &coinbaseValue);
+    const size_t nIn = mtx.vin.size(), nOut = mtx.vout.size();
+    const size_t inputBytes = yellowback::YecInputBytes(GetScriptForDestination(CKeyID()));   // a P2PKH input, signed
+    std::optional<CScript> changeScript;
     std::vector<COutPoint> chosen;
-    if (needed > 0 && mode != FundMode::LARGEST_FIRST) {
-        // the smallest single coin that covers the need (eligible is sorted largest first)
-        for (auto it = eligible.rbegin(); it != eligible.rend(); ++it) {
-            if (it->second >= needed) { chosen.push_back(it->first); got = it->second; break; }
+    CAmount fee = VAULT_RPC_FEE;
+    for (int pass = 0; ; pass++) {
+        if (pass == 8) throw JSONRPCError(RPC_WALLET_ERROR, "the funding fee did not settle");
+        mtx.vin.resize(nIn);
+        mtx.vout.resize(nOut);
+        const CAmount needed = out + fee - inputValue;
+        CAmount got = 0;
+        chosen.clear();
+        if (needed > 0 && mode != FundMode::LARGEST_FIRST) {
+            // the smallest single coin that covers the need (eligible is sorted largest first)
+            for (auto it = eligible.rbegin(); it != eligible.rend(); ++it) {
+                if (it->second >= needed) { chosen.push_back(it->first); got = it->second; break; }
+            }
         }
-    }
-    if (chosen.empty()) {
-        for (const auto& e : eligible) {
-            if (needed <= 0 || got >= needed) break;
-            chosen.push_back(e.first);
-            got += e.second;
+        if (chosen.empty()) {
+            for (const auto& e : eligible) {
+                if (needed <= 0 || got >= needed) break;
+                chosen.push_back(e.first);
+                got += e.second;
+            }
         }
+        if (got < needed && !yedRefusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);   // review L-3
+        if (got < needed)
+            throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, strprintf("insufficient confirmed transparent funds: need %s more%s", FormatMoney(needed - got),
+                coinbaseValue > 0 ? strprintf(" (%s of coinbase outputs must be shielded first: z_shieldcoinbase)", FormatMoney(coinbaseValue)) : std::string()));
+        for (const COutPoint& op : chosen) mtx.vin.push_back(CTxIn(op, CScript(), CTxIn::SEQUENCE_FINAL));
+        const CAmount change = got - needed;
+        if (change >= VAULT_RPC_MIN_CHANGE) {
+            if (!changeScript) changeScript = GetScriptForDestination(NewWalletKey().GetID());
+            mtx.vout.push_back(CTxOut(change, changeScript.value()));
+        }
+        // sized as signed: each added input with a dummy scriptSig of its signed size (outpoint 36, length 1, sequence 4)
+        CMutableTransaction sized(mtx);
+        const std::vector<unsigned char> dummy(inputBytes > 41 ? inputBytes - 41 : 0, 0x00);
+        for (size_t i = nIn; i < sized.vin.size(); i++) sized.vin[i].scriptSig = CScript(dummy.begin(), dummy.end());
+        const CTransaction sizedTx(sized);
+        const size_t size = ::GetSerializeSize(sizedTx, SER_NETWORK, PROTOCOL_VERSION);
+        const CAmount required = std::max({VAULT_RPC_FEE, ::minRelayTxFee.GetFee(size), sizedTx.GetConventionalFee()});
+        if (inputValue + got - sizedTx.GetValueOut() >= required) break;
+        fee = std::max(required, fee + 1);
     }
-    if (got < needed && !yedRefusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);   // review L-3
-    if (got < needed)
-        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, strprintf("insufficient confirmed transparent funds: need %s more", FormatMoney(needed - got)));
-    for (const COutPoint& op : chosen) mtx.vin.push_back(CTxIn(op, CScript(), CTxIn::SEQUENCE_FINAL));
-    const CAmount change = got - needed;
-    if (change >= VAULT_RPC_MIN_CHANGE) {
-        CPubKey ck = NewWalletKey();
-        mtx.vout.push_back(CTxOut(change, GetScriptForDestination(ck.GetID())));
+    for (COutPoint& op : chosen) {
+        pwalletMain->LockCoin(op);
+        g_fundLocked.insert(op);
     }
-    for (COutPoint& op : chosen) pwalletMain->LockCoin(op);
 }
 
 void RememberRecipient(const uint256& recipientHash, const CScript& dest)
@@ -899,6 +938,7 @@ void RememberBuild(const COutPoint& templ, CMutableTransaction mtx)
     for (CTxIn& in : mtx.vin)
         if (in.prevout == templ) in.scriptSig = CScript();
     pwalletMain->mapVaultBuilds[templ] = mtx;
+    for (const CTxIn& in : mtx.vin) g_fundLocked.erase(in.prevout);   // the build's registry holds its fee inputs now
     if (!CWalletDB(pwalletMain->strWalletFile).WriteVaultBuild(templ, mtx))
         throw JSONRPCError(RPC_WALLET_ERROR, "cannot record the vault build in the wallet");
 }
@@ -1180,7 +1220,27 @@ void RememberActBuild(const CMutableTransaction& mtx)
     RememberBuild(mtx.vin[0].prevout, mtx);
 }
 
+uint256 BroadcastOrRefuse(const CTransaction& tx);
+
+/** Submit `tx` to the mempool and relay it. A refusal throws, first releasing the coin locks Fund took for its inputs
+ *  (g_fundLocked; beta2 item 21b). */
 uint256 Broadcast(const CTransaction& tx)
+{
+    try {
+        const uint256 txid = BroadcastOrRefuse(tx);
+        for (const CTxIn& in : tx.vin) g_fundLocked.erase(in.prevout);
+        return txid;
+    } catch (...) {
+        for (const CTxIn& in : tx.vin) {
+            if (!g_fundLocked.erase(in.prevout)) continue;
+            COutPoint op = in.prevout;
+            pwalletMain->UnlockCoin(op);
+        }
+        throw;
+    }
+}
+
+uint256 BroadcastOrRefuse(const CTransaction& tx)
 {
     // review M-1: submitted below with the absurd-fee check off, so the vault/Yellowback cap is enforced here
     if (std::optional<CAmount> over = YedFeeOverCap(tx))

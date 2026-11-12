@@ -10,6 +10,9 @@ Wallet follow-ups found during beta2 (wt list items 21, 41, 44), one case each:
   wallet's. The transaction that pays it is already in the wallet (it also pays an ECC address of the wallet) and its
   credit is cached; a second payment, to the last key of the lookahead, moves the lookahead past the first key. After
   that, getbalance (cached) == getwalletinfo.balance (fresh) == balance_ecc + balance_pq.
+- vault_funding (list item 21b): the vault RPCs' default funding (Fund) (i) never selects a coinbase output where
+  coinbase must be shielded (refused up front, naming z_shieldcoinbase), (ii) prices the fee from the size, never
+  below 10,000 zat, (iii) releases the coins it locked when the broadcast is refused.
 
 Node 0 runs on a fresh wallet file (no coinbase of its own); node 1 mines and pays. The keys ahead of node 0's
 lookahead are issued by a copy of node 0's wallet taken before any post-quantum key was issued (same HD seed).
@@ -130,9 +133,69 @@ class WalletBeta2FollowupsTest(BitcoinTestFramework):
         self.restart(0)
         assert_equal(self.balances(self.nodes[0]), (D(6), D(1), D(5)))
 
+    # ---- item 2: the vault RPCs' default funding (Fund) -----------------------------------------------------------
+
+    def fee_of(self, node, txid):
+        tx = node.getrawtransaction(txid, 1)
+        ins = sum(D(node.getrawtransaction(i['txid'], 1)['vout'][i['vout']]['value']) for i in tx['vin'])
+        return tx, ins - sum(D(o['value']) for o in tx['vout'])
+
+    def unspent_locked(self):
+        """Node 0's locked coins that are still unspent (Fund's locks on coins a broadcast spent stay listed)."""
+        n0 = self.nodes[0]
+        return [c for c in n0.listlockunspent() if n0.gettxout(c['txid'], c['vout'], True) is not None]
+
+    def vault_funding(self):
+        print('vault_funding: the default funding of the vault RPCs (Fund)')
+        self.restart(0, 'fund.dat', ['-regtestshieldcoinbase'])
+        n0, n1 = self.nodes
+        set_params = {'seats': 1, 'unlockthreshold': 1, 'maturity': 2}
+        n0.generate(101)                              # node 0's own coinbase, mature; nothing else in this wallet
+        self.sync_all()
+        assert_equal(n0.listlockunspent(), [])
+        print('(i) coinbase is never a fee coin where it must be shielded: refused up front, nothing locked')
+        msg = assert_raises_rpc('insufficient confirmed transparent funds', n0.set_create, set_params)
+        assert 'of coinbase outputs must be shielded first: z_shieldcoinbase' in msg, msg
+        assert_equal(n0.listlockunspent(), [])
+
+        print('(ii) the fee follows the size: max(10,000 zat, the relay fee, the ZIP-317 conventional fee)')
+        # a second fresh wallet, without -regtestshieldcoinbase (node 1's payments spend coinbase: node 0 relays them)
+        self.restart(0, 'fund2.dat')
+        n0 = self.nodes[0]
+        small = [n0.getnewaddress() for _ in range(25)]
+        n1.sendmany('', {a: Decimal('0.01') for a in small})
+        self.mine()
+        setid = n0.set_create(set_params)['setid']   # one input: the 10,000 zat floor, as before
+        _, fee = self.fee_of(n0, setid)
+        assert_equal(fee, Decimal('0.0001'))
+        self.mine()
+        lock = {'tag': 'TEST', 'setid': setid, 'delay': 10, 'ownerheight': n0.getblockcount() + 1000,
+                'amount': Decimal('0.2')}
+        txid = n0.vault_lock(lock)['txid']
+        tx, fee = self.fee_of(n0, txid)
+        n_in = len(tx['vin'])
+        assert n_in > 20, n_in
+        assert_equal(fee, Decimal(500 * n_in) / 10**8)   # ZIP-317: one action per 150-byte P2PKH input, 500 zat each
+        self.mine()
+        assert_equal(self.unspent_locked(), [])
+
+        print('(iii) a refused broadcast leaves the coins it selected unlocked')
+        self.restart(0, 'fund2.dat', ['-maxtxfee=0.0001'])   # the vault/Yellowback cap falls to 10,000 zat
+        n0 = self.nodes[0]
+        n1.sendmany('', {a: Decimal('0.01') for a in small})
+        self.mine()
+        lock['ownerheight'] = n0.getblockcount() + 1000
+        assert_raises_rpc('absurdly-high-fee', n0.vault_lock, lock)
+        assert_equal(self.unspent_locked(), [])
+        lock['amount'] = Decimal('0.001')           # one input: within the cap, and the coins are still free to use
+        n0.vault_lock(lock)
+        self.mine()
+        self.restart(0)
+
     def run_test(self):
         self.mine(ACTIVATION - self.nodes[0].getblockcount())
         self.topup_balance()
+        self.vault_funding()
 
 
 if __name__ == '__main__':
