@@ -18,6 +18,10 @@ Note that a backup is a duplicate of data needed to spend ZEC so where you keep
 your backup(s) is another important consideration. You should not store backups
 where they would be equally or increasingly susceptible to loss or theft.
 
+A wallet that holds Ycash Yellowback (YED) must be restored from its seed, rescanned and imported
+only on a node where Yellowback is live, or the node does not know to protect its YED (see
+[How your YED is protected from being spent as plain YEC](../../../yellowback.md#how-your-yed-is-protected-from-being-spent-as-plain-yec)).
+
 ## Instructions for backing up your wallet and/or private keys
 
 These instructions are specific for the officially supported Zcash Linux

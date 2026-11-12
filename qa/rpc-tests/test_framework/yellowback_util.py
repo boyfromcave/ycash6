@@ -1088,10 +1088,10 @@ def sync_all_nodes(nodes):
     sync_mempools(nodes)
 
 
-def restart_with_yellowback(test, node_indices, extra=None, yellowback_indices=None):
+def restart_with_yellowback(test, node_indices, extra=None, yellowback_indices=None, stderr=None):
     """Stop and restart the given nodes of a ``YellowbackTestFramework`` (``extra`` a list, or a
     dict index -> list); nodes not in ``yellowback_indices`` (default: all of them) restart as
-    stock nodes.  Reconnects each per the topology."""
+    stock nodes (``stderr``, when given, receives their stderr).  Reconnects each per the topology."""
     if yellowback_indices is None:
         yellowback_indices = node_indices
     for i in node_indices:
@@ -1104,7 +1104,7 @@ def restart_with_yellowback(test, node_indices, extra=None, yellowback_indices=N
             test.restart(i, per_node)
         else:
             test.nodes[i] = start_node(i, test.options.tmpdir, yellowback_node_args(per_node, yellowback=False),
-                                       binary=test.node_binaries()[i])
+                                       binary=test.node_binaries()[i], stderr=stderr)
             test.reconnect(i)
 
 

@@ -47,6 +47,7 @@ Runtime: about 9-12 minutes.
 """
 
 import os
+import tempfile
 import time
 
 from test_framework.authproxy import JSONRPCException
@@ -966,8 +967,15 @@ class YellowbackDemoV6(ArmedModeMixin, YellowbackTestFramework):
         # node 5: the fork binary without the overlay.  Its datadir holds a Yellowback index, so the
         # node refuses to start without the attestor set unless -yellowback=0 is given explicitly (the
         # wallet may hold YED that a plain start would treat as spendable YEC) -- the acknowledgement
-        # is part of the evidence.
-        restart_with_yellowback(self, [OBSERVER], extra=['-yellowback=0'], yellowback_indices=[])
+        # is part of the evidence.  Its wallet has held YED (item 4), so the wallet-side guard (beta2 item 32)
+        # warns on the same acknowledgement.
+        with tempfile.SpooledTemporaryFile(max_size=2**16) as err:
+            restart_with_yellowback(self, [OBSERVER], extra=['-yellowback=0'], yellowback_indices=[], stderr=err)
+            err.seek(0)
+            warned = err.read().decode('utf-8').strip()
+        assert_equal(nodes[OBSERVER].getwalletinfo()['yed_held'], True)   # node 5 holds YED from item 4
+        assert_equal(warned, 'Warning: This wallet has held YED and Yellowback is not live (-yellowback=0): its YED outputs are '
+                             'not locked, and any send that spends one destroys the YED it carries.')
         fork = nodes[OBSERVER]
         self.say(item, 'node 5 restarted as the fork binary without the attestor set, -yellowback=0 (a plain start refuses: the datadir holds an index): %s'
                  % overlay_off(fork))
