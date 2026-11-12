@@ -33,6 +33,7 @@ import os
 import unicodedata
 
 from test_framework.test_framework import BitcoinTestFramework
+from test_framework.yellowback_model import ripemd160
 from test_framework.util import (
     assert_equal,
     bitcoind_processes,
@@ -83,7 +84,8 @@ def ser_p(pt):
 
 
 def hash160(b):
-    return hashlib.new('ripemd160', hashlib.sha256(b).digest()).digest()
+    # the framework's RIPEMD-160 falls back to pure Python where OpenSSL 3 no longer offers it (the CI image)
+    return ripemd160(hashlib.sha256(b).digest())
 
 
 def b58_payload(s):
