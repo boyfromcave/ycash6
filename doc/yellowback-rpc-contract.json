@@ -495,7 +495,7 @@
       "raisedBy": [
         "`sendrawtransaction` (the stock RPC)"
       ],
-      "when": "with -yellowback, a raw transaction that spends a Tokens outpoint of this wallet without a payload that reassigns it (no payload, or a TRANSFER that assigns nothing): pass allowyedburn = true to send it anyway"
+      "when": "with -yellowback, a raw transaction that spends a Tokens outpoint of this wallet, or an output of this wallet whose transaction the index has not judged and whose payload may give it YED, without a payload that reassigns those cents (no payload, or a TRANSFER that assigns less; any spend of a not-yet-judged claim cancel refund, whose amount is unknown): pass allowyedburn = true to send it anyway"
     },
     "yed-locked-outpoint": {
       "raisedBy": [
