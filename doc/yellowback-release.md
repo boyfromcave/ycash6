@@ -160,12 +160,15 @@ reads the train from the workspace, and runs:
 | 4 | the launch ceremony rehearsed on regtest with the fast and slow profiles' maturity | `qa/yellowback-rc-qualify.sh ceremony` (needs `contrib/testnet/ceremony`, N2) |
 
 **Proving run (before the tag).** rc-qualify can run on the proving run's artifacts, so a tag
-never meets it for the first time: once the release train (step 4) names the `upgrade/vault` head as
+never meets it for the first time: once the release train (step 4) names the proving run's commit as
 `ycash6.commit` and `v<V>` as its tag (on a workspace branch is enough, input `train_ref`), dispatch
 `gh workflow run rc-qualify.yml -R boyfromcave/ycash6 --ref upgrade/vault -f proving_run=<run id>
 -f train_ref=<workspace branch>`, where `<run id>` is the green, strict dry run of step 3 at that
-same commit (its `release-dry-run` job green; the job refuses any other run, a branch other than
-`upgrade/vault` or `release/*`, and refuses again once `upgrade/vault` moves). A failing proving run
+branch (its `release-dry-run` job green; the job refuses any other run and a branch other than
+`upgrade/vault` or `release/*`). The package is proved at the commit that built it: later commits
+on the branch that touch only tests, docs and workflows (`qa/`, `doc/`, `.github/`) do not need a
+new build, and any other change since that commit is refused. The record keeps both: `commit` (built)
+and `harness_commit` (the head that ran the steps). A failing proving run
 opens no issue (the node suites' issue steps skip it). The candidate
 is that run's `release-signed` artifact, checked the same way (its cosign identity is the workflow
 at the branch); the record (`proving_run: true`) stays a workflow artifact and nothing is written

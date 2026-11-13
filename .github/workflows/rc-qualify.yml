@@ -14,12 +14,15 @@
 #
 # Proving run (before any tag): dispatched on upgrade/vault (or a release/* branch) with input
 # proving_run = the id of a green, strict workflow_dispatch run of yellowback-release.yml (its
-# `release-dry-run` job green) on that same branch at that same commit. The
+# `release-dry-run` job green) on that same branch. The package is proved at the commit that built
+# it: the branch head may be that commit or ahead of it by commits that touch only qa/, doc/ and
+# .github/ (tests, docs and workflows need no new build); anything else is refused. The
 # candidate is then that run's `release-signed` artifact instead of a release (the same checks:
 # SHA256SUMS, the cosign signature, whose identity is the workflow at the branch, and the build
 # provenance), the train's ycash6 tag must be v<version> (it need not exist yet) and its ycash6
-# commit this branch's head, and the record stays a workflow artifact: nothing is written to any
-# release. A branch dispatch without proving_run is refused, as is proving_run on a tag.
+# commit the proving run's commit, and the record (commit = built, harness_commit = the head) stays
+# a workflow artifact: nothing is written to any release. A branch dispatch without proving_run is
+# refused, as is proving_run on a tag.
 #
 # Steps (each a job; the record job collects them):
 #   candidate   the draft (or published) release of the tag: every ycashd_v*/SBOM asset matches
@@ -99,6 +102,7 @@ jobs:
       version: ${{ steps.tag.outputs.version }}
       stage: ${{ steps.tag.outputs.stage }}
       commit: ${{ steps.tag.outputs.commit }}
+      harness_commit: ${{ steps.tag.outputs.harness_commit }}
       package_sha256: ${{ steps.files.outputs.package_sha256 }}
       draft: ${{ steps.files.outputs.draft }}
     steps:
@@ -129,7 +133,26 @@ jobs:
             [ "$rpath" = .github/workflows/yellowback-release.yml ] || { echo "run $PROVING_RUN is not a yellowback release run"; exit 1; }
             [ "$revent" = workflow_dispatch ] || { echo "run $PROVING_RUN is not a proving run (event $revent)"; exit 1; }
             [ "$rbranch" = "$GITHUB_REF_NAME" ] || { echo "run $PROVING_RUN ran on $rbranch, not $GITHUB_REF_NAME"; exit 1; }
-            [ "$rsha" = "$commit" ] || { echo "run $PROVING_RUN built $rsha, but $GITHUB_REF_NAME is now at $commit: prove again at the head"; exit 1; }
+            # The package is proved at the commit that built it: the head may be ahead of it by commits
+            # that touch only tests, docs and workflows (qa/, doc/, .github/), which go into no package.
+            if [ "$rsha" != "$commit" ]; then
+              [[ $rsha =~ ^[0-9a-f]{40}$ ]] || { echo "run $PROVING_RUN reports no commit"; exit 1; }
+              gh api "repos/$GITHUB_REPOSITORY/compare/$rsha...$commit" \
+                --jq '.status, (.files | length), (.files[].filename)' > "$RUNNER_TEMP/compare.txt" \
+                || { echo "run $PROVING_RUN built $rsha, but $GITHUB_REF_NAME is now at $commit (no comparison): prove again at the head"; exit 1; }
+              { read -r cstatus; read -r cfiles; mapfile -t changed; } < "$RUNNER_TEMP/compare.txt"
+              offending=""
+              [ "$cstatus" = ahead ] || offending="the head is $cstatus relative to it, not ahead"
+              [ -n "$offending" ] || [ "$cfiles" -lt 300 ] || offending="$cfiles files changed, too many to list"
+              if [ -z "$offending" ]; then
+                for f in "${changed[@]}"; do
+                  case "$f" in qa/*|doc/*|.github/*) ;; *) offending="$f changed since"; break ;; esac
+                done
+              fi
+              [ -z "$offending" ] || { echo "run $PROVING_RUN built $rsha, but $GITHUB_REF_NAME is now at $commit ($offending): prove again at the head"; exit 1; }
+              echo "run $PROVING_RUN built $rsha; $GITHUB_REF_NAME at $commit is ahead by changes to qa/, doc/ and .github/ only:"
+              printf '  %s\n' "${changed[@]}"
+            fi
             [ "$rstatus/$rconcl" = completed/success ] || { echo "run $PROVING_RUN is $rstatus/$rconcl, not completed/success"; exit 1; }
             # A strict run only: release-dry-run runs only when strict, so its success proves the
             # guards refused nothing (a strict=false run is green while they only warn).
@@ -144,10 +167,14 @@ jobs:
           fi
           found=$(python3 qa/yellowback-vault-params.py stage "$version") || { echo "$label is not a release version"; exit 1; }
           case "$found" in "6.22 "*) ;; *) echo "$label is not on the 6.22 line"; exit 1 ;; esac
+          # commit = the candidate's built commit (the tag's, or the proving run's); harness_commit = this
+          # checkout, whose qa/ and workflows run the steps.
+          built=$commit; [ "${GITHUB_REF_TYPE}" = tag ] || built=$rsha
           {
             echo "version=$version"
             echo "stage=${found#* }"
-            echo "commit=$commit"
+            echo "commit=$built"
+            echo "harness_commit=$commit"
           } >> "$GITHUB_OUTPUT"
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
@@ -464,6 +491,7 @@ jobs:
           VERSION: ${{ needs.candidate.outputs.version }}
           STAGE: ${{ needs.candidate.outputs.stage }}
           COMMIT: ${{ needs.candidate.outputs.commit }}
+          HARNESS_COMMIT: ${{ needs.candidate.outputs.harness_commit }}
           PACKAGE_SHA256: ${{ needs.candidate.outputs.package_sha256 }}
           DRAFT: ${{ needs.candidate.outputs.draft }}
           R_TRAIN: ${{ needs.train.result }}
@@ -486,7 +514,9 @@ jobs:
                    "4-ceremony": os.environ["R_CEREMONY"]}
           record = {
               "tag": os.environ["GITHUB_REF_NAME"], "version": os.environ["VERSION"], "stage": os.environ["STAGE"],
-              "commit": os.environ["COMMIT"], "linux_x86_64_sha256": os.environ["PACKAGE_SHA256"],
+              # commit built the package; harness_commit ran the steps (later, by qa/, doc/, .github/ only).
+              "commit": os.environ["COMMIT"], "harness_commit": os.environ["HARNESS_COMMIT"],
+              "linux_x86_64_sha256": os.environ["PACKAGE_SHA256"],
               "draft": os.environ["DRAFT"] == "true",
               # A proving run (a branch, before the tag) qualifies artifacts, not a release.
               "proving_run": os.environ["DRAFT"] == "proving",
