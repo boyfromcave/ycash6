@@ -79,9 +79,11 @@ attest_agent() {
   export YELLOWBACK_ATTEST_BIN="$target/release/yellowback-attest"
 }
 
+# Each client is built into its own target/ (CARGO_TARGET_DIR set, as the *_BIN paths below assume): a
+# developer's cargo config or environment may name a shared target directory, which would leave them empty.
 build_yolo() {  # the stratum pool at the train pin (YOLO_BIN): the walk and x402's stratum tests run it
   clone_at yolo "$WS/yolo"
-  (cd "$WS/yolo" && cargo build -q --release --locked --features regtest)
+  (cd "$WS/yolo" && CARGO_TARGET_DIR="$WS/yolo/target" cargo build -q --release --locked --features regtest)
   export YOLO_BIN="$WS/yolo/target/release/yolo"
 }
 
@@ -139,7 +141,7 @@ cmd_walk() {
   attest_agent
   build_yolo
   clone_at chain-viz "$WS/chain-viz"
-  (cd "$WS/chain-viz" && cargo build -q --release --locked)
+  (cd "$WS/chain-viz" && CARGO_TARGET_DIR="$WS/chain-viz/target" cargo build -q --release --locked)
   export CHAINVIZ_BIN="$WS/chain-viz/target/release/chain-viz"
   lightwalletd
   printf -v q %q "$dir"
@@ -194,7 +196,7 @@ cmd_hawkeye() {
   need_ws
   mkdir -p "$RC_OUT/hawkeye"
   clone_at hawkeye "$WS/hawkeye"
-  (cd "$WS/hawkeye" && cargo build -q --locked --bin hawkeye)
+  (cd "$WS/hawkeye" && CARGO_TARGET_DIR="$WS/hawkeye/target" cargo build -q --locked --bin hawkeye)
   (cd "$WS/hawkeye/eth" && npm ci --ignore-scripts && ./tools/fetch-wyec.sh)
   export YCASHD="$WS/ycash6/src/ycashd" YCASH_CLI="$WS/ycash6/src/ycash-cli" DEVNET_NATIVE_SOLC=1
   (

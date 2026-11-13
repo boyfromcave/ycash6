@@ -50,6 +50,12 @@ LOCAL_ARGS = ("-port", "-rpcport", "-bind", "-rpcbind", "-rpcallowip", "-connect
               "-wallet", "-rpcuser", "-rpcpassword", "-listen", "-discover", "-dnsseed", "-debug", "-printtoconsole")
 
 
+# The test framework's start_node gives every devnet node these on top of devnet.json's node_args
+# (qa/rpc-tests/test_framework/util.py), so they are node 0's chain too; a ycash-dd node needs them said
+# (without Sapling it refuses the Vault height).
+FRAMEWORK_CHAIN_ARGS = ["-nuparams=5ba81b19:1", "-nuparams=76b809bb:1"]   # Overwinter, Sapling
+
+
 def chain_args(args):
     """The arguments of node 0 that a node of the other line needs to follow the same chain."""
     out = []
@@ -105,6 +111,15 @@ def wait(what, predicate, timeout):
             pass
         time.sleep(1)
     raise TimeoutError("timed out after %ds: %s" % (timeout, what))
+
+
+def running(proc, datadir):
+    """True while a started node runs; a node that has exited fails the run at once, with its output."""
+    if proc.poll() is None:
+        return True
+    with open(os.path.join(datadir, "stdout.log"), encoding="utf-8", errors="replace") as fh:
+        tail = fh.read()[-2000:]
+    raise SystemExit("FAIL the node in %s exited (%s) before answering RPC:\n%s" % (datadir, proc.returncode, tail))
 
 
 def digests(node, has_yed):
@@ -211,15 +226,19 @@ def main(argv):
         for k in range(dd_nodes):
             datadir = os.path.join(args.devnet_dir, "crossline-dd%d" % k)
             os.makedirs(datadir, exist_ok=True)
+            # ycash-dd (the v4.5.0 line) refuses to start without a configuration file in its datadir;
+            # every setting it needs is on the command line, so the file is empty.
+            open(os.path.join(datadir, "ycash.conf"), "a", encoding="utf-8").close()
             port, rpcport = free_port(), free_port()
             user, password = "crossline%d" % k, "crossline%d-%d" % (k, os.getpid())
             command = [args.dd_ycashd, "-regtest", "-datadir=" + datadir, "-port=%d" % port, "-rpcport=%d" % rpcport,
                        "-rpcuser=" + user, "-rpcpassword=" + password, "-listen=1", "-discover=0", "-dnsseed=0",
-                       "-connect=127.0.0.1:%s" % node0_conf["port"], "-debug=yellowback", "-printtoconsole=0"] + base_args
+                       "-connect=127.0.0.1:%s" % node0_conf["port"], "-debug=yellowback", "-printtoconsole=0"] \
+                + FRAMEWORK_CHAIN_ARGS + base_args
             log = open(os.path.join(datadir, "stdout.log"), "w", encoding="utf-8")
             procs.append(subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL))
             rpc = Rpc("dd-node%d" % k, rpcport, user, password)
-            wait("dd-node%d answers RPC" % k, lambda r=rpc: r("getblockcount") >= 0, 300)
+            wait("dd-node%d answers RPC" % k, lambda r=rpc, p=procs[-1], d=datadir: running(p, d) and r("getblockcount") >= 0, 300)
             nodes.append(("dd-node%d" % k, rpc, has_yed0))
             print("dd-node%d: %s" % (k, rpc("getnetworkinfo")["subversion"]))
         node0 = nodes[0][1]
