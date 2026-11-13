@@ -107,6 +107,15 @@ def wait(what, predicate, timeout):
     raise TimeoutError("timed out after %ds: %s" % (timeout, what))
 
 
+def running(proc, datadir):
+    """True while a started node runs; a node that has exited fails the run at once, with its output."""
+    if proc.poll() is None:
+        return True
+    with open(os.path.join(datadir, "stdout.log"), encoding="utf-8", errors="replace") as fh:
+        tail = fh.read()[-2000:]
+    raise SystemExit("FAIL the node in %s exited (%s) before answering RPC:\n%s" % (datadir, proc.returncode, tail))
+
+
 def digests(node, has_yed):
     out = {"blockhash": node("getbestblockhash"), "vault": node("vault_getinfo")["statehash"]}
     if has_yed:
@@ -211,6 +220,9 @@ def main(argv):
         for k in range(dd_nodes):
             datadir = os.path.join(args.devnet_dir, "crossline-dd%d" % k)
             os.makedirs(datadir, exist_ok=True)
+            # ycash-dd (the v4.5.0 line) refuses to start without a configuration file in its datadir;
+            # every setting it needs is on the command line, so the file is empty.
+            open(os.path.join(datadir, "ycash.conf"), "a", encoding="utf-8").close()
             port, rpcport = free_port(), free_port()
             user, password = "crossline%d" % k, "crossline%d-%d" % (k, os.getpid())
             command = [args.dd_ycashd, "-regtest", "-datadir=" + datadir, "-port=%d" % port, "-rpcport=%d" % rpcport,
@@ -219,7 +231,7 @@ def main(argv):
             log = open(os.path.join(datadir, "stdout.log"), "w", encoding="utf-8")
             procs.append(subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL))
             rpc = Rpc("dd-node%d" % k, rpcport, user, password)
-            wait("dd-node%d answers RPC" % k, lambda r=rpc: r("getblockcount") >= 0, 300)
+            wait("dd-node%d answers RPC" % k, lambda r=rpc, p=procs[-1], d=datadir: running(p, d) and r("getblockcount") >= 0, 300)
             nodes.append(("dd-node%d" % k, rpc, has_yed0))
             print("dd-node%d: %s" % (k, rpc("getnetworkinfo")["subversion"]))
         node0 = nodes[0][1]
