@@ -50,6 +50,12 @@ LOCAL_ARGS = ("-port", "-rpcport", "-bind", "-rpcbind", "-rpcallowip", "-connect
               "-wallet", "-rpcuser", "-rpcpassword", "-listen", "-discover", "-dnsseed", "-debug", "-printtoconsole")
 
 
+# The test framework's start_node gives every devnet node these on top of devnet.json's node_args
+# (qa/rpc-tests/test_framework/util.py), so they are node 0's chain too; a ycash-dd node needs them said
+# (without Sapling it refuses the Vault height).
+FRAMEWORK_CHAIN_ARGS = ["-nuparams=5ba81b19:1", "-nuparams=76b809bb:1"]   # Overwinter, Sapling
+
+
 def chain_args(args):
     """The arguments of node 0 that a node of the other line needs to follow the same chain."""
     out = []
@@ -227,7 +233,8 @@ def main(argv):
             user, password = "crossline%d" % k, "crossline%d-%d" % (k, os.getpid())
             command = [args.dd_ycashd, "-regtest", "-datadir=" + datadir, "-port=%d" % port, "-rpcport=%d" % rpcport,
                        "-rpcuser=" + user, "-rpcpassword=" + password, "-listen=1", "-discover=0", "-dnsseed=0",
-                       "-connect=127.0.0.1:%s" % node0_conf["port"], "-debug=yellowback", "-printtoconsole=0"] + base_args
+                       "-connect=127.0.0.1:%s" % node0_conf["port"], "-debug=yellowback", "-printtoconsole=0"] \
+                + FRAMEWORK_CHAIN_ARGS + base_args
             log = open(os.path.join(datadir, "stdout.log"), "w", encoding="utf-8")
             procs.append(subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL))
             rpc = Rpc("dd-node%d" % k, rpcport, user, password)
