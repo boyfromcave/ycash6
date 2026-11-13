@@ -16,11 +16,14 @@
 # proving_run = the id of a green, strict workflow_dispatch run of yellowback-release.yml (its
 # `release-dry-run` job green) on that same branch. The package is proved at the commit that built
 # it: the branch head may be that commit or ahead of it by commits that touch only qa/, doc/ and
-# .github/ (tests, docs and workflows need no new build); anything else is refused. The
+# .github/ files the release build does not read (tests, docs and workflows need no new build; the
+# release workflow, .github/actions/, qa/yellowback-ci-apt.sh, qa/yellowback-release-*,
+# qa/yellowback-vault-params.py and doc/man/ do). The proof is same-source for everything the build
+# reads, not same-bytes (genbuild embeds git describe). The tag is cut at the head. The
 # candidate is then that run's `release-signed` artifact instead of a release (the same checks:
 # SHA256SUMS, the cosign signature, whose identity is the workflow at the branch, and the build
 # provenance), the train's ycash6 tag must be v<version> (it need not exist yet) and its ycash6
-# commit the proving run's commit, and the record (commit = built, harness_commit = the head) stays
+# commit the branch head, and the record (commit = built, harness_commit = the head) stays
 # a workflow artifact: nothing is written to any release. A branch dispatch without proving_run is
 # refused, as is proving_run on a tag.
 #
@@ -76,7 +79,7 @@ on:
         type: boolean
         default: true
       proving_run:
-        description: 'proving run on a branch: the run id of a green yellowback-release.yml dispatch at this commit (empty on a tag)'
+        description: 'proving run on a branch: the run id of a green yellowback-release.yml dispatch at this commit, or at an ancestor when only tests, docs and workflows changed since (empty on a tag)'
         type: string
         default: ''
 
@@ -134,11 +137,14 @@ jobs:
             [ "$revent" = workflow_dispatch ] || { echo "run $PROVING_RUN is not a proving run (event $revent)"; exit 1; }
             [ "$rbranch" = "$GITHUB_REF_NAME" ] || { echo "run $PROVING_RUN ran on $rbranch, not $GITHUB_REF_NAME"; exit 1; }
             # The package is proved at the commit that built it: the head may be ahead of it by commits
-            # that touch only tests, docs and workflows (qa/, doc/, .github/), which go into no package.
+            # that touch only tests, docs and workflows (qa/, doc/, .github/) the release build does not
+            # read. Same source for everything the build reads, not same bytes (genbuild embeds git
+            # describe); the tag is cut at the head.
             if [ "$rsha" != "$commit" ]; then
               [[ $rsha =~ ^[0-9a-f]{40}$ ]] || { echo "run $PROVING_RUN reports no commit"; exit 1; }
+              # A rename lists both paths (previous_filename): moving a build input under qa/ is still a change to it.
               gh api "repos/$GITHUB_REPOSITORY/compare/$rsha...$commit" \
-                --jq '.status, (.files | length), (.files[].filename)' > "$RUNNER_TEMP/compare.txt" \
+                --jq '.status, (.files | length), (.files[] | .filename, (.previous_filename // empty))' > "$RUNNER_TEMP/compare.txt" \
                 || { echo "run $PROVING_RUN built $rsha, but $GITHUB_REF_NAME is now at $commit (no comparison): prove again at the head"; exit 1; }
               { read -r cstatus; read -r cfiles; mapfile -t changed; } < "$RUNNER_TEMP/compare.txt"
               offending=""
@@ -146,7 +152,13 @@ jobs:
               [ -n "$offending" ] || [ "$cfiles" -lt 300 ] || offending="$cfiles files changed, too many to list"
               if [ -z "$offending" ]; then
                 for f in "${changed[@]}"; do
-                  case "$f" in qa/*|doc/*|.github/*) ;; *) offending="$f changed since"; break ;; esac
+                  case "$f" in
+                    # What the release build reads (its workflow, actions, apt set, guards, smoke test, man pages).
+                    .github/workflows/yellowback-release.yml|.github/actions/*|qa/yellowback-ci-apt.sh|qa/yellowback-release-*|qa/yellowback-vault-params.py|doc/man/*)
+                      offending="$f changed since, and the release build reads it"; break ;;
+                    qa/*|doc/*|.github/*) ;;
+                    *) offending="$f changed since"; break ;;
+                  esac
                 done
               fi
               [ -z "$offending" ] || { echo "run $PROVING_RUN built $rsha, but $GITHUB_REF_NAME is now at $commit ($offending): prove again at the head"; exit 1; }
@@ -241,7 +253,7 @@ jobs:
         env:
           TRAIN_REF: ${{ inputs.train_ref }}
           VERSION: ${{ needs.candidate.outputs.version }}
-          COMMIT: ${{ needs.candidate.outputs.commit }}
+          COMMIT: ${{ needs.candidate.outputs.harness_commit }}   # the tag goes on the head (= the built commit on a tag)
         run: |
           set -euo pipefail
           [[ $TRAIN_REF =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ ]] || { echo "train_ref is not a ref name or commit"; exit 1; }
