@@ -69,13 +69,20 @@ need_ws() {
   # The devnet tools find the workspace as the directory above the node tree; YEW's scripts look for repos.yaml.
   touch "$WS/repos.yaml"
   DEVNET="$WS/ycash6/contrib/yellowback/devnet/yellowback-devnet"
-  PY=${PYTHON:-python3}
+  # An absolute path: client scripts test it with [[ -x ]], which a bare command name fails.
+  PY=$(command -v "${PYTHON:-python3}") || die "no python at ${PYTHON:-python3} (set PYTHON)"
 }
 
 attest_agent() {
   local target=${RUNNER_TEMP:-$WS}/attest-target
   (cd "$WS/ycash6/contrib/yellowback/attest" && CARGO_TARGET_DIR="$target" cargo build -q --release --locked)
   export YELLOWBACK_ATTEST_BIN="$target/release/yellowback-attest"
+}
+
+build_yolo() {  # the stratum pool at the train pin (YOLO_BIN): the walk and x402's stratum tests run it
+  clone_at yolo "$WS/yolo"
+  (cd "$WS/yolo" && cargo build -q --release --locked --features regtest)
+  export YOLO_BIN="$WS/yolo/target/release/yolo"
 }
 
 lightwalletd() {  # the fork at the train pin (YELLOWBACK_LWD_BIN) and the baseline (lightwalletd-legacy)
@@ -127,16 +134,17 @@ devnet_down() { "$PY" "$DEVNET" down --dir "$1" >/dev/null 2>&1 || true; }
 
 cmd_walk() {
   need_ws
-  local dir="$RC_OUT/walk/devnet"
+  local dir="$RC_OUT/walk/devnet" q
   mkdir -p "$RC_OUT/walk"
   attest_agent
-  clone_at yolo "$WS/yolo"
-  (cd "$WS/yolo" && cargo build -q --release --locked --features regtest)
+  build_yolo
   clone_at chain-viz "$WS/chain-viz"
   (cd "$WS/chain-viz" && cargo build -q --release --locked)
-  export YOLO_BIN="$WS/yolo/target/release/yolo" CHAINVIZ_BIN="$WS/chain-viz/target/release/chain-viz"
+  export CHAINVIZ_BIN="$WS/chain-viz/target/release/chain-viz"
   lightwalletd
-  trap 'devnet_down "$dir"' EXIT
+  printf -v q %q "$dir"
+  # shellcheck disable=SC2064 # the devnet dir is fixed when the trap is set: the local is gone when EXIT fires
+  trap "devnet_down $q" EXIT
   "$PY" "$DEVNET" up --role attestor --no-heartbeat --no-walk --no-sim --seed 480 --dir "$dir"
   "$PY" "$WS/ycash6/contrib/yellowback/devnet/upgrade-walk" --dir "$dir" \
     --transcript "$RC_OUT/walk/upgrade-walk-transcript.txt" --summary "$RC_OUT/walk/summary.json"
@@ -170,6 +178,7 @@ cmd_x402() {
   need_ws
   mkdir -p "$RC_OUT/x402"
   clone_at x402-ycash "$WS/x402-ycash"
+  build_yolo        # its stratum tests start yolo beside a pool node (devnet `pool N stratum start`)
   local seed=181
   export YELLOWBACK_WORKSPACE="$WS" PYTHON="$PY" YCASH6="$WS/ycash6" X402_SCRATCH="$RC_OUT/x402/scratch"
   (cd "$WS/x402-ycash" && npm ci --ignore-scripts)
@@ -201,8 +210,10 @@ cmd_yecwallet() {
   attest_agent      # the default devnet runs the attestors' agents
   clone_at yecwallet-dd "$WS/yecwallet-dd"
   (cd "$WS/yecwallet-dd" && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja -C build yellowback_test nodecompat_test)
-  local dir="$RC_OUT/yecwallet/devnet"
-  trap 'devnet_down "$dir"' EXIT
+  local dir="$RC_OUT/yecwallet/devnet" q
+  printf -v q %q "$dir"
+  # shellcheck disable=SC2064 # the devnet dir is fixed when the trap is set: the local is gone when EXIT fires
+  trap "devnet_down $q" EXIT
   "$PY" "$DEVNET" up --dir "$dir" --portseed 7 --bitcoind "$WS/ycash6/src/ycashd" --no-viz
   (cd "$WS/yecwallet-dd" && QT_QPA_PLATFORM=offscreen YELLOWBACK_DEVNET_DIR="$dir" build/bin/yellowback_test \
     && QT_QPA_PLATFORM=offscreen YELLOWBACK_DEVNET_DIR="$dir" build/bin/nodecompat_test)
@@ -211,11 +222,13 @@ cmd_yecwallet() {
 cmd_cross_line() {
   [ $# -eq 1 ] || die "usage: cross-line DD_TREE"
   need_ws
-  local dd=$1 dir="$RC_OUT/cross-line/devnet"
+  local dd=$1 dir="$RC_OUT/cross-line/devnet" q
   [ -x "$dd/src/ycashd" ] || die "no ycash-dd ycashd at $dd/src/ycashd"
   mkdir -p "$RC_OUT/cross-line"
   attest_agent
-  trap 'devnet_down "$dir"' EXIT
+  printf -v q %q "$dir"
+  # shellcheck disable=SC2064 # the devnet dir is fixed when the trap is set: the local is gone when EXIT fires
+  trap "devnet_down $q" EXIT
   # The default devnet (attestor set ARMED, personas on), mined by the driver rather than the heartbeat,
   # so every node stands on the same tip when the digests are read.
   "$PY" "$DEVNET" up --no-heartbeat --no-walk --no-viz --dir "$dir"

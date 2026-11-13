@@ -121,7 +121,9 @@ Both are minor bumps over 6.20.0 because 6.20.x patch numbers belong to the upst
    package. Then prove the qualification on the same artifacts (rc-qualify, "Proving run" below).
 4. **Release train.** Add `releases/v<V>.yaml` to the workspace (`boyfromcave/yellowback`,
    its `releases/README.md`) by pull request: every component at the commit this release is
-   qualified with, ycash6 at the commit you are about to tag. Its `release-train` check must pass.
+   qualified with, ycash6 at the commit you are about to tag: the `upgrade/vault` head the proving run qualified
+   (it may be ahead of the dry run's commit by test, doc and workflow changes only, "Proving run"
+   below). Its `release-train` check must pass.
 5. **Tag and push**, ycash-dd's pairing tag first (Network parameters, below):
    ```
    git tag -a v<V> -m "ycashd v<V> (Yellowback)" <commit>
@@ -164,8 +166,15 @@ never meets it for the first time: once the release train (step 4) names the `up
 `ycash6.commit` and `v<V>` as its tag (on a workspace branch is enough, input `train_ref`), dispatch
 `gh workflow run rc-qualify.yml -R boyfromcave/ycash6 --ref upgrade/vault -f proving_run=<run id>
 -f train_ref=<workspace branch>`, where `<run id>` is the green, strict dry run of step 3 at that
-same commit (its `release-dry-run` job green; the job refuses any other run, a branch other than
-`upgrade/vault` or `release/*`, and refuses again once `upgrade/vault` moves). A failing proving run
+branch (its `release-dry-run` job green; the job refuses any other run and a branch other than
+`upgrade/vault` or `release/*`). The package is proved at the commit that built it: later commits
+on the branch that touch only tests, docs and workflows (`qa/`, `doc/`, `.github/`) do not need a
+new build, unless the release build reads them (`yellowback-release.yml`, `.github/actions/`,
+`qa/yellowback-ci-apt.sh`, `qa/yellowback-release-*`, `qa/yellowback-vault-params.py`, `doc/man/`);
+any other change since that commit, a rename included, is refused. The proof is same-source for
+everything the build reads, not same-bytes (`share/genbuild.sh` embeds `git describe`), and the tag
+is cut at the head. The record keeps both: `commit` (built) and `harness_commit` (the head that
+ran the steps). A failing proving run
 opens no issue (the node suites' issue steps skip it). The candidate
 is that run's `release-signed` artifact, checked the same way (its cosign identity is the workflow
 at the branch); the record (`proving_run: true`) stays a workflow artifact and nothing is written
