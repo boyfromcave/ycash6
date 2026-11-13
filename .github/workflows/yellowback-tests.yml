@@ -1232,6 +1232,7 @@ jobs:
         if: steps.line.outputs.line == 'upgrade' && !cancelled()
         env:
           REF: ${{ github.base_ref || github.ref_name }}
+          REF_TYPE: ${{ github.base_ref && 'branch' || github.ref_type }}
           HEAD_REF: ${{ github.head_ref }}
           GITHUB_TOKEN: ${{ github.token }}   # read-only: lists the other line's pull requests (public repository)
           INTERM: ${{ steps.line.outputs.interm }}
@@ -1245,7 +1246,21 @@ jobs:
           # A branch both lines carry (vaults/kogany-compat, a kc/* pair) compares with its namesake, whatever
           # markers the tree carries; the record-branch routing applies only when the other line has no
           # branch of that name.
-          if [ "$REF" != upgrade/vault ] && [ "$other" != "$REF" ]; then
+          # A release is never routed to a record branch: a tag v<V> (rc-qualify's node suites run here with
+          # the tag as REF), or a release/* branch ycash-dd does not carry (v<V> from configure.ac, as
+          # yellowback-release.yml renders it), compares with ycash-dd's pairing tag vault-params/v<V> when it
+          # exists, else with ycash-dd's upgrade/vault (doc/yellowback-release.md: the same pairing rule).
+          src=refs/heads release=
+          if [ "$REF_TYPE" = tag ]; then release=$REF
+          elif [[ $REF == release/* ]] && [ "$other" != "$REF" ]; then
+            cv() { sed -n "s/^define(_CLIENT_VERSION_$1, \([0-9]*\))$/\1/p" configure.ac; }
+            b=$(cv BUILD); if [ "$b" -lt 25 ]; then s=-beta$((b + 1)); elif [ "$b" -lt 50 ]; then s=-rc$((b - 24)); elif [ "$b" -eq 50 ]; then s=; else s=-$((b - 50)); fi
+            release=v$(cv MAJOR).$(cv MINOR).$(cv REVISION)$s
+          fi
+          if [ -n "$release" ]; then
+            other=upgrade/vault
+            if git ls-remote --exit-code --tags "$url" "refs/tags/vault-params/$release" >/dev/null; then other=vault-params/$release src=refs/tags; fi
+          elif [ "$REF" != upgrade/vault ] && [ "$other" != "$REF" ]; then
             if [ "$INTERM" = 1 ]; then other=upgrade/vault-in-term; fi
             if [ "$QUANTUM" = 1 ]; then other=upgrade/quantum-vaults; fi
           fi
@@ -1257,8 +1272,8 @@ jobs:
           if [ "$other" = upgrade/vault ] && [ -n "$HEAD_REF" ]; then
             other=$(python3 qa/yellowback-other-line-branch.py --repo "$OTHER_LINE_REPO" --branch "$HEAD_REF")
           fi
-          git fetch --no-tags --depth 1 "$url" "+refs/heads/$other:refs/remotes/other-line/head"
-          echo "comparing with $OTHER_LINE_REPO $other @ $(git rev-parse --short other-line/head)"
+          git fetch --no-tags --depth 1 "$url" "+$src/$other:refs/remotes/other-line/head"
+          echo "comparing with $OTHER_LINE_REPO $other @ $(git rev-parse --short 'other-line/head^{commit}')"
           # Vectors, qa goldens, pqkey, the spec, src/crypto/pq, src/vault and src/yellowback (audit W3-P-2;
           # the manifest is the list), the overlay trees against qa/yellowback-cross-line-allow.txt, and every
           # Vault chain parameter (audit W3-P-1), read from the other line's git objects: the audit's
