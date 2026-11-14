@@ -1,0 +1,14 @@
+{
+ "bucket": "low",
+ "sla_days": 180,
+ "findings": [
+  {
+   "fingerprint": "8feb720a69350464",
+   "rule": "python.lang.security.audit.dynamic-urllib-use-detected",
+   "path": "qa/yellowback-other-line-branch.py",
+   "line": 133,
+   "first_seen": "2026-11-12",
+   "due": "2027-05-11"
+  }
+ ]
+}
