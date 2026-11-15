@@ -46,6 +46,7 @@ node     kogany_mixed_smoke            gate    W1   direct
 node     stopatheight                  report  W9
 node     ycash_bootstrap               report  W9
 node     ycash_ydf_default             report  W9
+node     ycash_ydf_mandate_end         report  W9
 node     testnet_ceremony              gate    W9
 node     lightwalletd_only             report  W9
 node     yellowback_lightwalletd       report  W9
@@ -142,6 +143,7 @@ excluded:sidecar lightwalletd_only            no wallet RPC: a -lightwalletd nod
 excluded:sidecar yellowback_lightwalletd      no wallet RPC: a -lightwalletd node generating across Vault
 sidecar  z_validateaddress_nowallet    report  W9     # node
 sidecar  ycash_ydf_default             report  W9     # node
+sidecar  ycash_ydf_mandate_end         report  W9     # node
 sidecar  vault_upgrade                 report  W9   mirror  # vault
 sidecar  vault_primitive               report  W9   mirror  # vault
 sidecar  vault_slashing                report  W9   mirror  # vault
@@ -217,6 +219,7 @@ excluded yellowback_framework_smoke    peer-count: asserts an exact getpeerinfo 
 excluded:pair yellowback_wr_flags  F-S5-15: Sapling consolidation (-consolidation, a background wallet option with no RPC) stays outside K-25 by decision; the script also needs -deletetx and reads debug.log (F-S5-13 class)
 pair     z_validateaddress_nowallet    report  W9     # node
 pair     ycash_ydf_default             report  W9     # node
+pair     ycash_ydf_mandate_end         report  W9     # node
 pair     vault_upgrade                 report  W9     # vault
 pair     vault_primitive               report  W9     # vault
 pair     vault_slashing                report  W9     # vault

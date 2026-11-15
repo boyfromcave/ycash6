@@ -243,13 +243,35 @@ BOOST_AUTO_TEST_CASE(testnet_subsidy_and_ydf)
         BOOST_CHECK_EQUAL(c.Halving(1189749), 0);
         BOOST_CHECK_EQUAL(c.Halving(1189750), 1);
 
-        // The YDF (5 %, mandatory to 900,000) pays the first sm… address, P2PKH, from the fork through the
-        // first Canopy block: its schedule counts from the fork, which did not move.
-        BOOST_CHECK_EQUAL(test.GetYdfMandateEndHeight(), 900000);
+        // The YDF (5 %, mandatory to the profile's own end, beta3 item 5) pays the first sm… address, P2PKH,
+        // from the fork through the first Canopy block: its schedule counts from the fork, which did not move.
         const CScript ydf = test.GetFoundersRewardScriptAtHeight(FORK);
         BOOST_CHECK(ydf.size() == 25 && ydf[0] == OP_DUP);
         BOOST_CHECK(test.GetFoundersRewardScriptAtHeight(CANOPY) == ydf);
     }
+}
+
+BOOST_AUTO_TEST_CASE(testnet_ydf_mandate_end_heights)
+{
+    // beta3 item 5 (B3-D4): the fast profile ends the mandate at its own height, after the fork and after its
+    // Vault height, well below the default testnet value (900,000) it used to inherit. The value is set at the
+    // release-candidate cut; the test reads it from the parameters and does not pin it.
+    const CChainParams& fast = TestNet("fast");
+    const int end = fast.GetYdfMandateEndHeight();
+    BOOST_CHECK(end > FORK);
+    BOOST_CHECK(end > PROFILES[0].vaultHeight);
+    BOOST_CHECK(end < 900000);
+    // A fund script exists on both sides of the end: a block may still pay it after the end.
+    for (int h : {end - 1, end, end + 1}) {
+        const CScript ydf = fast.GetFoundersRewardScriptAtHeight(h);
+        BOOST_CHECK(ydf.size() == 25 && ydf[0] == OP_DUP);
+    }
+    // Mainnet, slow and legacy keep mainnet's 2,275,000; regtest keeps 5.
+    BOOST_CHECK_EQUAL(Params(CBaseChainParams::MAIN).GetYdfMandateEndHeight(), 2275000);
+    for (const Profile& pr : SHADOW) {
+        BOOST_CHECK_EQUAL(TestNet(pr.name).GetYdfMandateEndHeight(), 2275000);
+    }
+    BOOST_CHECK_EQUAL(Params(CBaseChainParams::REGTEST).GetYdfMandateEndHeight(), 5);
 }
 
 BOOST_AUTO_TEST_CASE(testnet_work_and_maturity)

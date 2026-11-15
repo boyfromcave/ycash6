@@ -640,6 +640,16 @@ protected:
 };
 
 /**
+ * The fast profile's own end of the YDF mandate (beta3 item 5, decision B3-D4): from this height a
+ * testnet-yb-fast block is valid with or without the fund output, as on mainnet past 2,275,000. Below
+ * it the 5 % output stays required. PROVISIONAL: 512,000 until the coordinator sets the final value at
+ * the release-candidate cut (the fast-testnet tip then, plus 400 blocks). Every node of the network must
+ * run a build with the final value before the chain reaches it. The default testnet value (900,000,
+ * CTestNetParams) and the slow and legacy profiles (mainnet's 2,275,000) are untouched.
+ */
+static const int TESTNET_FAST_YDF_MANDATE_END_HEIGHT = 512000;
+
+/**
  * testnet-yb-fast (testnet plan Revision 3): the iteration network. Vault at 510,400 (H_V, a placeholder
  * until the launch ceremony fixes it, §2.2), a 48-block set maturity (D4), and the YED fast column
  * (yellowback/params.cpp TestFastParams), so vault, bond and seat lifecycles run in hours.
@@ -653,6 +663,8 @@ public:
         // D-Q-31 exit window, D4 (owner 2026-10-29): 48 blocks, about an hour; mainnet keeps 16,128. The YED
         // module's BOND_MATURITY is the same 48 in the fast column (yellowback/params.cpp TestFastParams).
         consensus.nVaultMinSetMaturity = 48;
+        nYdfMandateEndHeight = TESTNET_FAST_YDF_MANDATE_END_HEIGHT;
+        assert(nYdfMandateEndHeight >= consensus.vUpgrades[Consensus::UPGRADE_YCASH].nActivationHeight);
         pchMessageStart[0] = 0xf7;
         pchMessageStart[1] = 0x79;
         pchMessageStart[2] = 0x62;
