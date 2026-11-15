@@ -54,14 +54,11 @@ name: yellowback tests
 #     lockorder check) and sanitizers-pr (ASan/UBSan test_bitcoin over the overlay unit suites); each
 #     builds only when the PR touches OVERLAY_PATHS and is part of the `gate` check (audit 07/F-11).
 #     The full lockorder/sanitizers variants stay nightly.
-#   workflow_call (rc-qualify.yml, testnet plan §5.3 step 1): the same tiers against a RELEASE package.
-#     With release_package, the build and nightly jobs replace src/ycashd, ycash-cli and ycash-tx by the
-#     linux_x86_64 package the caller uploaded as artifact `rc-package` (checked against its SHA256SUMS
-#     by qa/yellowback-rc-qualify.sh install) before anything runs them, so every functional shard and
-#     the nightly's suites test the released binary; test_bitcoin is not in a package, so the unit
-#     tier and the instrumented variants (lockorder, sanitizers, coverage, fuzz) stay CI builds. The
-#     caller's release train replaces the YOLO_COMMIT, CHAINVIZ_COMMIT, LWD_COMMIT and
-#     YB_WORKSPACE_COMMIT pins below (inputs; the push tier keeps its own).
+#   workflow_call: the same tiers, with a release train's YOLO_COMMIT, CHAINVIZ_COMMIT, LWD_COMMIT and
+#     YB_WORKSPACE_COMMIT in place of the pins below (inputs; the push tier keeps its own).
+#   The release-candidate qualification (testnet plan §5.3) is the workspace's since beta3 (P-1):
+#     boyfromcave/yellowback qualify/ and its rc-qualify.yml. Its step 1 is a tier-all dispatch of
+#     this workflow on the tag, given to it by run id (doc/yellowback-release.md).
 # Fail, never skip (audit 04/F-1, 04/N-4): every rpc-tests.py run passes --fail-on-skip, so a script
 # that prints a line starting with SKIP fails the run; the sidecar/agent `test -x` guards and the
 # Falcon signer probe are the early, named message. qa/yellowback-audit.sh fails a run without the flag.
@@ -114,10 +111,6 @@ on:
         description: 'all, push, nightly, weekly, bin, mixed or sidecar (as the dispatch input)'
         type: string
         default: all
-      release_package:
-        description: 'test the release package of artifact rc-package instead of the CI build (rc-qualify)'
-        type: boolean
-        default: false
       yolo_commit:
         description: 'the release train''s yolo commit (empty: YOLO_COMMIT below)'
         type: string
@@ -418,15 +411,6 @@ jobs:
       # check fetches sprout-groth16.params itself.
       - name: Build ycashd
         run: ./zcutil/build.sh -j"$(nproc)"
-      - name: Release candidate's binaries in place of the CI build (rc-qualify)
-        if: inputs.release_package
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: rc-package
-          path: ${{ runner.temp }}/rc-package
-      - name: Install the release package's ycashd, ycash-cli and ycash-tx (checked against SHA256SUMS)
-        if: inputs.release_package
-        run: qa/yellowback-rc-qualify.sh install "$RUNNER_TEMP/rc-package" .
       - name: ccache statistics
         if: always()
         run: depends/x86_64-pc-linux-gnu/native/bin/ccache --show-stats || true
@@ -1247,7 +1231,7 @@ jobs:
           # A branch both lines carry (vaults/kogany-compat, a kc/* pair) compares with its namesake, whatever
           # markers the tree carries; the record-branch routing applies only when the other line has no
           # branch of that name.
-          # A release is never routed to a record branch: a tag v<V> (rc-qualify's node suites run here with
+          # A release is never routed to a record branch: a tag v<V> (the qualification's node suites run here with
           # the tag as REF), or a release/* branch ycash-dd does not carry (v<V> from configure.ac, as
           # yellowback-release.yml renders it), compares with ycash-dd's pairing tag vault-params/v<V> when it
           # exists, else with ycash-dd's upgrade/vault (doc/yellowback-release.md: the same pairing rule).
@@ -1628,8 +1612,6 @@ jobs:
         run: python3 qa/test_yellowback_release_heights.py -v
       - name: Cross-line identity checker unit tests (audit W3-P-2)
         run: python3 qa/test_yellowback_cross_line.py -v
-      - name: rc-qualify driver unit tests (testnet plan §5.3)
-        run: python3 qa/test_yellowback_rc_qualify.py -v
       - name: Cross-line overlay-tree checker unit tests (audit W3-P-2)
         run: python3 qa/test_yellowback_cross_line_trees.py -v
       - name: kogany mixed-line harness unit tests (test_framework/test_kogany.py; no node)
@@ -1761,15 +1743,6 @@ jobs:
       - uses: ./.github/actions/yellowback-depends
       - name: Build ycashd
         run: ./zcutil/build.sh -j"$(nproc)"
-      - name: Release candidate's binaries in place of the CI build (rc-qualify)
-        if: inputs.release_package
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: rc-package
-          path: ${{ runner.temp }}/rc-package
-      - name: Install the release package's ycashd, ycash-cli and ycash-tx (checked against SHA256SUMS)
-        if: inputs.release_package
-        run: qa/yellowback-rc-qualify.sh install "$RUNNER_TEMP/rc-package" .
       - name: Check out the stock 6.20.0 tree (branch ycash6-stock)
         # Plan P-5: the reference node is ycash6-stock (= tag ycash6-baseline + baseline fix 3, the
         # regtest Equihash (48,5) chainparams lines), never the fork without -yellowback. It is
@@ -2086,8 +2059,7 @@ jobs:
           path: ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
           if-no-files-found: warn
       - name: Open an issue on failure
-        # Not for an rc-qualify proving run (release_package on a branch): its record is the report.
-        if: failure() && !(inputs.release_package && github.ref_type != 'tag')
+        if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -2286,8 +2258,7 @@ jobs:
           path: ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
           if-no-files-found: warn
       - name: Open an issue on failure
-        # Not for an rc-qualify proving run (release_package on a branch): its record is the report.
-        if: failure() && !(inputs.release_package && github.ref_type != 'tag')
+        if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -2373,8 +2344,7 @@ jobs:
           path: ${{ runner.temp }}/yellowback-tests/**/node*/regtest/debug.log
           if-no-files-found: warn
       - name: Open an issue on failure
-        # Not for an rc-qualify proving run (release_package on a branch): its record is the report.
-        if: failure() && !(inputs.release_package && github.ref_type != 'tag')
+        if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -2470,8 +2440,7 @@ jobs:
             coverage-html
           if-no-files-found: ignore
       - name: Open an issue on failure
-        # Not for an rc-qualify proving run (release_package on a branch): its record is the report.
-        if: failure() && !(inputs.release_package && github.ref_type != 'tag')
+        if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
