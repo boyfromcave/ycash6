@@ -1872,6 +1872,42 @@ one). The template carries only transactions valid under the Yellowback rules (T
 through the same `CreateNewBlock`, so a regtest node with a payout address and a quote mines
 tagged blocks with no further code (V25).
 
+### `getblock` and `getblockchaininfo` (stock commands; the `transparentPools` object)
+
+Beta3 item 2 (workspace `docs/plans/beta3/value-pools.md`): both commands carry a new sibling of `valuePools`,
+`transparentPools`, the chain's transparent value pool split by address type. `valuePools` itself is unchanged, its
+order included (this line: `[transparent, sprout, sapling, orchard]`; ycash-dd: `[sprout, sapling]`), so clients that
+read it by position keep working. **Find pools by `id`, never by position.** The entry fields are `valuePools`'
+(`monitored`, `chainValue`, `chainValueZat`, and in `getblock` only `valueDelta`, `valueDeltaZat`):
+
+```
+"transparentPools": {
+  "monitored": bool,
+  "transparent": { "monitored", "chainValue", "chainValueZat", "valueDelta", "valueDeltaZat" },
+  "pools": [ { "id": "transparent_ecc", ... }, { "id": "transparent_pq", ... }, { "id": "pq_channel", ... },
+             { "id": "vault", ... }, { "id": "vault_intent", ... } ],
+  "pq_by_scheme": [ { "pqscheme": 1, "pqschemename": "SLH-DSA-SHA2-128s", ... },
+                    { "pqscheme": 2, "pqschemename": "FN-DSA-512", ... } ],
+  "vault_by_module": [ { "module": "YED", "tag": "59454400", ... } ]
+}
+```
+
+- Each transparent output is in exactly one pool, tested in this order: `transparent_pq` (`TX_PQPKH`, YED token
+  outputs included), `pq_channel` (`TX_PQCHANNEL`), `vault` (`TX_VAULT`), `vault_intent` (`TX_VAULT_INTENT`),
+  `transparent_ecc` (everything else: P2PKH, P2PK, P2SH, multisig, `OP_RETURN` with value, nonstandard). The pools
+  sum to `transparent`; `pq_by_scheme` (both schemes always, the wallet's order and names) sums to `transparent_pq`.
+  The ids and scheme keys are the wallet's (`z_gettotalbalance`); on the chain `transparent_ecc` excludes the channel
+  and vault classes, which the wallet's figure of that name counts when it watches such a script.
+- `vault_by_module` lists the registered rule modules only (today YED): the part of `vault` plus `vault_intent` whose
+  template tag is the module's. It is not `yed_getstats.collateralZat`, which counts ACTIVE and CLAIMING vaults only.
+  `vault` equals `vault_getinfo.lockedvalue`.
+- `transparent` equals `valuePools`' `transparent` entry at every height.
+- The data is a node-side index (`<datadir>/blocks/valuepools/`), never a validity rule. A node that already has the
+  chain fills it once at startup from its block and undo files (logged as `valuepools: filling …`); on mainnet and
+  the shadow testnets it starts from a compiled seed at the chain-supply checkpoint (height 2,800,000), so on
+  such a node blocks below it say `"monitored": false` (a node that syncs or reindexes with this build covers them). Until a block is covered its entries say `"monitored": false` and carry no values. A pruned node that lacks the old undo data
+  cannot fill: its entries stay `"monitored": false` and the log says `reindex to enable`. `-reindex` rebuilds it.
+
 ---
 
 ## Wallet context (`src/rpc/yellowbackwallet.cpp`)
