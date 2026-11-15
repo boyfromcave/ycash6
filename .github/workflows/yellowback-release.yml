@@ -11,8 +11,9 @@
 # repository's maintainers can see. It
 # also writes down, in public and tamper-evident form, that these exact files came from this exact
 # workflow run (GitHub "provenance" and a Sigstore signature), and lists what each package contains
-# (an SBOM). Then it starts the release-candidate qualification (rc-qualify.yml), which tests the
-# downloaded files with every other Yellowback program. The lead architect adds their own signature to the
+# (an SBOM). The release-candidate qualification, which tests the downloaded files with every other
+# Yellowback program, is the workspace's (boyfromcave/yellowback qualify/, its rc-qualify.yml),
+# dispatched by hand on the release train. The lead architect adds their own signature to the
 # checksum file from a private repository, tries the release on the testnets, and only then
 # publishes it.
 #
@@ -23,7 +24,7 @@
 #
 # Triggers:
 #   push of a tag v*            build, smoke-test, sign, create a draft release (a prerelease when
-#                               the version has -rc/-beta) and dispatch rc-qualify.yml on the tag.
+#                               the version has -rc/-beta).
 #                               The tag must equal configure.ac's version, the version must be the
 #                               line's (6.21.x harden, 6.22.x upgrade; O-7), and the release rules of
 #                               the stage the version names must hold (qa/yellowback-release-heights.sh
@@ -41,11 +42,11 @@
 #                               its upgrade/vault; false: warnings only), the same builds, smoke
 #                               tests, SBOMs and signatures, then `release-dry-run`, which checks the
 #                               signed set and the notes file the draft would carry and prints the
-#                               release it would create. Artifacts only: the `release` and `qualify`
-#                               jobs run on a pushed tag only (event push), so no dispatch, on any
-#                               ref, ever creates a release or starts rc-qualify. Its cosign identity
-#                               names the branch, so it can never pass for a tag's. rc-qualify can
-#                               then be proved on these artifacts (rc-qualify.yml input proving_run).
+#                               release it would create. Artifacts only: the `release` job runs on
+#                               a pushed tag only (event push), so no dispatch, on any ref, ever
+#                               creates a release. Its cosign identity names the branch, so it can
+#                               never pass for a tag's. The qualification can then be proved on these
+#                               artifacts (the workspace's rc-qualify.yml, input proving_run).
 #
 # Signing and provenance (testnet plan §5.2, T-6):
 #   - build provenance (actions/attest-build-provenance, SLSA build level 2, GitHub OIDC) for every
@@ -527,7 +528,7 @@ jobs:
             echo "## Dry run: the tag v$VERSION would create"
             echo
             echo "gh release create v$VERSION dist/* --draft $pre --verify-tag --title \"ycashd v$VERSION (Yellowback)\""
-            echo "then dispatch rc-qualify.yml on v$VERSION (prove it now: rc-qualify.yml with proving_run=$GITHUB_RUN_ID)"
+            echo "then qualify it: boyfromcave/yellowback rc-qualify.yml with train=releases/v$VERSION.yaml (prove it now: add proving_run=$GITHUB_RUN_ID)"
             echo
             echo "Assets:"
             echo
@@ -595,23 +596,3 @@ jobs:
           pre=; [ "$PRERELEASE" = true ] && pre=--prerelease
           gh release create "$GITHUB_REF_NAME" dist/* --draft $pre --verify-tag \
             --title "ycashd v$VERSION (Yellowback)" --notes-file "$body"
-
-  # Release-candidate qualification (testnet plan §5.3): rc-qualify.yml on the tag, against the
-  # packages of the draft just created. Dispatched rather than called, so its long jobs run under
-  # their own run with their own permissions; GitHub starts a workflow_dispatch made with this
-  # token (the one event it does not suppress).
-  qualify:
-    name: Start rc-qualify on the tag
-    needs: [version, release]
-    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && needs.release.result == 'success' }}
-    runs-on: ubuntu-22.04
-    timeout-minutes: 5
-    permissions:
-      actions: write        # gh workflow run
-    steps:
-      - name: Dispatch rc-qualify.yml on the tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh workflow run rc-qualify.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
-          echo "rc-qualify dispatched on $GITHUB_REF_NAME: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/workflows/rc-qualify.yml" >> "$GITHUB_STEP_SUMMARY"
