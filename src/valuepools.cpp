@@ -13,6 +13,7 @@
 #include "rpc/server.h"
 #include "script/script.h"
 #include "script/standard.h"
+#include "ui_interface.h"
 #include "undo.h"
 #include "util/strencodings.h"
 #include "util/system.h"
@@ -38,19 +39,19 @@ const int FILL_BATCH = 1000;
 
 std::mutex cs;                     //!< guards everything below
 std::unique_ptr<CDBWrapper> db;    //!< nullptr: the index is off
-std::optional<std::pair<uint256, Record>> lastWritten; //!< the record most recently written (the tip's, as a rule)
+//! The record most recently written (the tip's, as a rule). The hook sets it only once its batch is written; the
+//! fill sets it as it goes, as the parent of the next block, and every failure of the fill resets it with the store.
+std::optional<std::pair<uint256, Record>> lastWritten;
 std::optional<std::pair<uint256, Record>> genesisRecord; //!< computed once
 bool fReportedGap = false;         //!< "not covered" logged once per run
 
-std::pair<char, uint256> RecordKey(const uint256& hash) { return std::make_pair(KEY_RECORD, hash); }
+// Test hooks (valuepools::test, gtest only).
+std::optional<Seed> testSeed;      //!< replaces CompiledSeed when fTestSeed
+bool fTestSeed = false;
+std::function<bool(const CBlockIndex*, CBlock&, CBlockUndo&)> testBlockReader; //!< replaces the disk reads of the fill
+bool fTestFailWrites = false;      //!< every write throws dbwrapper_error
 
-/** A compiled seed: the chain totals at a block of the network's history (note §4). ycash-dd has none: every
- *  network fills from genesis. (The 6.20.0 node line seeds mainnet and the shadow testnets at the chain-supply checkpoint.) */
-struct Seed {
-    int height;
-    uint256 hash;
-    Record record;
-};
+std::pair<char, uint256> RecordKey(const uint256& hash) { return std::make_pair(KEY_RECORD, hash); }
 
 /**
  * The highest chain-supply checkpoint the seed claim covers (note §4, §9 item 1): no output below it matches a PQ,
@@ -62,19 +63,30 @@ struct Seed {
  */
 const int SEED_CHECKED_MAX_HEIGHT = 2800000;
 
-std::optional<Seed> CompiledSeed(const CChainParams& chainparams)
+//! The seed the hook and the fill use: the compiled one, or the test hook's.
+std::optional<Seed> EffectiveSeed(const CChainParams& chainparams)
 {
-    // The network's chain-supply checkpoint, where it names its block (mainnet and the shadow testnets, which share
-    // mainnet below their split; regtest's optional checkpoint names none, so regtest and the legacy testnet fill
-    // from genesis).
-    const int height = chainparams.ChainSupplyCheckpointHeight();
-    const uint256 hash = chainparams.ChainSupplyCheckpointBlockHash();
-    if (height <= 0 || height > SEED_CHECKED_MAX_HEIGHT || hash.IsNull()) return std::nullopt;
-    Seed seed;
-    seed.height = height;
-    seed.hash = hash;
-    seed.record.transparent = chainparams.ChainSupplyCheckpointTransparentValue();
-    return seed;
+    if (fTestSeed) return testSeed;
+    return CompiledSeed(chainparams);
+}
+
+//! caller holds cs; throws dbwrapper_error on a failure (CDBWrapper::WriteBatch never returns false)
+void CommitLocked(CDBBatch& batch, bool fSync)
+{
+    if (fTestFailWrites) throw dbwrapper_error("write failure (test hook)");
+    db->WriteBatch(batch, fSync);
+}
+
+/**
+ * caller holds cs: a write failed. The store is closed and the cache dropped, so every entry says "monitored":
+ * false and the hook does nothing (one log line, not one per block) until the node restarts and the fill resumes
+ * from the last block whose record was written.
+ */
+void DisableLocked(const std::string& what)
+{
+    db.reset();
+    lastWritten.reset();
+    LogPrintf("valuepools: %s; the transparent pools by type are not monitored until the node restarts\n", what);
 }
 
 //! The genesis block's record (it is never passed to ConnectBlock's transaction loop, so it is never stored).
@@ -102,7 +114,13 @@ std::optional<Record> ReadRecordLocked(const CBlockIndex* pindex)
     if (!db) return std::nullopt;
     if (lastWritten && lastWritten->first == hash) return lastWritten->second;
     Record r;
+    // An unknown version or a record that cannot be read is "no record"; so is a record whose totals leave their
+    // range (a corrupt store), so that nothing is ever computed from it.
     if (!db->Read(RecordKey(hash), r)) return std::nullopt;
+    if (!r.IsSane()) {
+        LogPrintf("valuepools: the record of block %s is out of range; it is treated as missing\n", hash.ToString());
+        return std::nullopt;
+    }
     return r;
 }
 
@@ -131,12 +149,11 @@ StepResult ComputeLocked(const CBlock& block, const CBlockUndo& blockundo, const
     return StepResult::OK;
 }
 
-//! caller holds cs; may throw dbwrapper_error
+//! caller holds cs: adds the record of `hash` to `batch` and names it the last block written
 void WriteLocked(CDBBatch& batch, const uint256& hash, const Record& r)
 {
     batch.Write(RecordKey(hash), r);
     batch.Write(KEY_BEST, hash);
-    lastWritten = std::make_pair(hash, r);
 }
 
 UniValue Entry(UniValue obj, const std::optional<CAmount>& chainValue, const std::optional<CAmount>& valueDelta)
@@ -165,6 +182,21 @@ std::string SchemeName(uint8_t scheme)
 }
 
 } // namespace
+
+std::optional<Seed> CompiledSeed(const CChainParams& chainparams)
+{
+    // The network's chain-supply checkpoint, where it names its block (mainnet and the shadow testnets, which share
+    // mainnet below their split; regtest's optional checkpoint names none, so regtest and the legacy testnet fill
+    // from genesis).
+    const int height = chainparams.ChainSupplyCheckpointHeight();
+    const uint256 hash = chainparams.ChainSupplyCheckpointBlockHash();
+    if (height <= 0 || height > SEED_CHECKED_MAX_HEIGHT || hash.IsNull()) return std::nullopt;
+    Seed seed;
+    seed.height = height;
+    seed.hash = hash;
+    seed.record.transparent = chainparams.ChainSupplyCheckpointTransparentValue();
+    return seed;
+}
 
 ScriptClass ClassifyTransparentScript(const CScript& s)
 {
@@ -241,8 +273,24 @@ void AddOutput(Record& r, const CTxOut& out, int sign)
     }
 }
 
+namespace {
+//! Every running total within [-MAX_MONEY, MAX_MONEY]: with each addend in MoneyRange, the next addition cannot
+//! overflow, whatever the undo data or a parent record read from disk holds.
+bool Bounded(const Record& r)
+{
+    for (CAmount v : {r.transparent, r.pq1, r.pq2, r.channel, r.vault, r.intent, r.vaultYed, r.intentYed}) {
+        if (v < -MAX_MONEY || v > MAX_MONEY) return false;
+    }
+    return true;
+}
+} // namespace
+
 bool ApplyBlock(const Record& parent, const CBlock& block, const CBlockUndo& blockundo, Record& out, std::string& err)
 {
+    if (!parent.IsSane()) {
+        err = "the parent's record is out of range";
+        return false;
+    }
     Record r = parent;
     size_t nUndo = 0;
     for (const CTransaction& tx : block.vtx) {
@@ -251,7 +299,17 @@ bool ApplyBlock(const Record& parent, const CBlock& block, const CBlockUndo& blo
                 err = strprintf("the undo data does not match transaction %s", tx.GetHash().ToString());
                 return false;
             }
-            for (const CTxInUndo& spent : blockundo.vtxundo[nUndo].vprevout) AddOutput(r, spent.txout, -1);
+            for (const CTxInUndo& spent : blockundo.vtxundo[nUndo].vprevout) {
+                if (!MoneyRange(spent.txout.nValue)) {
+                    err = strprintf("an output spent by transaction %s is out of range in the undo data", tx.GetHash().ToString());
+                    return false;
+                }
+                AddOutput(r, spent.txout, -1);
+                if (!Bounded(r)) {
+                    err = strprintf("a total leaves its range at transaction %s", tx.GetHash().ToString());
+                    return false;
+                }
+            }
             nUndo++;
         }
         for (const CTxOut& o : tx.vout) {
@@ -260,6 +318,10 @@ bool ApplyBlock(const Record& parent, const CBlock& block, const CBlockUndo& blo
                 return false;
             }
             AddOutput(r, o, +1);
+            if (!Bounded(r)) {
+                err = strprintf("a total leaves its range at transaction %s", tx.GetHash().ToString());
+                return false;
+            }
         }
     }
     if (nUndo != blockundo.vtxundo.size()) {
@@ -305,19 +367,18 @@ bool IsOpen()
 void BlockConnected(const CBlock& block, const CBlockUndo& blockundo, const CBlockIndex* pindex)
 {
     // Never throws, asserts or reports to the caller: a block is valid or not before this runs (note §6).
+    std::lock_guard<std::mutex> lock(cs);
     try {
-        std::lock_guard<std::mutex> lock(cs);
         if (!db || !pindex) return;
         Record r;
         std::string err;
-        switch (ComputeLocked(block, blockundo, pindex, CompiledSeed(Params()), r, err)) {
+        switch (ComputeLocked(block, blockundo, pindex, EffectiveSeed(Params()), r, err)) {
             case StepResult::OK: {
                 CDBBatch batch(*db);
                 WriteLocked(batch, pindex->GetBlockHash(), r);
-                if (!db->WriteBatch(batch)) {
-                    lastWritten.reset();
-                    LogPrintf("valuepools: cannot write the record of block %d; the blocks after it are not monitored\n", pindex->nHeight);
-                }
+                CommitLocked(batch, false);
+                // Cached only once written: a record that never reached the store is never extended.
+                lastWritten = std::make_pair(pindex->GetBlockHash(), r);
                 return;
             }
             case StepResult::NO_PARENT:
@@ -329,15 +390,20 @@ void BlockConnected(const CBlock& block, const CBlockUndo& blockundo, const CBlo
                 }
                 return;
             case StepResult::INCONSISTENT:
-            case StepResult::SEED_MISMATCH:
                 LogPrintf("valuepools: block %d %s: %s; the blocks after it are not monitored (restart with -reindex)\n",
+                          pindex->nHeight, pindex->GetBlockHash().ToString(), err);
+                return;
+            case StepResult::SEED_MISMATCH:
+                // -reindex would only repeat this; a fresh index starts from the seed instead of checking it.
+                LogPrintf("valuepools: block %d %s: %s; the blocks after it are not monitored (stop the node and delete "
+                          "blocks/valuepools in the data directory: the next start rebuilds the index from the compiled seed)\n",
                           pindex->nHeight, pindex->GetBlockHash().ToString(), err);
                 return;
         }
     } catch (const std::exception& e) {
-        LogPrintf("valuepools: block %d: %s; the blocks after it are not monitored\n", pindex ? pindex->nHeight : -1, e.what());
+        DisableLocked(strprintf("block %d: %s", pindex ? pindex->nHeight : -1, e.what()));
     } catch (...) {
-        LogPrintf("valuepools: block %d: unknown failure; the blocks after it are not monitored\n", pindex ? pindex->nHeight : -1);
+        DisableLocked(strprintf("block %d: unknown failure", pindex ? pindex->nHeight : -1));
     }
 }
 
@@ -347,8 +413,11 @@ bool Fill(const CChainParams& chainparams, const std::function<bool()>& interrup
     std::lock_guard<std::mutex> lock(cs);
     if (!db) return true;
     const CBlockIndex* tip = chainActive.Tip();
-    if (!tip) return true;
-    const std::optional<Seed> seed = CompiledSeed(chainparams);
+    if (!tip) {
+        LogPrintf("valuepools: no active chain yet; nothing to fill\n");
+        return true;
+    }
+    const std::optional<Seed> seed = EffectiveSeed(chainparams);
 
     try {
         // The start: the last block written, or its nearest ancestor on the active chain (records are keyed by hash,
@@ -367,7 +436,8 @@ bool Fill(const CChainParams& chainparams, const std::function<bool()>& interrup
             start = chainActive[seed->height];
             CDBBatch batch(*db);
             WriteLocked(batch, start->GetBlockHash(), seed->record);
-            db->WriteBatch(batch, true);
+            CommitLocked(batch, true);
+            lastWritten = std::make_pair(start->GetBlockHash(), seed->record);
             LogPrintf("valuepools: starting from the compiled seed at height %d\n", seed->height);
         }
         if (!start) start = chainActive.Genesis();
@@ -377,21 +447,27 @@ bool Fill(const CChainParams& chainparams, const std::function<bool()>& interrup
         }
 
         LogPrintf("valuepools: filling the transparent pools by type from height %d to %d\n", start->nHeight + 1, tip->nHeight);
+        // The node waits for the fill: say so in the warm-up status the RPC server answers with (-28) meanwhile.
+        uiInterface.InitMessage(strprintf(_("Filling the transparent pools index (height %d of %d)..."), start->nHeight, tip->nHeight));
         const int64_t nStart = GetTimeMillis();
         std::unique_ptr<CDBBatch> batch(new CDBBatch(*db));
         int nBatch = 0;
         for (int h = start->nHeight + 1; h <= tip->nHeight; h++) {
             if (interrupted()) {
-                db->WriteBatch(*batch, true);
+                CommitLocked(*batch, true);
                 LogPrintf("valuepools: fill interrupted at height %d\n", h);
                 return true;
             }
             const CBlockIndex* pindex = chainActive[h];
             CBlock block;
             CBlockUndo blockundo;
-            if (!(pindex->nStatus & BLOCK_HAVE_DATA) || !(pindex->nStatus & BLOCK_HAVE_UNDO) ||
-                !ReadBlockFromDisk(block, pindex, chainparams.GetConsensus()) || !ReadBlockUndo(blockundo, pindex)) {
-                db->WriteBatch(*batch, true);
+            bool fRead = (pindex->nStatus & BLOCK_HAVE_DATA) && (pindex->nStatus & BLOCK_HAVE_UNDO);
+            if (fRead) {
+                fRead = testBlockReader ? testBlockReader(pindex, block, blockundo)
+                                        : ReadBlockFromDisk(block, pindex, chainparams.GetConsensus()) && ReadBlockUndo(blockundo, pindex);
+            }
+            if (!fRead) {
+                CommitLocked(*batch, true);
                 LogPrintf("valuepools: the block or undo data of block %d is not available (pruned?); the transparent pools by "
                           "type are not monitored from this height: reindex to enable\n", h);
                 return true;
@@ -402,32 +478,38 @@ bool Fill(const CChainParams& chainparams, const std::function<bool()>& interrup
                 case StepResult::OK:
                     break;
                 case StepResult::SEED_MISMATCH:
-                    db->WriteBatch(*batch, true);
-                    errOut = "valuepools: " + err + ". This may indicate on-disk corruption; please restart with -reindex.";
+                    CommitLocked(*batch, true);
+                    errOut = "valuepools: " + err + ". This may indicate on-disk corruption. Stop the node, delete the directory "
+                             "blocks/valuepools in the data directory and start without -valuepoolsseed=0: the index is then "
+                             "rebuilt from the compiled seed (a few minutes on mainnet; the chain itself is kept). -reindex "
+                             "would repeat this check and fail again.";
                     LogPrintf("%s\n", errOut);
                     return false;
                 case StepResult::NO_PARENT:
                 case StepResult::INCONSISTENT:
-                    db->WriteBatch(*batch, true);
+                    CommitLocked(*batch, true);
                     LogPrintf("valuepools: block %d: %s; the transparent pools by type are not monitored from this height "
                               "(restart with -reindex)\n", h, err.empty() ? "no record of its parent" : err);
                     return true;
             }
             WriteLocked(*batch, pindex->GetBlockHash(), r);
+            lastWritten = std::make_pair(pindex->GetBlockHash(), r); // the next block's parent; reset if a write fails
             if (++nBatch >= FILL_BATCH) {
-                db->WriteBatch(*batch);
+                CommitLocked(*batch, false);
                 batch.reset(new CDBBatch(*db));
                 nBatch = 0;
             }
             if (h % FILL_LOG_INTERVAL == 0) {
                 LogPrintf("valuepools: filled to height %d of %d (%ds)\n", h, tip->nHeight, (GetTimeMillis() - nStart) / 1000);
+                uiInterface.InitMessage(strprintf(_("Filling the transparent pools index (height %d of %d)..."), h, tip->nHeight));
             }
         }
-        db->WriteBatch(*batch, true);
+        CommitLocked(*batch, true);
         LogPrintf("valuepools: filled to the tip (height %d) in %dms\n", tip->nHeight, GetTimeMillis() - nStart);
     } catch (const std::exception& e) {
-        lastWritten.reset();
-        LogPrintf("valuepools: fill failed: %s; the transparent pools by type are not monitored\n", e.what());
+        DisableLocked(strprintf("fill failed: %s", e.what()));
+    } catch (...) {
+        DisableLocked("fill failed: unknown failure");
     }
     return true;
 }
@@ -439,6 +521,9 @@ std::optional<Record> GetRecord(const CBlockIndex* pindex)
         return ReadRecordLocked(pindex);
     } catch (const std::exception& e) {
         LogPrintf("valuepools: read failed: %s\n", e.what());
+        return std::nullopt;
+    } catch (...) {
+        LogPrintf("valuepools: read failed: unknown failure\n");
         return std::nullopt;
     }
 }
@@ -535,5 +620,35 @@ std::string HelpText(bool withDelta)
         "    ]\n"
         "  },\n";
 }
+
+namespace test {
+void SetSeed(const std::optional<Seed>& seed)
+{
+    std::lock_guard<std::mutex> lock(cs);
+    testSeed = seed;
+    fTestSeed = true;
+}
+
+void Reset()
+{
+    std::lock_guard<std::mutex> lock(cs);
+    testSeed.reset();
+    fTestSeed = false;
+    testBlockReader = nullptr;
+    fTestFailWrites = false;
+}
+
+void SetBlockReader(std::function<bool(const CBlockIndex*, CBlock&, CBlockUndo&)> reader)
+{
+    std::lock_guard<std::mutex> lock(cs);
+    testBlockReader = std::move(reader);
+}
+
+void SetFailWrites(bool fail)
+{
+    std::lock_guard<std::mutex> lock(cs);
+    fTestFailWrites = fail;
+}
+} // namespace test
 
 } // namespace valuepools

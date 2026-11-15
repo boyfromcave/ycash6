@@ -8,8 +8,10 @@
 #include "amount.h"
 #include "fs.h"
 #include "serialize.h"
+#include "uint256.h"
 
 #include <functional>
+#include <ios>
 #include <optional>
 #include <string>
 
@@ -78,6 +80,7 @@ struct Record {
     {
         uint64_t version = 1;
         READWRITE(VARINT(version));
+        if (ser_action.ForRead() && version != 1) throw std::ios_base::failure("valuepools: unknown record version");
         uint64_t v[8] = {(uint64_t)transparent, (uint64_t)pq1, (uint64_t)pq2, (uint64_t)channel,
                          (uint64_t)vault, (uint64_t)intent, (uint64_t)vaultYed, (uint64_t)intentYed};
         for (int i = 0; i < 8; i++) READWRITE(VARINT(v[i]));
@@ -87,6 +90,19 @@ struct Record {
         }
     }
 };
+
+/** A compiled seed: the chain totals at a block of the network's history (note §4). */
+struct Seed {
+    int height = 0;
+    uint256 hash;
+    Record record;
+};
+
+/**
+ * The network's compiled seed, or nullopt. ycash-dd has none: every network fills from genesis. The 6.20.0 node line
+ * seeds mainnet and the shadow testnets at the chain-supply checkpoint (height 2,800,000); regtest has none.
+ */
+std::optional<Seed> CompiledSeed(const CChainParams& chainparams);
 
 /** Adds (sign = +1) or removes (sign = -1) one output to its class. */
 void AddOutput(Record& r, const CTxOut& out, int sign);
@@ -115,8 +131,9 @@ void BlockConnected(const CBlock& block, const CBlockUndo& blockundo, const CBlo
  * The startup fill (init.cpp, after the block index and the vault database are loaded, before the node connects a
  * block; the caller holds cs_main): walks the active chain from the last block the index covers (or the seed, or
  * genesis) to the tip, reading each block and its undo data and storing what BlockConnected would have stored.
- * Returns false, with `err`, only when the index contradicts a compiled seed (restart with -reindex); every other
- * failure (a pruned block, a read error) is logged and leaves the remaining blocks unmonitored.
+ * Returns false, with `err`, only when the index contradicts a compiled seed (the node then refuses to start: delete
+ * blocks/valuepools to rebuild the index from the seed); every other failure (a pruned block, a read or write error)
+ * is logged and leaves the remaining blocks unmonitored. Progress goes to the log and to the RPC warm-up status.
  */
 bool Fill(const CChainParams& chainparams, const std::function<bool()>& interrupted, std::string& err);
 
@@ -128,6 +145,18 @@ UniValue TransparentPoolsToJSON(const CBlockIndex* pindex, bool withDelta);
 
 /** The help text of `transparentPools`, indented for getblock / getblockchaininfo. */
 std::string HelpText(bool withDelta);
+
+/** Test hooks, for the gtests only (regtest has no checkpoint, and a disk that fails cannot be staged). */
+namespace test {
+/** Replaces CompiledSeed for the hook and the fill (nullopt: no seed). */
+void SetSeed(const std::optional<Seed>& seed);
+/** Restores CompiledSeed, the disk reads and writes that succeed. */
+void Reset();
+/** Replaces the fill's reads of a block and its undo data (the nStatus checks stay). */
+void SetBlockReader(std::function<bool(const CBlockIndex*, CBlock&, CBlockUndo&)> reader);
+/** Every write of the store throws dbwrapper_error, as a full or failing disk does. */
+void SetFailWrites(bool fail);
+} // namespace test
 
 } // namespace valuepools
 

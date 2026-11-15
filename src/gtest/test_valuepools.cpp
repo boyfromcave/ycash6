@@ -9,8 +9,10 @@
 
 #include "chain.h"
 #include "chainparams.h"
+#include "clientversion.h"
 #include "crypto/pq/scheme.h"
 #include "fs.h"
+#include "main.h"
 #include "pubkey.h"
 #include "random.h"
 #include "script/script.h"
@@ -21,6 +23,8 @@
 #include "valuepools.h"
 #include "vault/template.h"
 #include "yellowback/script.h"
+
+#include <limits>
 
 using valuepools::ClassifyTransparentScript;
 using valuepools::PoolClass;
@@ -366,5 +370,251 @@ TEST(ValuePools, HookStoresRecordsAndNeverThrows)
     // Closed: the hook is a no-op.
     valuepools::Close();
     valuepools::BlockConnected(b1, CBlockUndo(), &i3);
+    fs::remove_all(dir);
+}
+
+TEST(ValuePools, RecordReadRefusesUnknownVersionAndCorruptTotals)
+{
+    // An unknown record version does not deserialize, so a store written by a later format reads as "no record".
+    uint64_t version2 = 2, version1 = 1, zero = 0, huge = 0xffffffffffffff00ULL;
+    CDataStream ss(SER_DISK, PROTOCOL_VERSION);
+    ss << VARINT(version2);
+    for (int i = 0; i < 8; i++) ss << VARINT(zero);
+    Record r;
+    EXPECT_THROW(ss >> r, std::ios_base::failure);
+
+    // A corrupt total (a VARINT above INT64_MAX reads as a negative amount) is not sane, and a block applied to it is
+    // refused rather than computed: no signed overflow, whatever the store or the undo data holds.
+    CDataStream ss2(SER_DISK, PROTOCOL_VERSION);
+    ss2 << VARINT(version1) << VARINT(huge);
+    for (int i = 0; i < 7; i++) ss2 << VARINT(zero);
+    Record bad;
+    ss2 >> bad;
+    EXPECT_FALSE(bad.IsSane());
+    std::string err;
+    Record out;
+    CBlock cb;
+    cb.vtx.push_back(MakeTx({CTxOut(1, CScript() << OP_TRUE)}, 0, true));
+    EXPECT_FALSE(valuepools::ApplyBlock(bad, cb, CBlockUndo(), out, err));
+
+    // Undo data whose spent value is out of range: refused before it is subtracted.
+    Record parent;
+    parent.transparent = MAX_MONEY;
+    CBlock b;
+    b.vtx.push_back(MakeTx({CTxOut(1, CScript() << OP_TRUE)}, 0, true));
+    b.vtx.push_back(MakeTx({CTxOut(1, CScript() << OP_TRUE)}, 1, false));
+    CBlockUndo u;
+    u.vtxundo.resize(1);
+    u.vtxundo[0].vprevout.push_back(CTxInUndo(CTxOut(std::numeric_limits<CAmount>::max(), CScript() << OP_TRUE)));
+    EXPECT_FALSE(valuepools::ApplyBlock(parent, b, u, out, err));
+    EXPECT_NE(err.find("out of range"), std::string::npos) << err;
+}
+
+TEST(ValuePools, CompiledSeedIsTheCheckedCheckpoint)
+{
+    // The 6.20.0 node line seeds mainnet at the chain-supply checkpoint whose claim was checked (no template-shaped
+    // output below it); ycash-dd, which has no checkpoint, seeds nothing. Regtest has no seed on either line.
+    SelectParams(CBaseChainParams::MAIN);
+    const std::optional<valuepools::Seed> seed = valuepools::CompiledSeed(Params());
+    if (CLIENT_VERSION_MAJOR >= 6) {
+        ASSERT_TRUE(seed.has_value());
+        EXPECT_EQ(seed->height, 2800000);
+        EXPECT_EQ(seed->hash, uint256S("000003170414909d5104f4a71708eca4e5b545d231c412c2d3e0e3f33874facb"));
+        Record expected;
+        expected.transparent = 1053104265390951;
+        EXPECT_TRUE(seed->record == expected);
+    } else {
+        EXPECT_FALSE(seed.has_value());
+    }
+    SelectParams(CBaseChainParams::REGTEST);
+    EXPECT_FALSE(valuepools::CompiledSeed(Params()).has_value());
+}
+
+namespace {
+
+//! A fake active chain on regtest: the genesis block and `n` blocks whose data and undo data the fill reads through
+//! the test hook. Removed from chainActive and mapBlockIndex on destruction.
+struct FakeChain {
+    std::vector<uint256> hashes;
+    std::vector<std::unique_ptr<CBlockIndex>> index;
+    std::vector<CBlock> blocks;
+    std::vector<CBlockUndo> undos;
+    std::vector<Record> expected; //!< ApplyBlock along the chain
+
+    explicit FakeChain(int n)
+    {
+        const CScript ecc = GetScriptForDestination(CKeyID(uint160(ParseHex("0102030405060708090a0b0c0d0e0f1011121314"))));
+        const CScript pq2 = GetScriptForPQKey(CPQKeyID(pq::SCHEME_FN_DSA_512, Hash32(0x79)));
+        const CScript v = vault::BuildVault(SampleVault(yellowback::YED_TAG));
+        hashes.resize(n + 1);
+        hashes[0] = Params().GenesisBlock().GetHash();
+        blocks.push_back(Params().GenesisBlock());
+        undos.push_back(CBlockUndo());
+        Record r0;
+        std::string err;
+        EXPECT_TRUE(valuepools::ApplyBlock(Record(), blocks[0], undos[0], r0, err)) << err;
+        expected.push_back(r0);
+        for (int h = 1; h <= n; h++) {
+            hashes[h] = GetRandHash();
+            CBlock b;
+            CBlockUndo u;
+            b.vtx.push_back(MakeTx({CTxOut(1000, pq2), CTxOut(300, v)}, 0, true));
+            if (h >= 2) {
+                // Spend the previous block's PQ and vault outputs into ECC (fee 10).
+                b.vtx.push_back(MakeTx({CTxOut(1290, ecc)}, 2, false));
+                u.vtxundo.resize(1);
+                u.vtxundo[0].vprevout.push_back(CTxInUndo(CTxOut(1000, pq2)));
+                u.vtxundo[0].vprevout.push_back(CTxInUndo(CTxOut(300, v)));
+            }
+            Record r;
+            EXPECT_TRUE(valuepools::ApplyBlock(expected.back(), b, u, r, err)) << err;
+            blocks.push_back(b);
+            undos.push_back(u);
+            expected.push_back(r);
+        }
+        for (int h = 0; h <= n; h++) {
+            std::unique_ptr<CBlockIndex> i(new CBlockIndex());
+            i->phashBlock = &hashes[h];
+            i->nHeight = h;
+            i->pprev = h ? index[h - 1].get() : nullptr;
+            i->nStatus = BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO;
+            i->BuildSkip();
+            index.push_back(std::move(i));
+        }
+        LOCK(cs_main);
+        for (int h = 0; h <= n; h++) mapBlockIndex[hashes[h]] = index[h].get();
+        chainActive.SetTip(index[n].get());
+        std::map<uint256, size_t> byHash;
+        for (int h = 0; h <= n; h++) byHash[hashes[h]] = h;
+        valuepools::test::SetBlockReader([this, byHash](const CBlockIndex* p, CBlock& block, CBlockUndo& undo) {
+            auto it = byHash.find(p->GetBlockHash());
+            if (it == byHash.end()) return false;
+            block = blocks[it->second];
+            undo = undos[it->second];
+            return true;
+        });
+    }
+    ~FakeChain()
+    {
+        LOCK(cs_main);
+        chainActive.SetTip(nullptr);
+        for (const uint256& h : hashes) mapBlockIndex.erase(h);
+        valuepools::test::Reset();
+    }
+    const CBlockIndex* at(int h) const { return index[h].get(); }
+};
+
+bool FillNow(std::string& err)
+{
+    LOCK(cs_main);
+    return valuepools::Fill(Params(), []() { return false; }, err);
+}
+
+} // namespace
+
+TEST(ValuePools, FillFromGenesisFromTheSeedAndTheSeedCheck)
+{
+    SelectParams(CBaseChainParams::REGTEST);
+    const fs::path dir = fs::temp_directory_path() / fs::unique_path("valuepools-%%%%-%%%%");
+    FakeChain chain(5);
+    std::string err;
+
+    // No seed: the fill reads from genesis, and every record equals the computed one.
+    valuepools::test::SetSeed(std::nullopt);
+    valuepools::Open(dir, true);
+    ASSERT_TRUE(FillNow(err)) << err;
+    for (int h = 0; h <= 5; h++) {
+        std::optional<Record> r = valuepools::GetRecord(chain.at(h));
+        ASSERT_TRUE(r.has_value()) << h;
+        EXPECT_TRUE(*r == chain.expected[h]) << h;
+    }
+    EXPECT_EQ(chain.expected[5].pq2, 1000);
+    EXPECT_EQ(chain.expected[5].vaultYed, 300);
+    // A second start finds the tip covered.
+    ASSERT_TRUE(FillNow(err)) << err;
+
+    // A seed at height 3, an empty index, the default -valuepoolsseed: the fill starts at the seed and reads nothing
+    // below it.
+    valuepools::test::SetSeed(valuepools::Seed{3, chain.hashes[3], chain.expected[3]});
+    valuepools::Open(dir, true);
+    ASSERT_TRUE(FillNow(err)) << err;
+    EXPECT_FALSE(valuepools::GetRecord(chain.at(2)).has_value());
+    ASSERT_TRUE(valuepools::GetRecord(chain.at(3)).has_value());
+    EXPECT_TRUE(*valuepools::GetRecord(chain.at(5)) == chain.expected[5]);
+
+    // -valuepoolsseed=0 fills from genesis and checks the seed: a match starts...
+    mapArgs["-valuepoolsseed"] = "0";
+    valuepools::Open(dir, true);
+    ASSERT_TRUE(FillNow(err)) << err;
+    EXPECT_TRUE(*valuepools::GetRecord(chain.at(2)) == chain.expected[2]);
+    EXPECT_TRUE(*valuepools::GetRecord(chain.at(5)) == chain.expected[5]);
+
+    // ...and a mismatch refuses to start, telling the operator to delete the index (which -reindex would not cure).
+    Record wrong = chain.expected[3];
+    wrong.transparent += 1;
+    valuepools::test::SetSeed(valuepools::Seed{3, chain.hashes[3], wrong});
+    valuepools::Open(dir, true);
+    err.clear();
+    EXPECT_FALSE(FillNow(err));
+    EXPECT_NE(err.find("delete the directory blocks/valuepools"), std::string::npos) << err;
+    EXPECT_NE(err.find("without -valuepoolsseed=0"), std::string::npos) << err;
+    EXPECT_TRUE(valuepools::GetRecord(chain.at(2)).has_value());
+    EXPECT_FALSE(valuepools::GetRecord(chain.at(3)).has_value());
+    mapArgs.erase("-valuepoolsseed");
+
+    valuepools::Close();
+    fs::remove_all(dir);
+}
+
+TEST(ValuePools, WriteFailureLeavesTheIndexUnmonitoredUntilRestart)
+{
+    SelectParams(CBaseChainParams::REGTEST);
+    const fs::path dir = fs::temp_directory_path() / fs::unique_path("valuepools-%%%%-%%%%");
+    FakeChain chain(3);
+    std::string err;
+    valuepools::test::SetSeed(std::nullopt);
+
+    // A fill whose writes fail: logged, the index closes, the node still starts.
+    valuepools::Open(dir, true);
+    valuepools::test::SetFailWrites(true);
+    ASSERT_TRUE(FillNow(err)) << err;
+    EXPECT_FALSE(valuepools::IsOpen());
+    EXPECT_FALSE(valuepools::GetRecord(chain.at(3)).has_value());
+    valuepools::test::SetFailWrites(false);
+
+    // A fill that succeeds, then a block whose record cannot be written: no record is cached for it, the index
+    // closes (every entry "monitored": false), and the next block is not extended from a record never stored.
+    valuepools::Open(dir, true);
+    ASSERT_TRUE(FillNow(err)) << err;
+    ASSERT_TRUE(valuepools::GetRecord(chain.at(3)).has_value());
+    const CScript pq1 = GetScriptForPQKey(CPQKeyID(pq::SCHEME_SLH_DSA_SHA2_128S, Hash32(0x7a)));
+    CBlock b4;
+    b4.vtx.push_back(MakeTx({CTxOut(7, pq1)}, 0, true));
+    uint256 h4 = GetRandHash();
+    CBlockIndex i4;
+    i4.phashBlock = &h4;
+    i4.pprev = const_cast<CBlockIndex*>(chain.at(3));
+    i4.nHeight = 4;
+    valuepools::test::SetFailWrites(true);
+    valuepools::BlockConnected(b4, CBlockUndo(), &i4);
+    EXPECT_FALSE(valuepools::IsOpen());
+    EXPECT_FALSE(valuepools::GetRecord(&i4).has_value());
+    EXPECT_FALSE(valuepools::GetRecord(chain.at(3)).has_value());
+    EXPECT_FALSE(valuepools::TransparentPoolsToJSON(chain.at(3), false)["monitored"].get_bool());
+    valuepools::test::SetFailWrites(false);
+    uint256 h5 = GetRandHash();
+    CBlockIndex i5;
+    i5.phashBlock = &h5;
+    i5.pprev = &i4;
+    i5.nHeight = 5;
+    valuepools::BlockConnected(b4, CBlockUndo(), &i5); // off until restart: a no-op
+    EXPECT_FALSE(valuepools::GetRecord(&i5).has_value());
+
+    // The restart: the records written before the failure are there, the failed one is not.
+    valuepools::Open(dir, false);
+    EXPECT_TRUE(*valuepools::GetRecord(chain.at(3)) == chain.expected[3]);
+    EXPECT_FALSE(valuepools::GetRecord(&i4).has_value());
+
+    valuepools::Close();
     fs::remove_all(dir);
 }
