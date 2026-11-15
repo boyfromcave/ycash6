@@ -114,7 +114,7 @@ default) on any node a pre-Heartwood pool reads. Software written against v4.5.0
 | Key | v4.5.0 | 6.20.0 | Read it as |
 |---|---|---|---|
 | `coinbasetxn.foundersreward` | always (0 when the coinbase has one output) | only before the Ycash upgrade within the founders' period (subsidy/5) or during the YDF mandate (subsidy/20) (`:766-776`) | `get()`, never index it |
-| `coinbasetxn.ydfpercentage`, `coinbasetxn.foundersaddress` | always | **gone** | the post-mandate YDF share is still `-ydf=<n>` (`src/init.cpp:562`) and is already inside `coinbasetxn.data`; `getblocksubsidy <height>` reports the amounts (`miner`, `founders`, `totalblocksubsidy`) |
+| `coinbasetxn.ydfpercentage`, `coinbasetxn.foundersaddress` | always | **gone** | the post-mandate YDF share is still `-ydf=<n>` (`src/init.cpp:607`; default 0 since 6.22.0-beta3, a donating miner sets `-ydf=5`) and is already inside `coinbasetxn.data`; `getblocksubsidy <height>` reports the amounts (`miner`, `founders`, `totalblocksubsidy`) |
 | `coinbasetxn.required` | `height < YDF mandate end` | **always `true`** (`:777`) | a pool that builds its own coinbase must still pay the YDF output while the mandate runs — consensus enforces it |
 | `coinbaseaux.flags` | with `-yellowback` only on the `coinbasetxn` path | unchanged (`:822-829`) | the tag bytes (§3 table) |
 | `mutable` | gains `coinbase/append` with `-yellowback` | unchanged (`:795`) | |
