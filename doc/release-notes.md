@@ -10,7 +10,8 @@ Mining: the development-fund donation is opt-in (`-ydf`, default 0)
 - **The default changes from 5 to 0.** After the Ycash Development Fund mandate ends (mainnet height
   2,275,000), a block this node mines pays the whole subsidy and every fee to the miner and carries
   no fund output. A miner who wants to keep donating sets `-ydf=5` (any whole percentage from 0 to
-  100 is accepted, as before).
+  100 is accepted, as before). A value outside that range (`-ydf=-1`, `-ydf=101`) is reset to the
+  default, so it now means 0 where it used to mean 5.
 - **Not a consensus change.** Past the mandate a block is valid with or without the fund output;
   `DEFAULT_YDF_FEE_PERCENTAGE` is read by the miner, `getblocksubsidy`, the metrics screen and the
   option check, never by block validation.

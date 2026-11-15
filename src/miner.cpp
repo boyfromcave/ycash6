@@ -124,8 +124,8 @@ public:
         // Pre-Ycash-fork: pay 20% of the block subsidy to the inherited
         // Zcash founders multisig.
         // Post-Ycash-fork (until nYdfMandateEndHeight): pay 5% to the YDF.
-        // After nYdfMandateEndHeight: the YDF payment is optional and capped
-        // at MAX_YDF_FEE_PERCENTAGE; the miner can override via -ydf=<n>.
+        // After nYdfMandateEndHeight: the YDF payment is optional, -ydf=<n>
+        // percent of the subsidy (0..100, default 0: no fund output).
         if (nHeight > 0) {
             if (!consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_YCASH)) {
                 if (nHeight <= consensus.GetLastFoundersRewardBlockHeight(nHeight)) {

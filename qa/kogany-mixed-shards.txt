@@ -36,6 +36,8 @@
 #   upgrades at 1 (cumulative upgrades, K-6). They stay `report` in their mixed group so the
 #   sidecar column (the pair mines its own Ycash chain) keeps them; they are never flipped to gate.
 #
+#   ycash_ydf_default: report until beta3 4k (kogany still pays 5 % and has no -ydf), then gate.
+#
 #   column-gated steps (a pair runs the script, one step skips with a printed reason): yellowback_mining
 #   stale_invalid_mint_never_templated (yewd plan F-S5-20): a kogany pair re-verifies its mempool at a
 #   tip reset, so the stale mint the step needs is dropped; -yellowbacktestfault=template is accepted
