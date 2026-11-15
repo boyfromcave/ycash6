@@ -73,7 +73,8 @@ the simulated population and the liquidator.
    - with `--stratum`: `check-coinbase <height> -regtest -datadir=<dir>/node4` (in
      `contrib/yellowback/pool/`) exits 1 with `scriptSigBytes: 4` — the height push and
      nothing else; `getblock <height> 2` shows vout 0 paying node 4's payout address (yolo's
-     `--payout`) and vout 1 the founders' reward. With `--stratum-text` the scriptSig ends in
+     `--payout`) and, only while the YDF mandate runs (below height 5 on regtest) or when the
+     node sets `-ydf=<n>`, vout 1 the fund's output. With `--stratum-text` the scriptSig ends in
      the text: `check-coinbase`'s `scriptSigBytes` grows by its length and `getblock <height>
      2` → `tx[0].vin[0].coinbase` ends in its hex.
    - notes:

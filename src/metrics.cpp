@@ -1,4 +1,5 @@
 // Copyright (c) 2016-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -511,7 +512,7 @@ int printMetrics(size_t cols, bool mining)
                     //    founders multisig;
                     //  - post-fork, before the YDF mandate ends: 5% to the YDF;
                     //  - after the mandate: optional, -ydf=<n>% (default
-                    //    DEFAULT_YDF_FEE_PERCENTAGE), 0 disables it.
+                    //    DEFAULT_YDF_FEE_PERCENTAGE = 0, no donation).
                     // Ported/adapted from current Ycash code d157c16d5; the
                     // modernized Ycash code previously subtracted no YDF post-fork
                     // at all, overstating the reward by the entire YDF cut.
