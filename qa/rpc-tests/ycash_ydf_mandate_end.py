@@ -82,6 +82,7 @@ class YdfMandateEndTest(BitcoinTestFramework):
         n0, n1 = self.nodes
         end = self.mandate_end()
         print('mandate end height (from getblocksubsidy): %d' % end)
+        assert_equal(end, 5)   # regtest's nYdfMandateEndHeight: an off-by-one in every reader at once would move it
 
         # The node's own blocks up to E - 2 (each pays the fund, ycash_ydf_default.py checks the amounts).
         n0.generate(end - 2)

@@ -23,8 +23,8 @@ network's Vault and shadow branch IDs (NetworkUpgradeInfo, or a network's own nB
 `compare --release main` applies the release rules to A (the tag guard) for the stage the tag names
 (testnet plan §5.1, T-8): a beta needs only the invariants (testnet-legacy never activates Vault;
 slow and legacy have branch IDs of their own); an rc needs R3-R6, the testnet's R7 (fast named, slow
-pending or named, legacy never) and R8 (H_S set), and mainnet's height and set only together if the
-owner sets them; a final release needs R1-R8. Part D, raising PROTOCOL_VERSION, is taken with rc1
+pending or named, legacy never), R8 (H_S set) and R9 (fast's YDF mandate end set, not provisional), and mainnet's height and set only together if the
+owner sets them; a final release needs R1-R9. Part D, raising PROTOCOL_VERSION, is taken with rc1
 (T-8): UPGRADE_VAULT.nProtocolVersion and PROTOCOL_VERSION move together, MIN_PEER_PROTO_VERSION
 stays at or below the live floor. `stage VERSION` prints the stage of a release version. This file is
 byte-identical on ycash-dd and ycash6. Python 3 standard library only.
@@ -46,6 +46,11 @@ TESTNET_PROFILES = (("fast", "CTestNetFastParams"), ("slow", "CTestNetSlowParams
 SHADOW_PROFILES = ("slow", "legacy")
 SHADOW_SPLIT_CONSTANT = "TESTNET_SHADOW_SPLIT_HEIGHT"
 SHADOW_HASH_CONSTANT = "TESTNET_SHADOW_SPLIT_HASH"
+# testnet-yb-fast's own end of the YDF mandate (beta3 item 5, B3-D4). The tree carries the provisional
+# value until the release-candidate cut sets the fast-testnet tip plus 400 blocks; R9 refuses an rc or
+# final tag that still carries it.
+FAST_YDF_END_CONSTANT = "TESTNET_FAST_YDF_MANDATE_END_HEIGHT"
+PROVISIONAL_FAST_YDF_MANDATE_END_HEIGHT = 600000
 PROFILE_NAMES = {"fast": "testnet-yb-fast", "slow": "testnet-yb-slow", "legacy": "testnet-legacy"}
 # The YED columns: MainParams (main), TestParams (testnet-yb-slow; testnet-legacy, inert), TestFastParams.
 YB_COLUMNS = ("MainParams", "TestParams", "TestFastParams")
@@ -157,12 +162,25 @@ def network_params(chainparams, params_h, cls, name, base=None, chain=None, upgr
                 raise ParseError("%s: expected a match, found none" % what)
             return found
     else:
-        body = strip_comments(constructor_body(chainparams, cls))
+        own_body = strip_comments(constructor_body(chainparams, cls))
+        body = own_body
         if base is not None:
             body = strip_comments(constructor_body(chainparams, base)) + "\n" + body
 
         def find(pattern, what, required):
             return one(pattern, body, what) if required else optional(pattern, body, what)
+    # The YDF mandate's end (nYdfMandateEndHeight; unassigned: None). A subclass may override its base's
+    # value (testnet-yb-fast, beta3 item 5), so the own body is read first; a shadow chain's last body wins.
+    ydf_pattern = r"\bnYdfMandateEndHeight\s*=\s*([^;]+?)\s*;"
+    if chain is None and base is not None:
+        ydf = optional(ydf_pattern, own_body, where + " nYdfMandateEndHeight")
+        if ydf is None:
+            ydf = optional(ydf_pattern, strip_comments(constructor_body(chainparams, base)), where + " nYdfMandateEndHeight")
+    else:
+        ydf = find(ydf_pattern, where + " nYdfMandateEndHeight", False)
+    if ydf == FAST_YDF_END_CONSTANT:
+        ydf = one(r"static const int %s\s*=\s*([^;]+?)\s*;" % FAST_YDF_END_CONSTANT,
+                  strip_comments(chainparams), "src/chainparams.cpp " + FAST_YDF_END_CONSTANT)
     vault = r"vUpgrades\[Consensus::UPGRADE_VAULT\]\.%s\s*=\s*([^;]+?)\s*;"
     falcon = find(r"\bconsensus\.pqFalconHeight\s*=\s*([^;]+?)\s*;", where + " pqFalconHeight", False)
     maturity = find(r"\bconsensus\.nVaultMinSetMaturity\s*=\s*([^;]+?)\s*;", where + " nVaultMinSetMaturity", False)
@@ -176,6 +194,7 @@ def network_params(chainparams, params_h, cls, name, base=None, chain=None, upgr
         "vault_activation_height": height(find(vault % "nActivationHeight", where + " nActivationHeight", True)),
         "pq_falcon_height": height(falcon),
         "vault_min_set_maturity": number(maturity),
+        "ydf_mandate_end_height": None if ydf is None else height(ydf),
     }
     if upgrades is not None:
         upgrades_h, upgrades_cpp = upgrades
@@ -282,8 +301,9 @@ def release_problems(doc, stage="final"):
     rc     R3-R6; R7 for the testnet: testnet-yb-fast has its height and its set, testnet-yb-slow
            names a set only with a height (a height alone is its pending activation, T-15),
            testnet-legacy never; mainnet's height and set stay unset unless the owner sets both;
-           R8: the shadow-fork split height H_S is set.
-    final  R1-R8: mainnet's height and set, per testnet profile both or neither, and H_S.
+           R8: the shadow-fork split height H_S is set; R9: testnet-yb-fast's YDF mandate end is set and
+           is not the provisional value.
+    final  R1-R9: mainnet's height and set, per testnet profile both or neither, H_S, and R9.
     A parse failure never reaches here."""
     if stage not in STAGES:
         raise ValueError("unknown release stage %r" % (stage,))
@@ -340,6 +360,15 @@ def release_problems(doc, stage="final"):
         elif not re.fullmatch(r"[0-9a-f]{64}", test.get(profile, {}).get("shadow_split_hash") or ""):
             problems.append("R8: %s shadow fork not ready: the checkpoint at H_S (%s) is unset"
                             % (PROFILE_NAMES[profile], SHADOW_HASH_CONSTANT))
+    # R9 (rc and final; beta3 item 5, B3-D4): the fast profile's YDF mandate end is the value chosen at the
+    # release-candidate cut, never the provisional one the tree carries until then.
+    fast_ydf = test.get("fast", {}).get("ydf_mandate_end_height")
+    if not _height_set(fast_ydf):
+        problems.append("R9: testnet-yb-fast's YDF mandate end (%s) is unset" % FAST_YDF_END_CONSTANT)
+    elif fast_ydf == PROVISIONAL_FAST_YDF_MANDATE_END_HEIGHT:
+        problems.append("R9: testnet-yb-fast's YDF mandate end (%s) is still the provisional %d; set it at the "
+                        "release-candidate cut (the fast-testnet tip plus 400 blocks)"
+                        % (FAST_YDF_END_CONSTANT, PROVISIONAL_FAST_YDF_MANDATE_END_HEIGHT))
     return problems
 
 

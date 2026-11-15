@@ -255,7 +255,9 @@ BOOST_AUTO_TEST_CASE(testnet_ydf_mandate_end_heights)
 {
     // beta3 item 5 (B3-D4): the fast profile ends the mandate at its own height, after the fork and after its
     // Vault height, well below the default testnet value (900,000) it used to inherit. The value is set at the
-    // release-candidate cut; the test reads it from the parameters and does not pin it.
+    // release-candidate cut; the test reads it from the parameters and does not pin it. That both node lines
+    // ship the same value is checked by qa/yellowback-vault-params.py compare (test.fast.ydf_mandate_end_height,
+    // the audit's and the release guard's cross-line leg), and R9 there refuses the provisional value on an rc.
     const CChainParams& fast = TestNet("fast");
     const int end = fast.GetYdfMandateEndHeight();
     BOOST_CHECK(end > FORK);

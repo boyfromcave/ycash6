@@ -642,12 +642,15 @@ protected:
 /**
  * The fast profile's own end of the YDF mandate (beta3 item 5, decision B3-D4): from this height a
  * testnet-yb-fast block is valid with or without the fund output, as on mainnet past 2,275,000. Below
- * it the 5 % output stays required. PROVISIONAL: 512,000 until the coordinator sets the final value at
- * the release-candidate cut (the fast-testnet tip then, plus 400 blocks). Every node of the network must
- * run a build with the final value before the chain reaches it. The default testnet value (900,000,
- * CTestNetParams) and the slow and legacy profiles (mainnet's 2,275,000) are untouched.
+ * it the 5 % output stays required. PROVISIONAL: 600,000, deliberately far above the tip, so that a
+ * node built from this tree and run on the fast testnet before the cut stays strict (it keeps paying
+ * and requiring the output) instead of mining blocks that released nodes reject. The coordinator
+ * replaces it at the release-candidate cut with the fast-testnet tip then, plus 400 blocks; the release
+ * guard (qa/yellowback-vault-params.py, R9) refuses an rc or final tag that still carries 600,000.
+ * Every node of the network must run a build with the final value before the chain reaches it. The
+ * CTestNetParams value (900,000) and the slow and legacy profiles (mainnet's 2,275,000) are untouched.
  */
-static const int TESTNET_FAST_YDF_MANDATE_END_HEIGHT = 512000;
+static const int TESTNET_FAST_YDF_MANDATE_END_HEIGHT = 600000;
 
 /**
  * testnet-yb-fast (testnet plan Revision 3): the iteration network. Vault at 510,400 (H_V, a placeholder
