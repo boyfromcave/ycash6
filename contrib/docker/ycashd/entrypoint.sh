@@ -72,22 +72,43 @@ fi
 # before the first start: "prefix" (the network's published prefix, pinned in the release) or a bundle
 # URL or directory. ycash-bootstrap checks SHA256SUMS against the release's pin and its minisign
 # signature when there is one, frames the blocks with the network's magic and imports them with an
-# isolated ycashd (-connect=0 -listen=0, no wallet), then stops it. A datadir that already holds the
-# network's blocks is left alone, so a restart never imports twice.
+# isolated ycashd (-connect=0 -listen=0, no wallet, the conf's peer settings left out), then stops it.
+# A datadir that already holds the network's blocks is left alone, so a restart never imports twice.
+#
+# A restore that did not complete (refused, failed or killed) leaves $DATADIR/<net>.bootstrap-incomplete
+# behind, with the reason; ycash-bootstrap removes it only on success. While it is there the node is
+# not started, whether YCASHD_BOOTSTRAP is still set or not: a half-restored datadir would otherwise
+# start, look healthy and sync from wherever it stopped, and nothing would show the failure.
+case "${YCASHD_NETWORK:-mainnet}/${YCASHD_TESTNET_PROFILE:-}" in
+  testnet/fast) BNET=testnet-yb-fast ;;
+  testnet/slow) BNET=testnet-yb-slow ;;
+  testnet/legacy) BNET=testnet-legacy ;;
+  regtest/*) BNET=regtest ;;
+  *) BNET="" ;;
+esac
+refuse_incomplete() {
+  MARK="$DATADIR/$BNET.bootstrap-incomplete"
+  [ -n "$BNET" ] && [ -e "$MARK" ] || return 0
+  {
+    echo "YCASHD_BOOTSTRAP: $MARK is there: the last restore into $DATADIR/$BNET did not complete; the node is not started."
+    cat "$MARK"
+    echo "To restore again: remove $DATADIR/$BNET (move a wallet.dat out of it first, if there is one) and $MARK, then restart."
+    echo "To start on the datadir as it is: remove $MARK only."
+  } >&2
+  exit 1
+}
+refuse_incomplete
 if [ -n "${YCASHD_BOOTSTRAP:-}" ]; then
-  case "${YCASHD_NETWORK:-mainnet}/${YCASHD_TESTNET_PROFILE:-}" in
-    testnet/fast) BNET=testnet-yb-fast ;;
-    testnet/slow) BNET=testnet-yb-slow ;;
-    testnet/legacy) BNET=testnet-legacy ;;
-    regtest/*) BNET=regtest ;;
-    *) echo "YCASHD_BOOTSTRAP: no bundle for YCASHD_NETWORK=${YCASHD_NETWORK:-mainnet} (testnet with a YCASHD_TESTNET_PROFILE, or regtest)" >&2; exit 2 ;;
-  esac
+  if [ -z "$BNET" ]; then
+    echo "YCASHD_BOOTSTRAP: no bundle for YCASHD_NETWORK=${YCASHD_NETWORK:-mainnet} (testnet with a YCASHD_TESTNET_PROFILE, or regtest)" >&2; exit 2
+  fi
   if [ -n "$(ls -A "$DATADIR/$BNET/blocks" 2>/dev/null)" ]; then
     echo "YCASHD_BOOTSTRAP: $DATADIR/$BNET already holds blocks; starting without a restore"
   else
     # shellcheck disable=SC2086
     ycash-bootstrap --network "$BNET" --datadir "$DATADIR" --conf "$CONF" --source "$YCASHD_BOOTSTRAP" \
       --ycashd "$(command -v ycashd)" --cli "$(command -v ycash-cli)" ${YCASHD_BOOTSTRAP_ARGS:-} || { echo "YCASHD_BOOTSTRAP: the restore failed; the node is not started" >&2; exit 1; }
+    refuse_incomplete      # exit 0 with the marker still there is not a completed restore either
   fi
 fi
 # Seed-only wallet restore: -mnemonicfile reads the secret from a file the operator MOUNTS (a Docker or
