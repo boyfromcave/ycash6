@@ -36,7 +36,9 @@
 using namespace std;
 
 extern void TxToJSON(const CTransaction& tx, const uint256 hashBlock, UniValue& entry);
-extern CTxDestination SpentInfoDestination(const COutPoint& prevout, CSpentIndexValue& spentInfo);
+extern void TxToJSON(const CTransaction& tx, const uint256 hashBlock, UniValue& entry, std::map<uint256, CTransaction>* prevTxs);
+extern CTxDestination SpentInfoDestination(
+    const COutPoint& prevout, CSpentIndexValue& spentInfo, std::map<uint256, CTransaction>* prevTxs);
 void ScriptPubKeyToJSON(const CScript& scriptPubKey, UniValue& out, bool fIncludeHex);
 
 double GetDifficultyINTERNAL(const CBlockIndex* blockindex, bool networkDifficulty)
@@ -159,6 +161,7 @@ UniValue blockToDeltasJSON(const CBlock& block, const CBlockIndex* blockindex)
     KeyIO keyIO(Params());
     UniValue deltas(UniValue::VARR);
     deltas.reserve(block.vtx.size());
+    std::map<uint256, CTransaction> prevTxs;   // post-quantum inputs' parents, read once (SpentInfoDestination)
     for (unsigned int i = 0; i < block.vtx.size(); i++) {
         const CTransaction &tx = block.vtx[i];
         const uint256 txhash = tx.GetHash();
@@ -179,7 +182,7 @@ UniValue blockToDeltasJSON(const CBlock& block, const CBlockIndex* blockindex)
                 if (!GetSpentIndex(spentKey, spentInfo)) {
                     throw JSONRPCError(RPC_INTERNAL_ERROR, "Spent information not available");
                 }
-                CTxDestination dest = SpentInfoDestination(input.prevout, spentInfo);
+                CTxDestination dest = SpentInfoDestination(input.prevout, spentInfo, &prevTxs);
                 if (IsValidDestination(dest)) {
                     delta.pushKV("address", keyIO.EncodeDestination(dest));
                 }
@@ -262,12 +265,13 @@ UniValue blockToJSON(const CBlock& block, const CBlockIndex* blockindex, bool tx
     result.pushKV("chainhistoryroot", blockindex->hashChainHistoryRoot.GetHex());
     UniValue txs(UniValue::VARR);
     txs.reserve(block.vtx.size());
+    std::map<uint256, CTransaction> prevTxs;   // post-quantum inputs' parents, read once (SpentInfoDestination)
     for (const CTransaction&tx : block.vtx)
     {
         if(txDetails)
         {
             UniValue objTx(UniValue::VOBJ);
-            TxToJSON(tx, uint256(), objTx);
+            TxToJSON(tx, uint256(), objTx, &prevTxs);
             txs.push_back(std::move(objTx));
         }
         else

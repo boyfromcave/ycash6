@@ -185,8 +185,12 @@ YED form): what node operators and clients should know.**
   address, so the node reads it from the spent output itself (`-insightexplorer` requires `-txindex`)
   and names it only if it hashes to the index key. Before beta3 these inputs carried no address.
   `getaddressdeltas` (and `getaddressutxos`/`getaddressbalance`/`getaddresstxids`) name them as
-  requested, by `sq…`/`tq…`/`rq…` or the PQ `yb…`/`yt…`/`yr…` form. `getspentinfo` returns no
-  address for any input, and `decoderawtransaction` (no chain context) none either.
+  requested, by `sq…`/`tq…`/`rq…` or the PQ `yb…`/`yt…`/`yr…` form. An input spending a YED-carrying
+  output shows the plain post-quantum form (`sqf…`/`tqf…`/`rqf…`), as `vout[].scriptPubKey.addresses`
+  shows that output, not the YED form. On an insight node `decoderawtransaction` names input
+  addresses and values as `getrawtransaction` does (it formats through the same code and reads the
+  same spent index; this was already so for ECC inputs). `getspentinfo` returns no address for any
+  input.
 - **`-reindex` once** on a node with `-insightexplorer` or `-lightwalletd` that synced before this
   build: the address index of earlier blocks holds no `TX_PQPKH` outputs until it is rebuilt.
 - **`createrawtransaction` takes an `sq…` output** without the wallet's payability checks (Falcon
