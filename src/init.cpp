@@ -42,6 +42,7 @@
 #include "util/system.h"
 #include "util/moneystr.h"
 #include "validationinterface.h"
+#include "valuepools.h"
 #include "yellowback/index.h"
 #include "yellowback/module.h"
 #include "vault/node.h"
@@ -263,6 +264,7 @@ void Shutdown()
             delete vault::g_vaultdb;
             vault::g_vaultdb = nullptr;
         }
+        valuepools::Close();
         delete pcoinsTip;
         pcoinsTip = NULL;
         delete pcoinscatcher;
@@ -436,6 +438,8 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-txindex", strprintf(_("Maintain a full transaction index, used by the getrawtransaction rpc call (default: %u)"), DEFAULT_TXINDEX));
     strUsage += HelpMessageOpt("-yellowback", _("Accepted and ignored: Yellowback is consensus wherever the vault upgrade and a YED attestor set are configured; -yellowback=0 only acknowledges a leftover index or a wallet that has held YED"));
     strUsage += HelpMessageOpt("-reindex-yellowback", _("Wipe and rebuild the Yellowback index from the start height on startup"));
+    if (showDebug)
+        strUsage += HelpMessageOpt("-valuepoolsseed", _("Start the transparent pools-by-type index from the compiled seed at the chain-supply checkpoint when it is empty; 0 fills it from genesis and checks the seed (default: 1)"));
     strUsage += HelpMessageOpt("-yellowbackfee=<zat>", strprintf(_("Flat fee for Yellowback transactions in zatoshi (default and minimum: %d)"), yellowback::DEFAULT_YELLOWBACK_FEE));
     strUsage += HelpMessageOpt("-yellowbackmintlag=<n>", strprintf(_("Blocks below the index tip at which a mint is evaluated (default: %d, max %d)"), yellowback::DEFAULT_REF_LAG, yellowback::MAX_REF_LAG));
     strUsage += HelpMessageOpt("-yellowbackpayoutaddress=<addr>", _("P2PKH address the coinbase tag names for pool fees (default: -mineraddress when that is a transparent P2PKH address)"));
@@ -2324,6 +2328,19 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         if (!vaultMismatches.empty()) {
             return InitError(strprintf("vault: the set-state database fails its invariant audit (%s). ", vaultMismatches.front()) +
                              _("Restart with -reindex to rebuild the vault database."));
+        }
+    }
+
+    // The transparent value pools by address type (beta3 item 2, valuepools.h): a node-side index, wiped by -reindex
+    // and -reindex-chainstate, filled here once from the block and undo files (from the compiled seed at the
+    // chain-supply checkpoint where the network has one) before the node connects a block; never a reason to stop,
+    // except a record that contradicts the compiled seed.
+    valuepools::Open(GetDataDir() / "blocks" / "valuepools", fReindex || fReindexChainState);
+    {
+        LOCK(cs_main);
+        std::string valuePoolsErr;
+        if (!valuepools::Fill(chainparams, ShutdownRequested, valuePoolsErr)) {
+            return InitError(valuePoolsErr);
         }
     }
 
