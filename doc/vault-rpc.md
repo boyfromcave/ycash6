@@ -36,8 +36,9 @@ checks live answers against it. Edit this document, then regenerate.
   a transparent `s1…`/`t…` address or a plain-YEC PQ address `sq…`/`tq…`/`rq…` (a `TX_PQPKH`
   output, the same script as the PQ `yb…` of that key). A 66-hex `pqkeyid` is not an address:
   `vault_release` refuses one as its recipient ("pass the address or the script, not a pqkeyid").
-  Inputs spending such outputs carry no address in `getblockdeltas`/`getspentinfo`/
-  `getrawtransaction` (the insight index keys spends by Hash160; `getaddressdeltas` names them), and
+  Inputs spending such outputs name their address in `getrawtransaction`, `getblock` verbosity 2
+  and `getblockdeltas` (beta3: read from the spent output, since the insight index keys spends by a
+  Hash160 that cannot be inverted; `getaddressdeltas` names them as requested), and
   a `-insightexplorer`/`-lightwalletd` node synced before this build needs one `-reindex` to index
   them (doc/yellowback-rpc.md, "Plain-YEC PQ addresses").
 - **Amounts** are YEC (decimal) like every other Ycash RPC, the set's rate fields

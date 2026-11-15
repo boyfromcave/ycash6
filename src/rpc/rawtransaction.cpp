@@ -222,6 +222,31 @@ UniValue TxOrchardBundleToJSON(const CTransaction& tx, UniValue& entry)
     return obj;
 }
 
+// insightexplorer: the address of the output a spent-index entry describes (beta3 item 6). A post-quantum output is
+// indexed by Hash160(scheme || keyHash) (CScript::AddressHash), which cannot be turned back into its address; the
+// getaddress* calls name it as the request did (src/rpc/misc.cpp, AddressNames), but no request names the spent
+// output of an input. So the address is read from the spent output itself (-insightexplorer requires -txindex) and
+// named only if that output hashes to the index key.
+CTxDestination SpentInfoDestination(const COutPoint& prevout, CSpentIndexValue& spentInfo)
+{
+    if (spentInfo.addressType != CScript::P2PQPKH) {
+        return DestFromAddressHash(spentInfo.addressType, spentInfo.addressHash);
+    }
+    CTransaction prevTx;
+    uint256 prevBlock;
+    if (!GetTransaction(prevout.hash, prevTx, Params().GetConsensus(), prevBlock, true) ||
+        prevout.n >= prevTx.vout.size()) {
+        return CNoDestination();
+    }
+    const CScript& script = prevTx.vout[prevout.n].scriptPubKey;
+    CTxDestination dest;
+    if (script.GetType() != CScript::P2PQPKH || script.AddressHash() != spentInfo.addressHash ||
+        !ExtractDestination(script, dest) || !IsPQKeyDestination(dest)) {
+        return CNoDestination();
+    }
+    return dest;
+}
+
 void TxToJSON(const CTransaction& tx, const uint256 hashBlock, UniValue& entry)
 {
     const uint256 txid = tx.GetHash();
@@ -262,8 +287,7 @@ void TxToJSON(const CTransaction& tx, const uint256 hashBlock, UniValue& entry)
                 in.pushKV("value", ValueFromAmount(spentInfo.satoshis));
                 in.pushKV("valueSat", spentInfo.satoshis);
 
-                CTxDestination dest =
-                    DestFromAddressHash(spentInfo.addressType, spentInfo.addressHash);
+                CTxDestination dest = SpentInfoDestination(txin.prevout, spentInfo);
                 if (IsValidDestination(dest)) {
                     in.pushKV("address", keyIO.EncodeDestination(dest));
                 }
@@ -402,7 +426,7 @@ UniValue getrawtransaction(const UniValue& params, bool fHelp)
             "       \"sequence\": n      (numeric) The script sequence number\n"
             "       \"value\": n         (numeric, optional) The value of the output being spent in " + CURRENCY_UNIT + "\n"
             "       \"valueSat\": n      (numeric, optional) The value of the output being spent, in zats\n"
-            "       \"address\": n       (string, optional) The address of the output being spent\n"
+            "       \"address\": n       (string, optional) The transparent or post-quantum address of the output being spent\n"
             "     }\n"
             "     ,...\n"
             "  ],\n"

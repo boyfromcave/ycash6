@@ -36,6 +36,7 @@
 using namespace std;
 
 extern void TxToJSON(const CTransaction& tx, const uint256 hashBlock, UniValue& entry);
+extern CTxDestination SpentInfoDestination(const COutPoint& prevout, CSpentIndexValue& spentInfo);
 void ScriptPubKeyToJSON(const CScript& scriptPubKey, UniValue& out, bool fIncludeHex);
 
 double GetDifficultyINTERNAL(const CBlockIndex* blockindex, bool networkDifficulty)
@@ -178,7 +179,7 @@ UniValue blockToDeltasJSON(const CBlock& block, const CBlockIndex* blockindex)
                 if (!GetSpentIndex(spentKey, spentInfo)) {
                     throw JSONRPCError(RPC_INTERNAL_ERROR, "Spent information not available");
                 }
-                CTxDestination dest = DestFromAddressHash(spentInfo.addressType, spentInfo.addressHash);
+                CTxDestination dest = SpentInfoDestination(input.prevout, spentInfo);
                 if (IsValidDestination(dest)) {
                     delta.pushKV("address", keyIO.EncodeDestination(dest));
                 }
@@ -737,7 +738,7 @@ UniValue getblockdeltas(const UniValue& params, bool fHelp)
             "      \"index\": n,              (numeric) The offset of the tx in the block\n"
             "      \"inputs\": [                (array of json objects)\n"
             "        {\n"
-            "          \"address\": \"taddr\",  (string) transparent address\n"
+            "          \"address\": \"taddr\",  (string) transparent or post-quantum address\n"
             "          \"satoshis\": n,       (numeric) negative of spend amount\n"
             "          \"index\": n,          (numeric) vin index\n"
             "          \"prevtxid\": \"hash\",  (string) source utxo tx ID\n"
@@ -746,7 +747,7 @@ UniValue getblockdeltas(const UniValue& params, bool fHelp)
             "      ],\n"
             "      \"outputs\": [             (array of json objects)\n"
             "        {\n"
-            "          \"address\": \"taddr\",  (string) transparent address\n"
+            "          \"address\": \"taddr\",  (string) transparent or post-quantum address\n"
             "          \"satoshis\": n,       (numeric) amount\n"
             "          \"index\": n           (numeric) vout index\n"
             "        }, ...\n"
