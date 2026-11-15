@@ -680,13 +680,6 @@
       "by": "@boyfromcave",
       "date": "2026-11-01"
     },
-    "6043e88331000543": {
-      "rule": "python.lang.security.audit.insecure-file-permissions",
-      "path": "qa/test_yellowback_rc_qualify.py",
-      "reason": "rc-qualify unit test stub binaries inside a staged tarball: the file is a fresh stub executable this unit test just wrote under its own tempfile.mkdtemp() directory; it must be executable to be run, and 0o700 is owner-only (no group or world bits), the most restrictive mode an executable can have.",
-      "by": "@boyfromcave",
-      "date": "2026-11-01"
-    },
     "a1ed8c0a1f5e14b8": {
       "rule": "python.lang.security.audit.insecure-file-permissions",
       "path": "contrib/testnet/ceremony/ceremony",
@@ -747,13 +740,6 @@
       "rule": "python.lang.security.dangerous-globals-use",
       "path": "contrib/yellowback/devnet/testnet_join.py",
       "reason": "globals()['cmd_' + command] is reached only after `command not in JOIN_COMMANDS` exits, so the name is one of nine literal commands, each with a cmd_* function in this file; command is also an argparse subcommand (choices) from the operator's own command line.",
-      "by": "@boyfromcave",
-      "date": "2026-11-01"
-    },
-    "0f6ad1975b9bb0a0": {
-      "rule": "python.lang.security.audit.dynamic-urllib-use-detected",
-      "path": "qa/yellowback-rc-crossline.py",
-      "reason": "The URL is always http://127.0.0.1:<port>/ (Rpc.__init__), the integer JSON-RPC port of a local node: read from an existing devnet node's ycash.conf, or of a node this QA script started itself; no scheme or host comes from outside, so urlopen cannot be pointed at file:// or a remote host.",
       "by": "@boyfromcave",
       "date": "2026-11-01"
     }
