@@ -72,6 +72,7 @@ identical qa/rpc-tests/wallet_getnewaddress_type.py
 identical qa/rpc-tests/vault_lock_from.py
 identical qa/rpc-tests/wallet_yed_held_guard.py
 identical qa/rpc-tests/wallet_yed_output_guard.py
+identical qa/rpc-tests/value_pools_by_type.py
 tree contrib/bootstrap
 tree contrib/testnet
 tree contrib/yellowback/profiles
