@@ -6,6 +6,8 @@
 #   gitpython  GHSA-83vg-56qc-22m7 (submodule .git path validated after clone)
 #   asteval    GHSA-89v8-rhwq-hf77, GHSA-9w56-46f6-3qhx (sandbox escapes); Checkov 3.3.26 pins
 #              asteval==1.0.6, so the job installs with --no-deps (as ycash-infra does)
+#   soupsieve  GHSA-mmhr-3c5m-f64f (polynomial-time descendant-combinator matching; fixed in 4.0)
 certifi==2026.10.19
 gitpython==3.2.1
 asteval==1.0.9
+soupsieve==4.0.1
