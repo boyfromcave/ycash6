@@ -340,14 +340,29 @@ BOOST_AUTO_TEST_CASE(rpc_wallet)
     (void)nu6_1Enabled;
 
     // Height 4406400 is past Ycash mainnet's nYdfMandateEndHeight (2275000).
-    // Post-mandate the YDF reward is optional and capped by
-    // MAX_YDF_FEE_PERCENTAGE; with the default -ydf=5 (DEFAULT_YDF_FEE_PERCENTAGE)
-    // the founders share is 5% of the subsidy.
+    // Post-mandate the YDF reward is the -ydf setting: by default
+    // (DEFAULT_YDF_FEE_PERCENTAGE = 0) nothing, the whole subsidy to the miner.
+    BOOST_CHECK_NO_THROW(retValue = CallRPC("getblocksubsidy 4406400"));
+    obj = retValue.get_obj();
+    BOOST_CHECK_EQUAL(find_value(obj, "miner").get_real(), 0.78125);
+    BOOST_CHECK_EQUAL(find_value(obj, "founders").get_real(), 0.0);
+    BOOST_CHECK(find_value(obj, "fundingstreams").empty());
+
+    // A donating miner sets -ydf=5: the founders share is 5% of the subsidy.
+    mapArgs["-ydf"] = "5";
     BOOST_CHECK_NO_THROW(retValue = CallRPC("getblocksubsidy 4406400"));
     obj = retValue.get_obj();
     BOOST_CHECK_EQUAL(find_value(obj, "miner").get_real(), 0.7421875);
     BOOST_CHECK_EQUAL(find_value(obj, "founders").get_real(), 0.0390625);
-    BOOST_CHECK(find_value(obj, "fundingstreams").empty());
+    mapArgs.erase("-ydf");
+
+    // Inside the YDF mandate (mainnet below 2275000) the 5% is required whatever -ydf says.
+    mapArgs["-ydf"] = "0";
+    BOOST_CHECK_NO_THROW(retValue = CallRPC("getblocksubsidy 2000000"));
+    obj = retValue.get_obj();
+    BOOST_CHECK_EQUAL(find_value(obj, "miner").get_real(), 2.96875);
+    BOOST_CHECK_EQUAL(find_value(obj, "founders").get_real(), 0.15625);
+    mapArgs.erase("-ydf");
 
     /*
      * getblock

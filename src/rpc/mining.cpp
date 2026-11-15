@@ -945,7 +945,7 @@ UniValue getblocksubsidy(const UniValue& params, bool fHelp)
             "\nResult:\n"
             "{\n"
             "  \"miner\" : x.xxx,              (numeric) The mining reward amount in " + CURRENCY_UNIT + ".\n"
-            "  \"founders\" : x.xxx,           (numeric) The founders' reward amount in " + CURRENCY_UNIT + ".\n"
+            "  \"founders\" : x.xxx,           (numeric) The founders' reward amount in " + CURRENCY_UNIT + " (during the Ycash Development Fund mandate the required 5%; after it the share this node's -ydf setting donates, default 0).\n"
             "  \"totalblocksubsidy\" : x.xxx,  (numeric) The total value of the block subsidy in " + CURRENCY_UNIT + ".\n"
             "}\n"
             "\nExamples:\n"
