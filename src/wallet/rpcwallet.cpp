@@ -2660,9 +2660,7 @@ UniValue gettransaction(const UniValue& params, bool fHelp)
             "{\n"
             "  \"status\" : \"mined|waiting|expiringsoon|expired\",    (string) The transaction status, can be 'mined', 'waiting', 'expiringsoon' or 'expired'\n"
             "  \"version\" : \"x\",       (string) The transaction version\n"
-            "  \"amount\" : x.xxx,        (numeric) The net change to the wallet's transparent (ECC and post-quantum) balance in " + CURRENCY_UNIT + ",\n"
-            "                             excluding the fee when the transaction's transparent inputs paid it (no shielded value in);\n"
-            "                             shielded value is not counted: see `z_viewtransaction`\n"
+            "  \"amount\" : x.xxx,        (numeric) The transaction amount in " + CURRENCY_UNIT + "\n"
             "  \"amountZat\" : x          (numeric) The amount in " + MINOR_CURRENCY_UNIT + "\n"
             "  \"fee\" : x.xxx,           (numeric) The transaction's fee in " + CURRENCY_UNIT + ", negative: transparent and shielded value in\n"
             "                             less transparent outputs and value into a shielded pool. Only when an input (transparent,\n"
@@ -2729,6 +2727,9 @@ UniValue gettransaction(const UniValue& params, bool fHelp)
     CAmount nCredit = wtx.GetCredit(asOfHeight, filter);
     CAmount nDebit = wtx.GetDebit(filter);
     CAmount nNet = nCredit - nDebit;
+    // "amount" is unchanged: upstream's figure, the net less GetValueOut() - nDebit when the
+    // transaction is from the wallet.
+    CAmount nAmount = nNet - (wtx.IsFromMe(filter) ? wtx.GetValueOut() - nDebit : 0);
     // "fee" is the transaction's own fee, shown negative: GetValueOut() (transparent outputs and
     // value moved into a shielded pool) less the transparent value in and the shielded value in
     // (GetShieldedValueIn: a positive Sapling valueBalance, Sprout vpub_new). Upstream subtracted
@@ -2736,11 +2737,7 @@ UniValue gettransaction(const UniValue& params, bool fHelp)
     // as the fee (Y6-FEE-DISPLAY). The transparent value in is read from the wallet's own records:
     // each input whose funding transaction the wallet holds (ECC and post-quantum alike); exact for
     // every transaction this wallet built. No chain lookup.
-    // "amount" stays the net change to the wallet's transparent balance with the fee excluded
-    // where the transparent inputs paid it: nNet - nFee when no shielded value came in (as
-    // before), nNet otherwise (the fee came out of the shielded value).
     CAmount nFee = 0;
-    CAmount nAmount = nNet;
     if (wtx.IsFromMe(filter)) {
         CAmount nTransparentIn = 0;
         for (const CTxIn& txin : wtx.vin) {
@@ -2749,11 +2746,7 @@ UniValue gettransaction(const UniValue& params, bool fHelp)
                 nTransparentIn += prev->second.vout[txin.prevout.n].nValue;
             }
         }
-        CAmount nShieldedIn = wtx.GetShieldedValueIn();
-        nFee = wtx.GetValueOut() - nTransparentIn - nShieldedIn;
-        if (nShieldedIn == 0) {
-            nAmount = nNet - nFee;
-        }
+        nFee = wtx.GetValueOut() - nTransparentIn - wtx.GetShieldedValueIn();
     }
 
     entry.pushKV("version", wtx.nVersion);
