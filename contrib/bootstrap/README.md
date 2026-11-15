@@ -46,13 +46,38 @@ contrib/bootstrap/ycash-bootstrap --network regtest --datadir NODE_DATADIR --rpc
 | `--reset` | move the network's `wallet.dat` aside (`DATADIR/wallet-before-reset-<net>-<time>.dat`), remove its subdirectory, restore |
 | `--verify-full` | import with `-checkpoints=0`: every block's scripts are validated, not only those above the checkpoint |
 | `--ycashd`, `--cli` | the binaries the import runs (default: on `PATH`) |
-| `--conf`, `--node-arg` | the node's `ycash.conf`, and extra `ycashd` arguments for the import (regtest's `-nuparams=…`) |
+| `--conf`, `--node-arg` | the node's `ycash.conf` (default `DATADIR/ycash.conf`; the import reads a copy without its peer settings), and extra `ycashd` arguments for the import (regtest's `-nuparams=…`; a peer setting is refused) |
 | `--require-signature` | refuse a `SHA256SUMS` without `SHA256SUMS.minisig` |
 | `--allow-unpinned` | accept a `SHA256SUMS` this release does not pin (a newer bundle, checked by its signature and the format alone) |
 | `--frame-only DIR` | check and frame only; print the `-loadblock=` arguments and start nothing |
 | `--work`, `--keep` | the download and framing directory (default `DATADIR/bootstrap-work`, removed when done) |
 
 Exit status: 0 restored; 2 refused (the message says which check) or a usage error.
+
+## The marker: `DATADIR/<network>.bootstrap-incomplete`
+
+A restore that changes the datadir writes `DATADIR/<network>.bootstrap-incomplete` (for example
+`/var/lib/ycash/testnet-yb-fast.bootstrap-incomplete`) before it touches anything, and removes it
+only when the restore has succeeded. A refused, failed or killed restore leaves it behind, saying
+why. It sits beside the network's subdirectory, not inside it, so a failure that removes the
+subdirectory keeps it. A refusal that changed nothing (a datadir that already holds a chain, a
+usage error, `--frame-only`) writes none.
+
+The image entrypoint (`contrib/docker/ycashd/README.md`) does not start `ycashd` while the marker is
+there, so a half-restored datadir never starts quietly and syncs the rest from peers. Started by
+hand, `ycashd` does not read the marker: check for it before you start a node you restored.
+
+To clear it, read it first (`cat DATADIR/<network>.bootstrap-incomplete`), then either
+
+- restore again: move any `wallet.dat` out of `DATADIR/<network>/`, remove that directory and the
+  marker (or keep the marker and run `ycash-bootstrap … --reset`, which moves `wallet.dat` aside
+  and removes the directory itself), and run the restore (restart the container); or
+- keep the datadir as it is: remove the marker only. The node then starts on whatever the failed
+  restore left and syncs the rest from peers, unchecked against the bundle.
+
+A datadir restored by an earlier release that had no marker shows a failed restore by a missing
+`DATADIR/<network>/bootstrap.json` (every completed restore writes one) and a leftover
+`DATADIR/bootstrap-work/`.
 
 ## The checks, in order
 
@@ -61,7 +86,11 @@ Exit status: 0 restored; 2 refused (the message says which check) or a usage err
    `<sha256>  <name>` with a name of the format, sorted. A `SHA256SUMS.minisig` beside it must
    verify with the owner's key, `keys/ycash-release.pub` (`RWQYr5PF…dveOGQ`, key id
    `02C923A6C593AF18`, decision T-6), using `minisign`; without a signature the tool says so and
-   relies on the pin (optional until the bundle is signed).
+   relies on the pin (optional until the bundle is signed), and `--require-signature` refuses.
+   "Without a signature" is an HTTP 404 or 403 for `SHA256SUMS.minisig`: a bucket that is not
+   listable (S3, or CloudFront in front of it, without `s3:ListBucket`) answers 403 for an object
+   that is not there. Any other error refuses, a 403 on a file the bundle needs refuses, and a
+   signature that is there is always verified.
 3. `manifest.json` matches its sum, then the format (`ycash-prefix/1`, the profile's network
    name, the 50,000-block chunk rule, file names, sizes) and the release: `last_height` and its hash
    equal the compiled checkpoint (510,247 `0000ec90…fb31`), the compiled earlier checkpoints
@@ -72,7 +101,14 @@ Exit status: 0 restored; 2 refused (the message says which check) or a usage err
    regtest `aae83f5f`), checking the hash chain, the genesis, every listed hash, the raw size and
    raw sha256.
 5. `ycashd` imports the framed files with `-connect=0 -listen=0 -dnsseed=0 -disablewallet=1` on a
-   free local RPC port (`--conf` supplies the credentials; otherwise the cookie). The wallet is left
+   free local RPC port. It reads a copy of the node's `ycash.conf` (`--conf`, else
+   `DATADIR/ycash.conf`) with the peer settings left out (`addnode`, `connect`, `seednode`, `bind`,
+   `whitebind`, `externalip`, `listen`, `discover`, `dnsseed`, `upnp`, and their `no…` forms): ycashd
+   adds a conf's `addnode`/`connect` lines to the command line's instead of yielding to
+   `-connect=0`, so an `addnode` in the conf would let the import sync past the bundle. The RPC
+   credentials, the indexes and the network settings are kept. The copy is
+   `bootstrap-work/import.conf` (mode 0600), removed with the work directory. At every poll the node
+   must report no connection (`getconnectioncount` 0), or the restore fails. The wallet is left
    for the node's first normal start, so a `-mnemonicfile` restore still applies there.
 6. The node reaches the last height; `getblockhash` equals the manifest at every listed height and
    the checkpoint at the last; the node is stopped, the framed files are removed, and
@@ -101,7 +137,8 @@ tool then fails and names the node's `debug.log`.
    every statement field itself (`getblockhash`, `getblockheader`.chainwork,
    `gettxoutsetinfo`.hash_serialized, `vault_getinfo`.statehash at `dbtip` = H_B,
    `yed_getstatehash H_B`), compares, and `reconsiderblock`s the same block so the datadir keeps no
-   failed-block mark. Any failure removes what was extracted.
+   failed-block mark. Any failure removes what was extracted. The node reads the same peerless copy
+   of `ycash.conf` as the prefix import and must report no connection.
 
 ## Relation to `ycash-infra`
 
@@ -118,6 +155,10 @@ the import itself. `testdata/testnet-prefix-v1/` holds the release's own `SHA256
 - `python3 -m unittest contrib/bootstrap/test_ycash_bootstrap.py` (offline): the format round
   trip, every refusal, the signature path with a stand-in `minisign`, an HTTP source, a whole
   restore with a stand-in `ycashd`/`ycash-cli`, and the published prefix against the three profiles.
+  The stand-in `ycashd` takes peers from the conf as ycashd does and syncs past the bundle when it
+  has one, so `RestoreTest.test_peers_in_the_conf_do_not_reach_the_import` reproduces the silent
+  failure of beta3 item 8; the marker tests (`…_leaves_a_marker…`, `…_gets_no_marker`) and
+  `BucketTest` (a local HTTP server that answers 403, or 404, for an absent object) cover the rest.
 - The state path in the same file: a bundle built to `bundles/state/FORMAT.md` (it passes
   ycash-infra's `verify.py`) restored against a stand-in node that holds blocks above H_B: the
   rollback, the comparison, the `reconsiderblock`, and the refusals (paths outside the format, a

@@ -26,7 +26,7 @@ Variables (unset = default):
 | `YCASHD_PQ_FALCON_HEIGHT` | `0` | regtest only: `pqfalconheight=<h>`, OP_CHECKPQSIG scheme 0x02 (FN-DSA-512) from `<h>` once the vault upgrade is active. `0` mirrors mainnet/testnet (Falcon from the vault activation, D-Q-2); `off` = SLH-DSA only |
 | `YCASHD_PQ_FEERATE` | unset (= the relay floor) | `pqfeerate=<YEC/kB>`, the wallet's fallback fee rate for a post-quantum input |
 | `YCASHD_MNEMONIC_FILE` | unset | path of a **mounted** secret file, passed as `-mnemonicfile=<path>` (a new wallet takes its seed from the recovery phrase in the file) |
-| `YCASHD_BOOTSTRAP` | unset | before the first start, restore a checkpoint bundle into the empty datadir with `ycash-bootstrap` (testnet plan §4.4): `prefix` = the network's pinned prefix release (`testnet-prefix-v1`), or a bundle URL or directory. Testnet (with `YCASHD_TESTNET_PROFILE`) or regtest only. Skipped when the network's `blocks/` already holds data; a failed restore stops the container before `ycashd` starts |
+| `YCASHD_BOOTSTRAP` | unset | before the first start, restore a checkpoint bundle into the empty datadir with `ycash-bootstrap` (testnet plan §4.4): `prefix` = the network's pinned prefix release (`testnet-prefix-v1`), or a bundle URL or directory. Testnet (with `YCASHD_TESTNET_PROFILE`) or regtest only. Skipped when the network's `blocks/` already holds data; a failed restore stops the container before `ycashd` starts, and its marker `<network>.bootstrap-incomplete` keeps it stopped on every restart until cleared ([below](#a-restore-that-did-not-complete-networkbootstrap-incomplete)) |
 | `YCASHD_BOOTSTRAP_ARGS` | unset | extra `ycash-bootstrap` flags, e.g. `--require-signature` or `--verify-full` (`contrib/bootstrap/README.md`) |
 | `YCASHD_CONF_EXTRA` | | extra `ycash.conf` lines, verbatim |
 | `YCASHD_EXTRA_ARGS` | | extra command-line flags, verbatim |
@@ -76,7 +76,39 @@ docker run -d --name ycashd-fast -v ycashd_fast:/var/lib/ycash -e YCASHD_NETWORK
 
 The entrypoint runs `ycash-bootstrap --network <net> --datadir /var/lib/ycash --conf <the generated
 ycash.conf> --source "$YCASHD_BOOTSTRAP"` once, before `ycashd`; `contrib/bootstrap/README.md`
-lists its checks. The image carries `python3` and `minisign` for it.
+lists its checks. The image carries `python3` and `minisign` for it. The import node reads
+`ycash.conf` without its peer settings, so `addnode` lines in `YCASHD_CONF_EXTRA` reach only the
+real node, after the restore.
+
+### A restore that did not complete: `<network>.bootstrap-incomplete`
+
+A restore that is refused, fails or is killed leaves a marker in the datadir,
+`/var/lib/ycash/<network>.bootstrap-incomplete` (`testnet-yb-fast`, `testnet-yb-slow`,
+`testnet-legacy` or `regtest`), holding the reason. While it is there the entrypoint **does not
+start `ycashd`**: it prints the marker and exits 1, on every restart, whether `YCASHD_BOOTSTRAP` is
+still set or not. With a restart policy the container then restarts in a loop (Kubernetes:
+`CrashLoopBackOff`), which is the point: before, a restart found the half-restored blocks and
+started the node on them, and nothing showed the failure. Find the reason in the log, or:
+
+```bash
+docker run --rm -v ycashd_fast:/var/lib/ycash --entrypoint cat ycash/ycashd:local /var/lib/ycash/testnet-yb-fast.bootstrap-incomplete
+```
+
+Clear it in one of two ways, with the container stopped:
+
+- **restore again** (the usual answer, once the cause is fixed): remove the network's subdirectory
+  and the marker (move a `wallet.dat` out of the subdirectory first, if there is one), then start
+  the container; the entrypoint restores into the empty datadir.
+  ```bash
+  docker run --rm -v ycashd_fast:/var/lib/ycash --entrypoint sh ycash/ycashd:local -c \
+    'rm -rf /var/lib/ycash/testnet-yb-fast /var/lib/ycash/testnet-yb-fast.bootstrap-incomplete /var/lib/ycash/bootstrap-work'
+  ```
+- **start on the datadir as it is**: remove the marker only. The node keeps what the failed
+  restore imported and syncs the rest from peers, unchecked against the bundle.
+
+A successful restore removes the marker itself and writes `<network>/bootstrap.json`. A datadir
+restored by an image from before the marker shows a failed restore by a missing
+`<network>/bootstrap.json` and a leftover `bootstrap-work/`; the entrypoint does not detect it.
 
 ## Health
 
