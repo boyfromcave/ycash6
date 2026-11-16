@@ -38,10 +38,14 @@ Changes since beta 2
    `<network>.bootstrap-incomplete` in the datadir, and the container will not start past it until
    you clear it (`contrib/bootstrap/README.md`, "The marker"). On mainnet a restore needs a signed
    bundle; `--allow-unsigned` is refused there.
+6. **`-reindex-chainstate` and `-rescan` together are refused at startup** (also when
+   `-salvagewallet` or `-zapwallettxes` implies `-rescan`). Start with `-reindex-chainstate` alone,
+   and use `-rescan` on a later start if one is needed (below).
 
 The changes, in order: the fast testnet's mandate end (the one consensus change), the `-ydf`
 default, `getcoinbasetemplatefor`, `transparentPools`, `gettransaction`'s fee, the address of a
-post-quantum input, snapshot restores, and what `rpcversion` 10 covers; then the known limitations.
+post-quantum input, snapshot restores, `-reindex-chainstate` with a wallet, and what `rpcversion` 10
+covers; then the known limitations.
 
 ### Fast testnet: the development-fund mandate ends (consensus, testnet-yb-fast only)
 
