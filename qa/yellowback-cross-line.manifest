@@ -57,6 +57,8 @@ identical qa/rpc-tests/vault_prune_floor.py
 identical qa/rpc-tests/stopatheight.py
 identical qa/rpc-tests/ycash_ydf_default.py
 identical src/test/testnet_params_tests.cpp
+identical qa/rpc-tests/getcoinbasetemplatefor.py
+identical src/test/coinbase_for_tests.cpp
 identical doc/yellowback-testnet-shadow-fork.md
 identical qa/rpc-tests/ycash_bootstrap.py
 identical qa/rpc-tests/testnet_ceremony.py

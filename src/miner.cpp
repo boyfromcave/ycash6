@@ -269,6 +269,11 @@ public:
 
 CMutableTransaction CreateCoinbaseTransaction(const CChainParams& chainparams, CAmount nFees, const MinerAddress& minerAddress, int nHeight)
 {
+        return CreateCoinbaseTransaction(chainparams, nFees, minerAddress, nHeight, COINBASE_FLAGS);
+}
+
+CMutableTransaction CreateCoinbaseTransaction(const CChainParams& chainparams, CAmount nFees, const MinerAddress& minerAddress, int nHeight, const CScript& coinbaseFlags)
+{
         CMutableTransaction mtx = CreateNewContextualCMutableTransaction(
                 chainparams.GetConsensus(), nHeight,
                 !std::holds_alternative<libzcash::OrchardRawAddress>(minerAddress) && nPreferredTxVersion < ZIP225_MIN_TX_VERSION);
@@ -288,7 +293,7 @@ CMutableTransaction CreateCoinbaseTransaction(const CChainParams& chainparams, C
             AddOutputsToCoinbaseTxAndSign(mtx, chainparams, nHeight, nFees),
             minerAddress);
 
-        mtx.vin[0].scriptSig = (CScript() << nHeight << OP_0) + COINBASE_FLAGS;
+        mtx.vin[0].scriptSig = (CScript() << nHeight << OP_0) + coinbaseFlags;
         return mtx;
 }
 

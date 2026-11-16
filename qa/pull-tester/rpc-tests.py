@@ -100,6 +100,8 @@ BASE_SCRIPTS= [
     'stopatheight.py',
     # -ydf defaults to 0 (beta3 item 4): no fund output past the mandate, -ydf=5 pays 5 %, the mandate unchanged.
     'ycash_ydf_default.py',
+    # getcoinbasetemplatefor (beta3 item 3): a coinbase per payout address for a named template, exact amounts.
+    'getcoinbasetemplatefor.py',
     # ycash-bootstrap against a real node (testnet plan §4.4): a regtest bundle packed, a changed chunk
     # refused, the bundle restored by a real import. Byte-identical on both lines.
     'ycash_bootstrap.py',

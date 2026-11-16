@@ -182,6 +182,12 @@ class YellowbackMiningTest(YellowbackTestFramework):
         script_sig = cb.vin[0].script_sig
         assert script_sig.startswith(ym.height_prefix(gbt['height']))
         assert script_sig.endswith(expected)
+        # getcoinbasetemplatefor (beta3 item 3) writes the same tag: its flags are the template's, and its coinbase
+        # carries the stock coinbase's scriptSig (<height> OP_0 <flags>)
+        cbf = node.getcoinbasetemplatefor(addr, {'previousblockhash': gbt['previousblockhash'],
+                                                 'txids': [t['hash'] for t in gbt['transactions']]})
+        assert_equal(cbf['flags'], flags)
+        assert_equal(ym.tx_from_hex(cbf['data']).vin[0].script_sig, script_sig)
         yb = gbt['yellowback']
         assert_equal(yb['tag'], flags)
         assert_equal(yb['kind'], 'quote')

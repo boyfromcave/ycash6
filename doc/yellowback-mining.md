@@ -321,3 +321,54 @@ ycashd -reindex            (-reindex-yellowback for the index alone)
 # 6.20.0 templates
 getblocktemplate: header roots from defaultroots (blockcommitmentshash fallback pre-Heartwood, gbt_oldhashes allowed); coinbasetxn.foundersreward may be absent
 ```
+
+## 13. Paying each miner at its own address (`getcoinbasetemplatefor`)
+
+A pool that pays every miner in the coinbase of the block it finds keeps `getblocktemplate` as it
+is and asks the node for one coinbase per miner:
+
+```
+getcoinbasetemplatefor "address" {"previousblockhash": "<hex>", "txids": ["<hex>", ...]}
+```
+
+- `address` is the miner's payout address: transparent (P2PKH or P2SH), Sapling, or post-quantum
+  plain YEC (`sqf…` / `sqs…`). A Sapling address needs Heartwood at the next height, a post-quantum
+  one the Vault upgrade.
+- The second argument names the template the pool holds: `previousblockhash` of the
+  `getblocktemplate` reply and the `hash` of every entry of its `transactions`, in order. It has
+  exactly these two keys. **There is no amount argument**: the node derives the amount itself.
+- The answer is a complete coinbase (`data`, `hash`) and the numbers it was built from: `height`,
+  `subsidy`, `fees` (the sum of the named transactions' fees, from the node's mempool), `fund` and
+  `fundrule`, `amount`, `txcount`, `flags`, `sigops`, `addresstype`.
+- `amount = subsidy - fund + fees`, always. `fund` is the development-fund output of this node's
+  own coinbase at that height: `subsidy / 20` while the mandate lasts (`fundrule` `"mandated"`),
+  afterwards the node's `-ydf` share of the subsidy (`"optional"`; `-ydf` defaults to 0, and then
+  there is no such output and `fundrule` is `"none"`). So a miner paid through this call and a
+  miner whose script the pool writes into the stock coinbase are paid the same.
+- The pool builds its job from the stock template's header fields, this coinbase and exactly the
+  named transactions, in the template's order. It may append to the scriptSig after the height push
+  (keeping `flags` verbatim) and must change nothing else. Dropping a transaction makes the block
+  invalid (`bad-cb-amount`); adding one leaves its fee unclaimed.
+- The node keeps nothing between calls, and `getblocktemplate` and `submitblock` are unchanged.
+  The call needs neither a wallet nor `-mineraddress`.
+
+Errors a pool handles:
+
+| Code | Message | What to do |
+|---|---|---|
+| -1 | `template-stale: previousblockhash is not the tip` | fetch `getblocktemplate` again |
+| -1 | `template-stale: transaction is not in the mempool: <txid>` | fetch `getblocktemplate` again |
+| -1 | `coinbase-does-not-fit: block size <n> exceeds <limit>` (or `sigops <n> exceed <limit>`) | the named transactions leave no room for this coinbase (a Sapling coinbase is about 1,000 bytes larger than a transparent one); keep the miner on its previous job until the next template |
+| -5 | `Invalid address`, `Address type cannot receive a coinbase: <type>`, `Address type cannot receive a coinbase at height <height>: <type>` | refuse the miner |
+| -8 | `template must be an object with exactly the keys previousblockhash and txids`, and the other shape errors | a defect in the caller |
+| -1 | `unsupported: the header commits to the coinbase at height <height>` | NU5 rules; no Ycash network activates them |
+| -32603 | `coinbase construction failed: <detail>` | never expected |
+
+It also refuses as `getblocktemplate` does (`Ycash is not connected!`, `Ycash is downloading
+blocks...`, `yellowback-unhealthy: …`).
+
+A Sapling answer costs one Sapling output proof (made outside the node's main lock); the other
+kinds cost a mempool lookup per transaction. Each call occupies one RPC thread while it runs: cap
+the requests a pool has in flight and set `-rpcthreads` to that cap plus two or more, so that
+`submitblock` never waits behind proofs. The quote tag in the answer is the node's current one
+(`flags`), which is the one to mine.
