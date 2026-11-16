@@ -566,6 +566,93 @@ TEST(ValuePools, FillFromGenesisFromTheSeedAndTheSeedCheck)
     fs::remove_all(dir);
 }
 
+TEST(ValuePools, ResumeAfterAnUncleanStop)
+{
+    SelectParams(CBaseChainParams::REGTEST);
+    const fs::path dir = fs::temp_directory_path() / fs::unique_path("valuepools-%%%%-%%%%");
+    FakeChain chain(6);
+    std::string err;
+    valuepools::test::SetSeed(std::nullopt);
+    // Counts the blocks the fill reads.
+    int reads = 0;
+    valuepools::test::SetBlockReader([&chain, &reads](const CBlockIndex* p, CBlock& block, CBlockUndo& undo) {
+        reads++;
+        block = chain.blocks[p->nHeight];
+        undo = chain.undos[p->nHeight];
+        return true;
+    });
+    auto setTip = [&chain](int h) { LOCK(cs_main); chainActive.SetTip(const_cast<CBlockIndex*>(chain.at(h))); };
+    // A block connected on `parent` whose index entry never reached the disk: its record is written (and named the
+    // last block written), but it is unknown to the block index at the next start.
+    auto lostBlock = [&chain](int parent, CBlockIndex& i, uint256& h) {
+        h = GetRandHash();
+        i.phashBlock = &h;
+        i.pprev = const_cast<CBlockIndex*>(chain.at(parent));
+        i.nHeight = parent + 1;
+        valuepools::BlockConnected(chain.blocks[parent + 1], chain.undos[parent + 1], &i);
+        ASSERT_TRUE(valuepools::GetRecord(&i).has_value());
+    };
+
+    // Records 0..4, then the lost block, then a restart whose restored tip is 6: only 5 and 6 are read.
+    setTip(4);
+    valuepools::Open(dir, true);
+    ASSERT_TRUE(FillNow(err)) << err;
+    EXPECT_EQ(reads, 4);
+    CBlockIndex iLost;
+    uint256 hLost;
+    lostBlock(4, iLost, hLost);
+    setTip(6);
+    valuepools::Open(dir, false);
+    reads = 0;
+    ASSERT_TRUE(FillNow(err)) << err;
+    EXPECT_EQ(reads, 2);
+    for (int h = 0; h <= 6; h++) EXPECT_TRUE(*valuepools::GetRecord(chain.at(h)) == chain.expected[h]) << h;
+    // A lost block beside a restored tip that has its record: nothing is read.
+    lostBlock(5, iLost, hLost);
+    valuepools::Open(dir, false);
+    reads = 0;
+    ASSERT_TRUE(FillNow(err)) << err;
+    EXPECT_EQ(reads, 0);
+
+    // No record but genesis's: as before, the seed (here at 3) is the start, not genesis.
+    valuepools::test::SetSeed(valuepools::Seed{3, chain.hashes[3], chain.expected[3]});
+    valuepools::Open(dir, true);
+    lostBlock(0, iLost, hLost);
+    valuepools::Open(dir, false);
+    reads = 0;
+    ASSERT_TRUE(FillNow(err)) << err;
+    EXPECT_EQ(reads, 3);
+    EXPECT_FALSE(valuepools::GetRecord(chain.at(2)).has_value());
+    EXPECT_TRUE(*valuepools::GetRecord(chain.at(6)) == chain.expected[6]);
+    // ...and with -valuepoolsseed=0, genesis.
+    mapArgs["-valuepoolsseed"] = "0";
+    valuepools::Open(dir, true);
+    lostBlock(0, iLost, hLost);
+    valuepools::Open(dir, false);
+    reads = 0;
+    ASSERT_TRUE(FillNow(err)) << err;
+    EXPECT_EQ(reads, 6);
+    mapArgs.erase("-valuepoolsseed");
+
+    // A seeded store, the seed no longer in effect: the seed block's record has no parent's record, so it is not
+    // trusted and the fill reads from genesis.
+    setTip(3);
+    valuepools::Open(dir, true);
+    ASSERT_TRUE(FillNow(err)) << err;
+    ASSERT_FALSE(valuepools::GetRecord(chain.at(2)).has_value());
+    lostBlock(3, iLost, hLost);
+    valuepools::test::SetSeed(std::nullopt);
+    setTip(6);
+    valuepools::Open(dir, false);
+    reads = 0;
+    ASSERT_TRUE(FillNow(err)) << err;
+    EXPECT_EQ(reads, 6);
+    for (int h = 0; h <= 6; h++) EXPECT_TRUE(*valuepools::GetRecord(chain.at(h)) == chain.expected[h]) << h;
+
+    valuepools::Close();
+    fs::remove_all(dir);
+}
+
 TEST(ValuePools, WriteFailureLeavesTheIndexUnmonitoredUntilRestart)
 {
     SelectParams(CBaseChainParams::REGTEST);

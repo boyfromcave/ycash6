@@ -433,6 +433,26 @@ bool Fill(const CChainParams& chainparams, const std::function<bool()>& interrup
                 const CBlockIndex* fork = chainActive.FindFork(it->second);
                 if (fork && ReadRecordLocked(fork)) start = fork;
             }
+            if (!start) {
+                // An unclean stop: the last block written is newer than the block index's last write to disk
+                // (DATABASE_WRITE_INTERVAL), so it is unknown now, while the records of the restored tip's ancestors
+                // are still here. Resume from the highest ancestor of the tip (genesis excluded) whose record and whose
+                // parent's record are both present (the seed block needs no parent's record); none: as before.
+                LogPrintf("valuepools: the last block written (%s) is not in the block index or has no record on the "
+                          "active chain\n", best.ToString());
+                for (const CBlockIndex* p = tip; p && p->pprev; p = p->pprev) {
+                    if (!ReadRecordLocked(p)) continue;
+                    const bool fSeedBlock = seed && p->nHeight == seed->height && p->GetBlockHash() == seed->hash;
+                    if (fSeedBlock || ReadRecordLocked(p->pprev)) start = p;
+                    break;
+                }
+                if (start) {
+                    CDBBatch batch(*db);
+                    batch.Write(KEY_BEST, start->GetBlockHash());
+                    CommitLocked(batch, true);
+                    LogPrintf("valuepools: resuming from the highest ancestor of the tip with a record, height %d\n", start->nHeight);
+                }
+            }
         }
         if (!start && seed && GetBoolArg("-valuepoolsseed", true) && tip->nHeight >= seed->height &&
             chainActive[seed->height]->GetBlockHash() == seed->hash) {
