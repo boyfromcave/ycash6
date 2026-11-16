@@ -146,6 +146,9 @@ BASE_SCRIPTS= [
     'wallet_balance_by_type.py',
     # beta3 item 1: gettransaction's fee for every funding shape (ECC, Sapling, post-quantum, mixed), amount unchanged.
     'wallet_gettransaction_fee.py',
+    # The chain's transparent value pools by address type (beta3 item 2): transparentPools in getblock and
+    # getblockchaininfo, sums, reorg, restart, the startup fill, -reindex, a node without undo data.
+    'value_pools_by_type.py',
     # Beta2 P0: a -mnemonicfile restore re-finds every ECC (P2PKH) coin of the seed: the legacy transparent HD
     # lookahead, keypool marking, the rescan's re-pass for keys used out of chain order, the gap limit (-keypool).
     'wallet_seed_restore_ecc.py',

@@ -21,6 +21,7 @@
 #include "streams.h"
 #include "sync.h"
 #include "util/system.h"
+#include "valuepools.h"
 
 #include <stdint.h>
 
@@ -292,6 +293,7 @@ UniValue blockToJSON(const CBlock& block, const CBlockIndex* blockindex, bool tx
     valuePools.push_back(ValuePoolDesc("sapling", blockindex->nChainSaplingValue, blockindex->nSaplingValue));
     valuePools.push_back(ValuePoolDesc("orchard", blockindex->nChainOrchardValue, blockindex->nOrchardValue));
     result.pushKV("valuePools", valuePools);
+    result.pushKV("transparentPools", valuepools::TransparentPoolsToJSON(blockindex, true));
 
     // Total fee of all non-coinbase transactions in this block. 0 for blocks
     // indexed before this field existed (until a -reindex repopulates it).
@@ -1046,6 +1048,7 @@ UniValue getblock(const UniValue& params, bool fHelp)
             "          \"valueDeltaZat\": xxxxxx,   (numeric, optional) change to the amount in the pool produced by this block, in " + MINOR_CURRENCY_UNIT + "\n"
             "      }, ...\n"
             "  ],\n"
+            + valuepools::HelpText(true) +
             "  \"trees\": {                 (object) information about the note commitment trees\n"
             "      \"sapling\": {             (object, optional)\n"
             "          \"size\": n,             (numeric) the total number of Sapling note commitments as of the end of this block\n"
@@ -1655,6 +1658,7 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
             "          \"chainValueZat\": xxxxxx,   (numeric, optional) total amount in the pool, in " + MINOR_CURRENCY_UNIT + "\n"
             "      }, ...\n"
             "  ]\n"
+            + valuepools::HelpText(false) +
             "  \"softforks\": [            (array) status of softforks in progress\n"
             "     {\n"
             "        \"id\": \"xxxx\",        (string) name of softfork\n"
@@ -1720,6 +1724,7 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
     valuePools.push_back(ValuePoolDesc("sapling", tip->nChainSaplingValue, std::nullopt));
     valuePools.push_back(ValuePoolDesc("orchard", tip->nChainOrchardValue, std::nullopt));
     obj.pushKV("valuePools",            valuePools);
+    obj.pushKV("transparentPools",      valuepools::TransparentPoolsToJSON(tip, false));
 
     const CChainParams& chainparams = Params();
     const Consensus::Params& consensusParams = chainparams.GetConsensus();

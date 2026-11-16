@@ -34,6 +34,7 @@
 #include "util/system.h"
 #include "util/moneystr.h"
 #include "validationinterface.h"
+#include "valuepools.h"
 #include "wallet/asyncrpcoperation_sendmany.h"
 #include "wallet/asyncrpcoperation_shieldcoinbase.h"
 #include "warnings.h"
@@ -4389,6 +4390,7 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
         setDirtyBlockIndex.insert(pindex);
     }
 
+    valuepools::BlockConnected(block, blockundo, pindex); // an index, not a rule: returns nothing, rejects nothing
     if (fTxIndex)
         if (!pblocktree->WriteTxIndex(vPos))
             return AbortNode(state, "Failed to write transaction index");
