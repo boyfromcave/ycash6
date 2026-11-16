@@ -2662,6 +2662,11 @@ UniValue gettransaction(const UniValue& params, bool fHelp)
             "  \"version\" : \"x\",       (string) The transaction version\n"
             "  \"amount\" : x.xxx,        (numeric) The transaction amount in " + CURRENCY_UNIT + "\n"
             "  \"amountZat\" : x          (numeric) The amount in " + MINOR_CURRENCY_UNIT + "\n"
+            "  \"fee\" : x.xxx,           (numeric) The transaction's fee in " + CURRENCY_UNIT + ", negative: transparent and shielded value in\n"
+            "                             less transparent outputs and value into a shielded pool. Only when an input (transparent,\n"
+            "                             post-quantum or shielded) is the wallet's and the wallet holds the funding transaction\n"
+            "                             of every transparent input; read from the wallet's own records. For a send funded from\n"
+            "                             a shielded pool it can differ from details[].fee, which counts the transparent debit only\n"
             "  \"confirmations\" : n,     (numeric) The number of confirmations\n"
             "  \"blockhash\" : \"hash\",  (string) The block hash\n"
             "  \"blockindex\" : xx,       (numeric) The block index\n"
@@ -2724,12 +2729,38 @@ UniValue gettransaction(const UniValue& params, bool fHelp)
     CAmount nCredit = wtx.GetCredit(asOfHeight, filter);
     CAmount nDebit = wtx.GetDebit(filter);
     CAmount nNet = nCredit - nDebit;
-    CAmount nFee = (wtx.IsFromMe(filter) ? wtx.GetValueOut() - nDebit : 0);
+    // "amount" is unchanged: upstream's figure, the net less GetValueOut() - nDebit when the
+    // transaction is from the wallet.
+    CAmount nAmount = nNet - (wtx.IsFromMe(filter) ? wtx.GetValueOut() - nDebit : 0);
+    // "fee" is the transaction's own fee, shown negative: GetValueOut() (transparent outputs and
+    // value moved into a shielded pool) less the transparent value in and the shielded value in
+    // (GetShieldedValueIn: a positive Sapling valueBalance, Sprout vpub_new). Upstream subtracted
+    // only the wallet's transparent debit, so a Sapling-funded send showed its transparent outputs
+    // as the fee (Y6-FEE-DISPLAY). The transparent value in is read from the wallet's own records:
+    // each input whose funding transaction the wallet holds (ECC and post-quantum alike); exact for
+    // every transaction this wallet built. No chain lookup.
+    // An input whose funding transaction the wallet does not hold (another party's coin in a
+    // jointly built transaction, or after -zapwallettxes) has no known value: then "fee" is left
+    // out rather than shown too small.
+    CAmount nFee = 0;
+    bool fFeeKnown = wtx.IsFromMe(filter);
+    if (fFeeKnown) {
+        CAmount nTransparentIn = 0;
+        for (const CTxIn& txin : wtx.vin) {
+            auto prev = pwalletMain->mapWallet.find(txin.prevout.hash);
+            if (prev != pwalletMain->mapWallet.end() && txin.prevout.n < prev->second.vout.size()) {
+                nTransparentIn += prev->second.vout[txin.prevout.n].nValue;
+            } else {
+                fFeeKnown = false;
+            }
+        }
+        nFee = wtx.GetValueOut() - nTransparentIn - wtx.GetShieldedValueIn();
+    }
 
     entry.pushKV("version", wtx.nVersion);
-    entry.pushKV("amount", ValueFromAmount(nNet - nFee));
-    entry.pushKV("amountZat", nNet - nFee);
-    if (wtx.IsFromMe(filter))
+    entry.pushKV("amount", ValueFromAmount(nAmount));
+    entry.pushKV("amountZat", nAmount);
+    if (fFeeKnown)
         entry.pushKV("fee", ValueFromAmount(nFee));
 
     WalletTxToJSON(wtx, entry, asOfHeight);
