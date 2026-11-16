@@ -202,7 +202,7 @@ env:
   # yellowback_stratum drives the real pool software: boyfromcave/yolo (Rust), checked out at this
   # commit and built in the main job, exported as YOLO_BIN. Without the binary the script SKIPs.
   YOLO_REPO: boyfromcave/yolo
-  YOLO_COMMIT: ${{ inputs.yolo_commit || 'b3abf818ba2c9f0d5234da461757efbcd96eb4a5' }}
+  YOLO_COMMIT: ${{ inputs.yolo_commit || 'eef18acdefda5cacc5e3e22022a263115cf073cf' }}
   # yellowback_chainviz drives the chain observer: boyfromcave/chain-viz (Rust), checked out at
   # this commit (bump by PR, audit I-5) and built --locked the same way, exported as CHAINVIZ_BIN.
   # Since 2026-10-06 its harden/yellowback build (H5: rpcversion 4 fields), the pin ycash-dd's CI
@@ -284,14 +284,14 @@ env:
   # docs/plans/beta3/rpc-contract-delta.md section 4.13).
   YB_WORKSPACE_COMMIT: ${{ inputs.workspace_commit || 'dbf53a83db4ee5fbb54992fbc4274b3902f1c5f5' }}
   # The mixed tier's pins (workspace docs/plans/kogany/ci-design.md; bump by PR, never a branch tip).
-  # kogany: upgrade/vault at f2387999d (the koganyd identity); its koganyd-bin artifact (any
+  # kogany: upgrade/vault at 33a32a911 (the koganyd identity); its koganyd-bin artifact (any
   # kogany workflow) or, when that has expired or does not exist, a build at this commit (dev
   # profile, --features ycash). The binary is `koganyd` from that commit on (no zakurad-bin).
   KOGANY_REPO: boyfromcave/kogany
-  KOGANY_COMMIT: f2387999dfc76f193234bdc7d17fe7079fc86938
-  # yew: upgrade/vault at 91cb98f38 (yewd); its yewd-bin artifact (ci.yml), else a build here.
+  KOGANY_COMMIT: 33a32a9114ede537d7029e8b3c2bdc719ae7ae35
+  # yew: upgrade/vault at 47898988d (yewd); its yewd-bin artifact (ci.yml), else a build here.
   YEW_REPO: boyfromcave/yew
-  YEW_COMMIT: 91cb98f38c63b7ce3a517e5eb359b0f9bf952804
+  YEW_COMMIT: 47898988da9cf73fb7417c9d111273ce104ff20a
   # The kogany chunks whose pending koganyd.toml rows the harness writes as keys (test_framework/
   # kogany.py KOGANY_LIVE; W5-f is on by default there). Moves with KOGANY_COMMIT.
   KOGANY_LIVE: W1-Y1,W2-b
