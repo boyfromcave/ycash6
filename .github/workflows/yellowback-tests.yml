@@ -185,7 +185,8 @@ env:
   # vault_lock_from joined on 2026-11-11 (beta2 D-3: vault_lock funded from a P2PKH, PQ or Sapling "from"; ported from ycash-dd #165).
   # wallet_gettransaction_fee joined on 2026-11-13 (beta3 item 1: gettransaction's fee for every funding shape).
   # wallet_pq_coinbase_spend joined on 2026-11-16 (beta3: a post-quantum miner shields its coinbase with z_sendmany, with and without -regtestshieldcoinbase).
-  YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_activation_reorg yellowback_reorg_restart yellowback_redeem_boundary yellowback_interm yellowback_cancel_limit yellowback_pq yellowback_pq_dayone yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_attest_bond yellowback_attest_evict yellowback_attest_rejoin yellowback_attest_live yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke yellowback_fee yellowback_fees yellowback_fees_reaccept yellowback_mempool_limits yellowback_wr_flags vault_upgrade vault_activation_restart stopatheight ycash_ydf_default ycash_bootstrap testnet_ceremony vault_rpc vault_rpc_contract vault_refee vault_primitive vault_slashing vault_bridge vault_pq_reorg vault_pq vault_pq_wallet vault_pq_wallet_restore vault_undo_prune vault_policy vault_dos vault_pq_relay vault_lock_from wallet_pq_address wallet_balance_by_type wallet_getnewaddress_type wallet_yed_held_guard wallet_yed_output_guard lightwalletd_only yellowback_lightwalletd z_validateaddress_nowallet wallet_address_matrix wallet_pq_fee_cap wallet_yed_ecc_token wallet_beta2_followups wallet_beta2_followups2 wallet_seed_restore_ecc wallet_seed_lookahead_exposure getrawtransaction_insight_pq ycash_ydf_mandate_end wallet_gettransaction_fee value_pools_by_type getcoinbasetemplatefor wallet_reindex_chainstate wallet_pq_coinbase_spend
+  # wallet_pq_sendmany_lock joined on 2026-11-16 (beta3 review S-1: a post-quantum send keeps its coins locked until it ends; ycash-dd's twin).
+  YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_activation_reorg yellowback_reorg_restart yellowback_redeem_boundary yellowback_interm yellowback_cancel_limit yellowback_pq yellowback_pq_dayone yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_attest_bond yellowback_attest_evict yellowback_attest_rejoin yellowback_attest_live yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke yellowback_fee yellowback_fees yellowback_fees_reaccept yellowback_mempool_limits yellowback_wr_flags vault_upgrade vault_activation_restart stopatheight ycash_ydf_default ycash_bootstrap testnet_ceremony vault_rpc vault_rpc_contract vault_refee vault_primitive vault_slashing vault_bridge vault_pq_reorg vault_pq vault_pq_wallet vault_pq_wallet_restore vault_undo_prune vault_policy vault_dos vault_pq_relay vault_lock_from wallet_pq_address wallet_balance_by_type wallet_getnewaddress_type wallet_yed_held_guard wallet_yed_output_guard lightwalletd_only yellowback_lightwalletd z_validateaddress_nowallet wallet_address_matrix wallet_pq_fee_cap wallet_yed_ecc_token wallet_beta2_followups wallet_beta2_followups2 wallet_seed_restore_ecc wallet_seed_lookahead_exposure getrawtransaction_insight_pq ycash_ydf_mandate_end wallet_gettransaction_fee value_pools_by_type getcoinbasetemplatefor wallet_reindex_chainstate wallet_pq_coinbase_spend wallet_pq_sendmany_lock
   SANITIZER_SCRIPTS: yellowback_index
   # The functional scripts the nightly job runs by name, each in its own step (the Rust attest agent, the devnet,
   # a ycash6-stock build, the prune floor). qa/yellowback-audit.sh counts them as run by CI.
@@ -197,11 +198,11 @@ env:
   # wallet-only PR skipped this leg, and most of the new lock-taking code is in src/wallet/). Run time
   # of the PR subset at -j2 grows by about four minutes (weights in qa/yellowback-ci-shard.py).
   OVERLAY_PATHS: '^(src/(vault/|yellowback/|wallet/|rpc/vault\.cpp|rpc/yellowback[^/]*\.cpp|main\.cpp|miner\.cpp|txmempool\.cpp|sync\.(cpp|h))|qa/yellowback-lockorder-(check\.py|logonly\.sh))'
-  LOCKORDER_PR_SCRIPTS: vault_primitive vault_rpc_contract vault_slashing vault_upgrade yellowback_index yellowback_void_mint yellowback_attest_live wallet_pq_fee_cap vault_lock_from wallet_address_matrix wallet_yed_ecc_token wallet_balance_by_type
+  LOCKORDER_PR_SCRIPTS: vault_primitive vault_rpc_contract vault_slashing vault_upgrade yellowback_index yellowback_void_mint yellowback_attest_live wallet_pq_fee_cap wallet_pq_sendmany_lock vault_lock_from wallet_address_matrix wallet_yed_ecc_token wallet_balance_by_type
   # yellowback_stratum drives the real pool software: boyfromcave/yolo (Rust), checked out at this
   # commit and built in the main job, exported as YOLO_BIN. Without the binary the script SKIPs.
   YOLO_REPO: boyfromcave/yolo
-  YOLO_COMMIT: ${{ inputs.yolo_commit || 'dc9c57a671e37821c21932b4859f9d28800d27e9' }}
+  YOLO_COMMIT: ${{ inputs.yolo_commit || 'b3abf818ba2c9f0d5234da461757efbcd96eb4a5' }}
   # yellowback_chainviz drives the chain observer: boyfromcave/chain-viz (Rust), checked out at
   # this commit (bump by PR, audit I-5) and built --locked the same way, exported as CHAINVIZ_BIN.
   # Since 2026-10-06 its harden/yellowback build (H5: rpcversion 4 fields), the pin ycash-dd's CI
@@ -210,16 +211,16 @@ env:
   # On the upgrade line: chain-viz's upgrade/vault (rpcversion 5 tolerant, set/vault panels; upgrade
   # plan P6), the build yellowback_chainviz passed against on ycash-dd. It must be pushed to
   # boyfromcave/chain-viz before this pin resolves.
-  CHAINVIZ_COMMIT: ${{ inputs.chainviz_commit || 'dfbef2b76dc6825186ed12919b6f37c97949ca3b' }}  # chain-viz upgrade/quantum-vaults: v4 MINT and PQ payees (yellowback_chainviz on the quantum line)
+  CHAINVIZ_COMMIT: ${{ inputs.chainviz_commit || '35d8eae6aca2c013429e7b63727bc3d8f7685f48' }}
   # The lightwalletd fork the nightly drives, at a commit (audit E-6; bump by PR when it moves),
   # and the Go toolchain it builds with, verified against go.dev's published sha256.
   LWD_REPO: boyfromcave/lightwalletd
   # On the upgrade line: lightwalletd-dd's upgrade/vault build (rpcversion 5, the vault read RPCs;
   # upgrade plan P6), as ycash-dd's CI pins it; it must be pushed before this resolves.
-  # On upgrade/vault since the post-quantum merge: lightwalletd-dd's upgrade/vault (bf8005a, rpcversion 9,
+  # On upgrade/vault since the post-quantum merge: lightwalletd-dd's upgrade/vault (56660e5, rpcversion 9 and 10, beta3;
   # D-9: an older build refuses the node's rpcversion and leaves YellowbackStreamer unregistered).
   # It must be pushed before the nightly resolves it, and it moves with every rpcversion bump.
-  LWD_COMMIT: ${{ inputs.lwd_commit || 'bf8005adc0f29d881bc85e32e6db565e0036b839' }}
+  LWD_COMMIT: ${{ inputs.lwd_commit || '56660e56838052ab0f9e7555e2e068e4471fc0b3' }}
   GO_VERSION: 1.24.7
   GO_SHA256: da18191ddb7db8a9339816f3e2b54bdded8047cdc2a5d67059478f8d1595c43f
   # sprout-groth16.params for the nightly's ycash-gtest (Joinsplit.FullApiTest); the hash zcutil/fetch-params.sh
@@ -283,14 +284,14 @@ env:
   # docs/plans/beta3/rpc-contract-delta.md section 4.13).
   YB_WORKSPACE_COMMIT: ${{ inputs.workspace_commit || 'dbf53a83db4ee5fbb54992fbc4274b3902f1c5f5' }}
   # The mixed tier's pins (workspace docs/plans/kogany/ci-design.md; bump by PR, never a branch tip).
-  # kogany: vaults/kogany-compat at dd834da8b (the koganyd identity); its koganyd-bin artifact (any
+  # kogany: upgrade/vault at f2387999d (the koganyd identity); its koganyd-bin artifact (any
   # kogany workflow) or, when that has expired or does not exist, a build at this commit (dev
   # profile, --features ycash). The binary is `koganyd` from that commit on (no zakurad-bin).
   KOGANY_REPO: boyfromcave/kogany
-  KOGANY_COMMIT: dd834da8b77e882b9e6a00b3ce70f2b30b930c37
-  # yew: vaults/kogany-compat at S3 (yewd); its yewd-bin artifact (ci.yml), else a build here.
+  KOGANY_COMMIT: f2387999dfc76f193234bdc7d17fe7079fc86938
+  # yew: upgrade/vault at 91cb98f38 (yewd); its yewd-bin artifact (ci.yml), else a build here.
   YEW_REPO: boyfromcave/yew
-  YEW_COMMIT: 85aec6f5812da36e499a18b088e2e6b99f503da8
+  YEW_COMMIT: 91cb98f38c63b7ce3a517e5eb359b0f9bf952804
   # The kogany chunks whose pending koganyd.toml rows the harness writes as keys (test_framework/
   # kogany.py KOGANY_LIVE; W5-f is on by default there). Moves with KOGANY_COMMIT.
   KOGANY_LIVE: W1-Y1,W2-b
@@ -1628,6 +1629,8 @@ jobs:
         run: python3 qa/test_yellowback_cross_line.py -v
       - name: Cross-line overlay-tree checker unit tests (audit W3-P-2)
         run: python3 qa/test_yellowback_cross_line_trees.py -v
+      - name: rpcversion literal checker unit tests (the audit's rpcversion leg)
+        run: python3 qa/test_yellowback_rpcversion.py -v
       - name: kogany mixed-line harness unit tests (test_framework/test_kogany.py; no node)
         if: ${{ !cancelled() }}
         working-directory: qa/rpc-tests

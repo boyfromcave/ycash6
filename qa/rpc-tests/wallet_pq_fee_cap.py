@@ -230,6 +230,7 @@ class WalletPQFeeCapTest(BitcoinTestFramework):
             assert_equal(set(node.getrawmempool()) - stock, set())
             assert_equal(len(node.listunspent(1, 9999, [slh])), ncoins)
             assert_equal(node.z_getbalance(slh), Decimal('0.1') * ncoins)
+            assert_equal(node.listlockunspent(), [])         # review S-1: the failed send's coins are not left locked
         gone(n0)
         erased = self.erased_txids()
         assert_equal(len(erased), 1)

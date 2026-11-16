@@ -167,6 +167,8 @@ BASE_SCRIPTS= [
     'wallet_address_matrix.py',
     # beta2 audit H1 / A-M2: a PQ send's fee cap at the RPC and the commit, no rebroadcast of a refused send; uneconomic PQ coins.
     'wallet_pq_fee_cap.py',
+    # beta3 review S-1: a PQ z_sendmany keeps its coins locked while it signs (a merge is refused); no coin stays locked after.
+    'wallet_pq_sendmany_lock.py',
     # beta2 review M1/m2: a YED token at an ECC holder key (minted before Falcon) is never spent by the stock paths.
     'wallet_yed_ecc_token.py',
     'wallet_beta2_followups.py',

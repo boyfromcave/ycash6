@@ -13,13 +13,17 @@
 # Enforces the release rules of the tag's stage (audit W3-P-1; testnet plan §5.1, T-8):
 #   beta   (6.22.N-betaM)  parity with the other line, the mainnet maturity, the 6.22 line;
 #                          testnet-legacy never activates Vault; and testnet-yb-slow and
-#                          testnet-legacy have branch IDs of their own (R8's ID half).
+#                          testnet-legacy have branch IDs of their own (R8's ID half); and,
+#                          from 6.22.0-beta3 on, R9 (a beta1 or beta2 version is exempt).
+#   R10, with --release-version wherever R9 binds: the release notes the tag publishes exist and
+#                          hold no placeholder (qa/yellowback-vault-params.py notes).
 #   rc     (6.22.N-rcM)    the above, R3-R6 (the protocol-version bump, taken with rc1; the Falcon
 #                          height), R7 for the testnet (testnet-yb-fast's height and set both set;
 #                          testnet-yb-slow's set only with its height), mainnet's height and set
 #                          both or neither (unset unless the owner sets them), and R8: the
-#                          shadow-fork split height H_S is set.
-#   final  (6.22.N)        R1-R8: mainnet's height and set, R3-R6, R7 per testnet profile, R8.
+#                          shadow-fork split height H_S is set; R9: testnet-yb-fast's YDF mandate
+#                          end is set and is not the provisional 600,000.
+#   final  (6.22.N)        R1-R9: mainnet's height and set, R3-R6, R7 per testnet profile, R8, R9.
 # MIN_PEER_PROTO_VERSION must stay at or below the live floor (R5).
 #
 # Usage: qa/yellowback-release-heights.sh [--warn] [--root DIR] [--other-json FILE]
@@ -91,13 +95,13 @@ if [ -n "$other" ] && [ ! -f "$other" ]; then
 fi
 
 set +e
-python3 - "$json" "$other" "$warn" "$where" "$script_dir" "$stage" <<'PY'
+python3 - "$json" "$other" "$warn" "$where" "$script_dir" "$stage" "$relver" "$root" <<'PY'
 import importlib.util
 import json
 import os
 import sys
 
-mine_path, other_path, warn, where, script_dir, stage = sys.argv[1:7]
+mine_path, other_path, warn, where, script_dir, stage, relver, root = sys.argv[1:9]
 spec = importlib.util.spec_from_file_location(
     "yellowback_vault_params", os.path.join(script_dir, "yellowback-vault-params.py"))
 vp = importlib.util.module_from_spec(spec)
@@ -121,11 +125,12 @@ print("mainnet Yellowback: UPGRADE_VAULT height %s, pqFalconHeight %s, nVaultMin
 yb = mine["yellowback_params"]
 for profile, key in (("fast", "testfast_attestor_set_id"), ("slow", "test_attestor_set_id"), ("legacy", None)):
     net = mine["test"][profile]
-    print("testnet-%s: UPGRADE_VAULT height %s, nVaultMinSetMaturity %s, attestorSetId %s" % (
+    print("testnet-%s: UPGRADE_VAULT height %s, nVaultMinSetMaturity %s, attestorSetId %s, YDF mandate end %s" % (
         "legacy" if profile == "legacy" else "yb-" + profile,
         show(net.get("vault_activation_height")),
         show(net.get("vault_min_set_maturity")),
         "n/a" if key is None else show(yb.get(key)),
+        show(net.get("ydf_mandate_end_height")),
     ))
 print("protocol: PROTOCOL_VERSION %s, UPGRADE_VAULT.nProtocolVersion %s, MIN_PEER_PROTO_VERSION %s" % (
     show(mine["version"].get("PROTOCOL_VERSION")),
@@ -134,10 +139,21 @@ print("protocol: PROTOCOL_VERSION %s, UPGRADE_VAULT.nProtocolVersion %s, MIN_PEE
 ))
 print("release stage: %s" % stage)
 
-problems = list(vp.release_problems(mine, stage))
+problems = list(vp.release_problems(mine, stage, relver or None))
 maturity = main.get("vault_min_set_maturity")
 if not isinstance(maturity, int) or isinstance(maturity, bool) or maturity <= 0:
     problems.append("the mainnet nVaultMinSetMaturity is unset")
+
+# R10: a tag's release notes exist and hold no placeholder (where R9 binds; needs the version).
+if relver and vp.r9_applies(stage, relver):
+    def read_notes(path):
+        with open(os.path.join(root, path), encoding="utf-8") as fh:
+            return fh.read()
+    notes_where = vp.release_notes(read_notes, relver)[0]
+    notes_bad = vp.notes_problems(read_notes, relver)
+    if not notes_bad:
+        print("release notes: %s" % notes_where)
+    problems.extend(notes_bad)
 
 if other_path:
     with open(other_path, encoding="utf-8") as fh:

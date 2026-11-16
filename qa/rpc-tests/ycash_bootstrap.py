@@ -7,7 +7,7 @@
 ycash-bootstrap against a real node (testnet plan §4.4), the same on both node lines.
 
 Node 0 mines a regtest chain; `ycash-bootstrap --pack` bundles heights 0..30 in the ycash-prefix/1
-layout. A copy with one chunk changed by a byte is refused before any node starts. The real
+layout. A copy with one chunk changed by a byte, or one byte longer, is refused before any node starts. The real
 bundle is restored into node 1's empty datadir (an isolated ycashd imports it with -loadblock and
 the hashes are checked over RPC); node 1 then starts at block 30 with node 0's hash, a second
 restore into the same datadir is refused, and node 1 follows node 0 once connected.
@@ -64,15 +64,25 @@ class YcashBootstrapTest(BitcoinTestFramework):
         assert_equal(manifest["format"], "ycash-prefix/1")
         assert_equal(manifest["hashes"][str(LAST)], n0.getblockhash(LAST))
 
-        # A changed chunk is refused before any node starts.
+        # A chunk with one byte changed in place (same size) fails its sha256; one with a byte added
+        # is longer than the manifest names and is refused while it is fetched. Both before any node starts.
         bad = os.path.join(tmp, "bad")
         shutil.copytree(bundle, bad)
-        chunk = [n for n in os.listdir(bad) if n.endswith(".blocks.gz")][0]
-        with open(os.path.join(bad, chunk), "ab") as f:
-            f.write(b"\0")
+        chunk = os.path.join(bad, [n for n in os.listdir(bad) if n.endswith(".blocks.gz")][0])
+        with open(chunk, "r+b") as f:
+            f.seek(os.path.getsize(chunk) // 2)
+            byte = f.read(1)
+            f.seek(-1, os.SEEK_CUR)
+            f.write(bytes([byte[0] ^ 0xff]))
         refused = self.bootstrap("--datadir", os.path.join(tmp, "badnode"), "--source", bad)
         assert_equal(refused.returncode, 2)
         assert "sha256" in refused.stderr, refused.stderr
+        assert not os.path.exists(os.path.join(tmp, "badnode", "regtest"))
+        with open(chunk, "ab") as f:
+            f.write(b"\0")
+        refused = self.bootstrap("--datadir", os.path.join(tmp, "badnode"), "--source", bad)
+        assert_equal(refused.returncode, 2)
+        assert "is larger than" in refused.stderr, refused.stderr
         assert not os.path.exists(os.path.join(tmp, "badnode", "regtest"))
 
         # The bundle restored into node 1's empty datadir by a real import.

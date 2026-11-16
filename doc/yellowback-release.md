@@ -267,15 +267,16 @@ The rules (audit W3-P-1; testnet plan §5.1, T-8):
 | R6 | mainnet `pqFalconHeight` 0 |
 | R7 | per testnet profile, the height and that network's own attestor set both set or both unset; testnet-legacy never has a height |
 | R8 | the shadow forks (testnet-yb-slow, testnet-legacy): their split height H_S set, and branch IDs of their own after it, distinct from each other and from mainnet's, slow's Vault ID included |
-| R9 | testnet-yb-fast's development-fund mandate end (`TESTNET_FAST_YDF_MANDATE_END_HEIGHT`, beta3 item 5) set and not the provisional 600,000 the tree carries until the release-candidate cut, which sets it to the fast-testnet tip plus 400 blocks (B3-D4; `qa/yellowback-vault-params.py`) |
+| R9 | testnet-yb-fast's development-fund mandate end (`TESTNET_FAST_YDF_MANDATE_END_HEIGHT`, beta3 item 5) set and not the provisional 600,000 the tree carries until the release-candidate cut, which sets it to the fast-testnet tip plus 400 blocks (B3-D4; `qa/yellowback-vault-params.py`). Binds every tag from 6.22.0-beta3 on, betas included: a beta is what the fast testnet runs, and one that kept 600,000 would never end the mandate there. The 6.22.0-beta1 and -beta2 tags predate the rule and stay valid |
+| R10 | the release notes the tag publishes (`doc/release-notes/release-notes-<version>.md`; on ycash-dd, the `Changes in <version> (ycash-dd tag …)` section of `doc/release-notes.md`) exist and hold none of the cut's placeholders (`set at the release candidate`, `<HEIGHT`, `<YEW COMMIT`, `<H_END>`, `TO CONFIRM`, `placeholder`, `TBD`): the release job publishes them as they are (`qa/yellowback-vault-params.py notes`). Binds wherever R9 does, given the version |
 
 Which rules a tag needs depends on the stage its version names:
 
 | Tag | Required | Not required |
 |---|---|---|
-| `v6.22.N-betaM` | parity with ycash-dd, the mainnet set maturity, the 6.22 line; testnet-legacy without a height; R8's branch IDs | heights (H_S included), sets, protocol version |
-| `v6.22.N-rcM` | the above; R3–R6; R7 for the testnet: testnet-yb-fast's height **and** set; testnet-yb-slow's set only with its height (a height alone is its pending activation, T-15); mainnet's height and set both or neither; R8 (H_S and the checkpoint at H_S set); R9 | R1 and R2: mainnet's height and set stay unset on an rc unless the Yellowback lead architect sets both |
-| `v6.22.N` (final) | R1–R9 | — |
+| `v6.22.N-betaM` | parity with ycash-dd, the mainnet set maturity, the 6.22 line; testnet-legacy without a height; R8's branch IDs; R9 and R10 from 6.22.0-beta3 on | heights (H_S included), sets, protocol version |
+| `v6.22.N-rcM` | the above; R3–R6; R7 for the testnet: testnet-yb-fast's height **and** set; testnet-yb-slow's set only with its height (a height alone is its pending activation, T-15); mainnet's height and set both or neither; R8 (H_S and the checkpoint at H_S set); R9; R10 | R1 and R2: mainnet's height and set stay unset on an rc unless the Yellowback lead architect sets both |
+| `v6.22.N` (final) | R1–R10 | — |
 
 `qa/yellowback-release-heights.sh` reads the stage from `--release-version` (or `--stage`); with
 neither it applies the final rules, the strictest.

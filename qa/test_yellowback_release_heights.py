@@ -117,10 +117,14 @@ public:
     return out
 
 
+NOTES_VERSIONS = ("6.22.0-beta1", "6.22.0-beta2", "6.22.0-beta3", "6.22.0-rc1", "6.22.0-rc2", "6.22.0-rc3",
+                  "6.22.0", "6.22.1", "6.22.1-beta1")
+
+
 def write_tree(root, main_height="3300000", main_extra="        consensus.pqFalconHeight = 0;\n",
                test_height=NO, reg_extra="        consensus.nVaultMinSetMaturity = 2;\n",
                att=ATT, params_h=PARAMS_H, slow_height=NO, fast_att=None, slow_att=None, proto=270200,
-               version_h=VERSION_H, split="3100000", fast_ydf="511752"):
+               version_h=VERSION_H, split="3100000", fast_ydf="511752", notes=True):
     chain = (klass("CMainParams", main_height, main_extra, proto)
              + testnet(test_height, proto, slow_height, split, fast_ydf)
              + klass("CRegTestParams", NO, reg_extra, proto))
@@ -132,6 +136,9 @@ def write_tree(root, main_height="3300000", main_extra="        consensus.pqFalc
         "src/consensus/upgrades.h": UPGRADES_H,
         "src/consensus/upgrades.cpp": UPGRADES_CPP,
     }
+    if notes:  # R10: every version a test tags has finished release notes
+        for version in NOTES_VERSIONS:
+            files["doc/release-notes/release-notes-%s.md" % version] = "ycashd v%s\n\nThe changes.\n" % version
     for rel, text in files.items():
         path = os.path.join(root, rel)
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -222,13 +229,77 @@ class ReleaseHeights(unittest.TestCase):
 
     def test_provisional_fast_ydf_mandate_end_by_stage(self):
         # beta3 item 5 (R9): an rc or final tag is refused while the fast profile's YDF mandate end is the
-        # provisional value; a beta ships with it.
+        # provisional value, and so is a beta from 6.22.0-beta3 on (the beta3 cut); the beta1 and beta2
+        # tags, which predate the fast profile's own value, still pass.
         root = self.rc_tree("rc-provisional-ydf", fast_ydf=str(vp_provisional()))
-        code, out = run(["--root", root, "--release-version", "6.22.0-rc1"])
+        for version in ("6.22.0-rc1", "6.22.0-beta3", "6.22.1-beta1"):
+            code, out = run(["--root", root, "--release-version", version])
+            self.assertEqual(code, 1, version + ": " + out)
+            self.assertIn("problem: R9: testnet-yb-fast's YDF mandate end", out)
+            self.assertIn("YDF mandate end %d" % vp_provisional(), out)
+        for version in ("6.22.0-beta1", "6.22.0-beta2"):
+            code, out = run(["--root", root, "--release-version", version])
+            self.assertEqual(code, 0, version + ": " + out)
+        code, out = run(["--root", root, "--stage", "beta"])
         self.assertEqual(code, 1, out)
-        self.assertIn("problem: R9: testnet-yb-fast's YDF mandate end", out)
+        warn, warned = run(["--warn", "--root", root, "--release-version", "6.22.0-beta3"])
+        self.assertEqual(warn, 0, warned)
+        self.assertIn("problem: R9", warned)
+        # The value set at the cut passes a beta3 tag.
+        root = self.rc_tree("rc-cut-ydf", fast_ydf="511752")
         code, out = run(["--root", root, "--release-version", "6.22.0-beta3"])
         self.assertEqual(code, 0, out)
+
+    def test_release_notes_r10(self):
+        # The beta3 cut: a tag R9 binds is refused while its release notes are missing or still hold a
+        # placeholder; the beta1 and beta2 tags, which predate the rule, pass without notes.
+        root = self.rc_tree("notes", fast_ydf="511752")
+        notes = os.path.join(root, "doc/release-notes/release-notes-6.22.0-beta3.md")
+        code, out = run(["--root", root, "--release-version", "6.22.0-beta3"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("release notes: doc/release-notes/release-notes-6.22.0-beta3.md", out)
+        for marker in ("**(set at the release candidate)**", "<HEIGHT, set at the cut>", "<YEW COMMIT>", "<H_END>",
+                       "TO CONFIRM", "placeholder", "TBD"):
+            with open(notes, "w", encoding="utf-8") as fh:
+                fh.write("ycashd v6.22.0-beta3\n\nThe mandate ends at %s.\n" % marker)
+            code, out = run(["--root", root, "--release-version", "6.22.0-beta3"])
+            self.assertEqual(code, 1, marker + ": " + out)
+            self.assertIn("problem: R10: doc/release-notes/release-notes-6.22.0-beta3.md line 3 still holds the placeholder", out)
+            self.assertIn("refusing to release", out)
+            warn, warned = run(["--warn", "--root", root, "--release-version", "6.22.0-beta3"])
+            self.assertEqual(warn, 0, warned)
+            self.assertIn("problem: R10", warned)
+        for version in ("6.22.0-beta3", "6.22.0-rc1", "6.22.0"):
+            os.remove(os.path.join(root, "doc/release-notes/release-notes-%s.md" % version))
+            code, out = run(["--root", root, "--release-version", version])
+            self.assertEqual(code, 1, version + ": " + out)
+            self.assertIn("problem: R10: no release notes for %s" % version, out)
+        # ycash-dd's layout: the tag's section of doc/release-notes.md, up to the next release's heading.
+        running = os.path.join(root, "doc/release-notes.md")
+        head = "Changes in 6.22.0-beta3 (ycash-dd tag `vault-params/v6.22.0-beta3`)"
+        older = "Changes in 6.22.0-beta2 (ycash-dd tag `vault-params/v6.22.0-beta2`)"
+        with open(running, "w", encoding="utf-8") as fh:
+            fh.write("Notable changes\n===============\n\n%s\n%s\n\nAt 512,300.\n\n%s\n%s\n\n(TBD in beta2's past)\n"
+                     % (head, "-" * len(head), older, "-" * len(older)))
+        code, out = run(["--root", root, "--release-version", "6.22.0-beta3"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("release notes: doc/release-notes.md (section", out)
+        with open(running, encoding="utf-8") as fh:
+            text = fh.read()
+        with open(running, "w", encoding="utf-8") as fh:
+            fh.write(text.replace("At 512,300.", "At **(set at the release candidate)**."))
+        code, out = run(["--root", root, "--release-version", "6.22.0-beta3"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("problem: R10: doc/release-notes.md (section %r) line 7 still holds" % head, out)
+        # Before the rule: beta1 and beta2 need no notes; without a version nothing is looked up.
+        empty = os.path.join(self.tmp, "no-notes")
+        write_tree(empty, main_height=NO, att="0" * 64, notes=False)
+        for version in ("6.22.0-beta1", "6.22.0-beta2"):
+            code, out = run(["--root", empty, "--release-version", version])
+            self.assertEqual(code, 0, version + ": " + out)
+            self.assertNotIn("R10", out)
+        code, out = run(["--root", empty, "--stage", "beta"])
+        self.assertNotIn("R10", out)
 
     def test_unset_attestor_set_is_still_refused(self):
         root = os.path.join(self.tmp, "noset")

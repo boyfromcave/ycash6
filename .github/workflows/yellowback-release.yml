@@ -29,8 +29,10 @@
 #                               line's (6.21.x harden, 6.22.x upgrade; O-7), and the release rules of
 #                               the stage the version names must hold (qa/yellowback-release-heights.sh
 #                               --release-version; testnet plan §5.1: a beta needs no release
-#                               parameters, an rc the testnet's, the shadow fork's split height (R8)
-#                               and the protocol version, a final release R1-R8; hardening F-5,
+#                               parameters but, from 6.22.0-beta3 on, the fast testnet's YDF mandate
+#                               end (R9), an rc the testnet's, the shadow fork's split height (R8),
+#                               R9 and the protocol version, a final release R1-R9; and wherever R9
+#                               binds, R10: the notes the release publishes exist, no placeholder; hardening F-5,
 #                               audit W3-P-1). A tag also needs the
 #                               ycash-dd pairing tag vault-params/v<version>, with the same Vault
 #                               fields on every network. Nothing here creates a tag: a tag is pushed by

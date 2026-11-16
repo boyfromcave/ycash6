@@ -95,6 +95,12 @@ HEADER_FIXED = 140           # version..nonce; then the compactsize-prefixed Equ
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 READ_SIZE = 1 << 20
 GIB = 1 << 30
+# The cap on every small file read before the parts (SHA256SUMS, its signature, manifest.json, latest/'s
+# manifest.json, the statements, treestate.json): they arrive before anything is verified, so a hostile
+# mirror must not be able to fill the disk with them. The largest a valid bundle can need is a
+# ycash-state/3 manifest of MAX_PARTS parts (about 0.2 MB) and its SHA256SUMS (about 0.12 MB); the
+# published ones are under 10 KB. 1 MiB leaves five times that room.
+METADATA_MAX_BYTES = 1 << 20
 NAME_RE = r"[A-Za-z0-9][A-Za-z0-9._-]*"   # a file name from a bundle, before it becomes a path or a URL
 DEFAULT_KEY = os.path.join(HERE, "keys", "ycash-release.pub")
 
@@ -337,8 +343,10 @@ class Source:
             return Source(os.path.join(os.path.dirname(os.path.abspath(self.local).rstrip("/")), name))
         return Source(urllib.parse.urljoin(self.base, "../%s/" % name))
 
-    def fetch(self, name, dest, optional=False):
-        """Copy `name` to dest; False when optional and absent (self.absent says how)."""
+    def fetch(self, name, dest, optional=False, limit=METADATA_MAX_BYTES):
+        """Copy `name` to dest; False when optional and absent (self.absent says how). At most `limit`
+        bytes (None: no limit, for a prefix chunk, whose size the checked manifest names): a longer
+        file is refused, and no more than limit + 1 of its bytes are ever written."""
         if not re.fullmatch(NAME_RE, name):
             raise BundleError("refusing the file name %r" % name)
         if self.local is not None:
@@ -348,11 +356,12 @@ class Source:
                     self.absent = "not in %s" % self.local
                     return False
                 raise BundleError("%s is missing from %s" % (name, self.local))
-            shutil.copyfile(src, dest + ".part")
+            with open(src, "rb") as reply, open(dest + ".part", "wb") as out:
+                copy_limited(reply, out, limit, os.path.join(self.local, name))
         else:
             try:
                 with urllib.request.urlopen(self.base + name, timeout=120) as reply, open(dest + ".part", "wb") as out:
-                    shutil.copyfileobj(reply, out, READ_SIZE)
+                    copy_limited(reply, out, limit, self.base + name)
             except urllib.error.HTTPError as e:
                 # A bucket that is not listable (S3, CloudFront without s3:ListBucket) answers 403, not
                 # 404, for an object that is not there: both mean absent, for an optional file only.
@@ -365,6 +374,20 @@ class Source:
                 raise BundleError("%s%s: %s" % (self.base, name, e))
         os.replace(dest + ".part", dest)
         return True
+
+
+def copy_limited(reply, out, limit, what):
+    """Copy reply to out, refusing (BundleError) once more than `limit` bytes arrive (None: no limit)."""
+    total = 0
+    while True:
+        b = reply.read(READ_SIZE if limit is None else min(READ_SIZE, limit + 1 - total))
+        if not b:
+            return total
+        total += len(b)
+        if limit is not None and total > limit:
+            raise BundleError("%s is larger than %d bytes, the most this file may hold: refused before it is verified"
+                              % (what, limit))
+        out.write(b)
 
 
 def read_key(path):
@@ -467,7 +490,7 @@ def verify_bundle(source, profile, work, args):
         path = os.path.join(download, c["file"])
         if not (os.path.isfile(path) and sha256_file(path) == (c["gz_sha256"], c["gz_bytes"])):
             log("fetching %s (%d bytes)" % (c["file"], c["gz_bytes"]))
-            source.fetch(c["file"], path)
+            source.fetch(c["file"], path, limit=c["gz_bytes"])   # a chunk: no more than the checked manifest names
         got = sha256_file(path)
         if got != (c["gz_sha256"], c["gz_bytes"]):
             raise BundleError("%s: %d bytes sha256 %s, expected %d bytes %s" % (c["file"], got[1], got[0], c["gz_bytes"], c["gz_sha256"]))
@@ -672,6 +695,12 @@ STATE_FORMAT_V3 = "ycash-state/3"
 STATE_FORMATS = (STATE_FORMAT, STATE_FORMAT_V2, STATE_FORMAT_V3)
 STATEMENT_FIELDS = ("network", "height", "blockhash", "chainwork", "utxo_hash_serialized", "vault_statehash", "yed_statehash")
 V2_STATEMENT_FIELDS = STATEMENT_FIELDS + ("finalsaplingroot", "chainsupply_zat")
+# Every field a statement of each format must carry: a statement lacking one is refused, so no part of
+# the state (the UTXO set above all) goes unchecked. A value may be null where FORMAT.md says so
+# (vault_statehash, yed_statehash, chainsupply_zat); the key is still required. Every bundle published
+# so far carries them all: v1 from the testnet chart's default statementFields, v2/v3 from
+# bundles/state/mainnet/snapshot.py (ycash-infra).
+STATEMENT_FIELDS_BY_FORMAT = {STATE_FORMAT: STATEMENT_FIELDS, STATE_FORMAT_V2: V2_STATEMENT_FIELDS, STATE_FORMAT_V3: V2_STATEMENT_FIELDS}
 STATE_TOP_DIRS = ("blocks", "chainstate", "vaults", "yellowback")
 STATE_LEFT_OUT = re.compile(r"(^|/)(LOCK|LOG|LOG\.old)$")
 MAX_PARTS = 1000
@@ -1139,7 +1168,7 @@ def restore_state(args, profile, netdir):
         m, parts, largest = check_state_manifest(f.read(), profile, sums)
     if latest is not None and m["height"] != latest:
         raise BundleError("latest/ names height %d, the manifest at %s says %d" % (latest, source, m["height"]))
-    fields = V2_STATEMENT_FIELDS if m["format"] != STATE_FORMAT else STATEMENT_FIELDS
+    fields = STATEMENT_FIELDS_BY_FORMAT[m["format"]]
     first = None
     for v in m["verifiers"]:
         name = "statement-%s.json" % v
@@ -1153,8 +1182,14 @@ def restore_state(args, profile, netdir):
             statement = json.loads(raw)
         except ValueError as e:
             raise BundleError("%s is not JSON: %s" % (name, e))
-        if not isinstance(statement, dict) or raw != canonical(statement) or not {"network", "height", "blockhash"} <= set(statement) <= set(fields):
+        if not isinstance(statement, dict) or raw != canonical(statement):
             raise BundleError("%s is not a canonical statement" % name)
+        missing, extra = sorted(set(fields) - set(statement)), sorted(set(statement) - set(fields))
+        if missing:
+            raise BundleError("%s lacks %s: a %s statement must carry every field the format defines (%s), "
+                              "or that part of the state would go unchecked" % (name, ", ".join(missing), m["format"], ", ".join(fields)))
+        if extra:
+            raise BundleError("%s has %s, which %s does not define" % (name, ", ".join(extra), m["format"]))
         if any(m.get(k) != val for k, val in statement.items()):
             raise BundleError("%s disagrees with the manifest" % name)
         if first is not None and raw != first:
@@ -1262,7 +1297,10 @@ def check_state(args, profile, m, statement, conf):
         mine = state_statement(node, height, statement)
         node.check_offline()
         mine["network"] = m["network"]
-        bad = {k: (statement[k], mine.get(k)) for k in statement if mine.get(k) != statement[k]}
+        fields = STATEMENT_FIELDS_BY_FORMAT[m["format"]]
+        if sorted(statement) != sorted(fields):                   # restore_state refused it already
+            raise BundleError("the statement's fields %s are not %s's %s" % (sorted(statement), m["format"], sorted(fields)))
+        bad = {k: (statement[k], mine.get(k)) for k in fields if k not in mine or mine[k] != statement[k]}
         if invalidated:
             node.cli("reconsiderblock", invalidated)
         if bad:

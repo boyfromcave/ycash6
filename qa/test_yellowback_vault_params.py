@@ -422,9 +422,21 @@ class VaultParams(unittest.TestCase):
         with self.assertRaises(ValueError):
             vp.release_problems(final, "gamma")
         # R9 (beta3 item 5): fast's YDF mandate end must be set, and not the provisional value, on an rc
-        # or a final tag; a beta may carry the provisional value.
+        # or a final tag, and on a beta from 6.22.0-beta3 on (the beta3 cut); the beta1 and beta2 tags
+        # stay valid, and a beta named by no version gets the strictest reading.
         provisional = vp.PROVISIONAL_FAST_YDF_MANDATE_END_HEIGHT
-        self.assertEqual(rules(doc(fast_ydf=provisional), "beta"), [])
+        for version in ("6.22.0-beta1", "6.22.0-beta2"):
+            self.assertEqual(sorted(p.split(":")[0] for p in vp.release_problems(doc(fast_ydf=provisional), "beta", version)), [])
+        for version in ("6.22.0-beta3", "6.22.0-beta10", "6.22.1-beta1", "6.23.0-beta1", None, "6.22.0"):
+            self.assertEqual(sorted(p.split(":")[0] for p in vp.release_problems(doc(fast_ydf=provisional), "beta", version)),
+                             ["R9"], version)
+            self.assertEqual(sorted(p.split(":")[0] for p in vp.release_problems(doc(fast_ydf=None), "beta", version)),
+                             ["R9"], version)
+            self.assertEqual(vp.release_problems(doc(fast_ydf=511752), "beta", version), [], version)
+        self.assertFalse(vp.r9_applies("beta", "6.22.0-beta2"))
+        self.assertTrue(vp.r9_applies("beta", "6.22.0-beta3"))
+        self.assertTrue(vp.r9_applies("rc", "6.22.0-rc1"))
+        self.assertEqual(rules(doc(fast_ydf=provisional), "beta"), ["R9"])
         self.assertEqual(rules(doc(fast_ydf=provisional), "rc"), ["R9"])
         self.assertIn("R9", rules(doc(fast_ydf=provisional, main_height=3300000, main_att=att), "final"))
         self.assertEqual(rules(doc(fast_ydf=None), "rc"), ["R9"])
@@ -452,6 +464,37 @@ class VaultParams(unittest.TestCase):
         # The constant named but not defined: fail closed.
         with self.assertRaises(vp.ParseError):
             vp.extract(reader(tree(own).replace("static const int TESTNET_FAST_YDF_MANDATE_END_HEIGHT = 600000;\n", "")))
+
+    def test_release_notes_r10(self):
+        """R10 (the beta3 cut): the notes a tag publishes exist and hold no placeholder."""
+        def files(d):
+            def read(path):
+                if path not in d:
+                    raise OSError(path)
+                return d[path]
+            return read
+        v = "6.22.0-beta3"
+        own = "doc/release-notes/release-notes-%s.md" % v
+        self.assertEqual(vp.notes_problems(files({own: "ycashd v%s\n\nThe end is 512,300.\n" % v}), v), [])
+        for marker in vp.NOTES_PLACEHOLDERS:
+            got = vp.notes_problems(files({own: "title\n\nline %s here\n" % marker}), v)
+            self.assertEqual(got, ["R10: %s line 3 still holds the placeholder %r" % (own, marker)])
+        self.assertEqual(vp.notes_problems(files({own: " \n"}), v), ["R10: the release notes %s are empty" % own])
+        self.assertTrue(vp.notes_problems(files({}), v)[0].startswith("R10: no release notes for 6.22.0-beta3"))
+        # ycash-dd: the tag's section of the running notes, up to the next `Changes in` heading only.
+        head = vp.NOTES_SECTION % (v, v)
+        older = vp.NOTES_SECTION % ("6.22.0-beta2", "6.22.0-beta2")
+        running = "x\n\n%s\n%s\n\nok\n\n%s\n%s\n\nTBD long ago\n" % (head, "-" * len(head), older, "-" * len(older))
+        where, text, first = vp.release_notes(files({"doc/release-notes.md": running}), v)
+        self.assertEqual((where, first), ("doc/release-notes.md (section %r)" % head, 3))
+        self.assertNotIn("TBD", text)
+        self.assertEqual(vp.notes_problems(files({"doc/release-notes.md": running}), v), [])
+        bad = running.replace("\nok\n", "\n<H_END>\n")
+        self.assertEqual(vp.notes_problems(files({"doc/release-notes.md": bad}), v),
+                         ["R10: doc/release-notes.md (section %r) line 6 still holds the placeholder '<H_END>'" % head])
+        # A heading without its underline is not the section; the file wins over the section.
+        self.assertTrue(vp.notes_problems(files({"doc/release-notes.md": head + "\nok\n"}), v)[0].startswith("R10: no release"))
+        self.assertEqual(vp.release_notes(files({own: "a\n", "doc/release-notes.md": bad}), v)[0], own)
 
 
 if __name__ == "__main__":

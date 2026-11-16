@@ -143,7 +143,9 @@ of one part, so every format takes the same path.
    and re-based to `../<height>/`; the manifest found there must name the same height. `latest/`
    holds only a manifest with a short cache lifetime, and is never trusted beyond that.
 2. **Anchors.** `SHA256SUMS` (every line `<sha256>  <name>`, sorted bytewise) and its signature as
-   above, always required on mainnet (`--allow-unsigned` is refused there) and over http(s); no pin (state bundles roll), so the anchors are the
+   above (it, `manifest.json`, `latest/manifest.json`, the statements and `treestate.json` are read
+   before anything is verified, so each is refused beyond 1 MiB, `METADATA_MAX_BYTES`: the largest a
+   valid bundle can need, a v3 manifest of 1,000 parts, is about 0.2 MB), always required on mainnet (`--allow-unsigned` is refused there) and over http(s); no pin (state bundles roll), so the anchors are the
    signature, the statements, the compiled pins and the node's own check (§4.2). `manifest.json`:
    canonical; `format` one of `ycash-state/1`, `/2`, `/3`; `network` the profile's datadir name
    (`main` on mainnet), `profile` its `-testnetprofile`, `line` `ycash6`, H at or above the fork,
@@ -152,8 +154,12 @@ of one part, so every format takes the same path.
    names exactly the manifest, the parts or tarball, the statements and `treestate.json`. v1 needs
    at least two verifiers, v2/v3 `statement-ycash6.json`. A compiled checkpoint at H must match;
    v2/v3 `pins` must be this release's (on mainnet: every compiled pin at or below H).
-3. Every statement is canonical, byte-identical to the others and equal to the manifest's fields;
-   `treestate.json` matches its line.
+3. Every statement is canonical, byte-identical to the others and equal to the manifest's fields,
+   and carries exactly the fields its format defines (v1: `network`, `height`, `blockhash`,
+   `chainwork`, `utxo_hash_serialized`, `vault_statehash`, `yed_statehash`; v2/v3 also
+   `finalsaplingroot` and `chainsupply_zat`; a value may be `null` where the format says so, the key
+   may not be missing): a statement lacking one is refused, since that part of the state would go
+   unchecked. `treestate.json` matches its line.
 4. **Disk.** Refused up front, with the numbers, unless the datadir's file system has the unpacked
    datadir (the manifest's `unpacked_bytes`, which v3 always has; without it 1.5 times the
    tarball's size, since the published 3,100,949 bundle unpacks to 56.1 GB from 41.8 GB) plus one

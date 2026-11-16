@@ -38,6 +38,7 @@ from test_framework.util import (
     hex_str_to_bytes,
 )
 from test_framework.yellowback_util import (
+    YELLOWBACK_RPC_VERSION,
     COIN,
     SIGNING_BRANCH_ID,
     _low_s,
@@ -187,9 +188,10 @@ class YellowbackPQTest(ArmedModeMixin, YellowbackTestFramework):
         self.mine(POOLS[0])
 
 # Rule: MINT-1 MINT-3
-        print('rpcversion 10 (7 added params.pq and the v4 MINT; 8 the fee structure; 9 the PQ versions per scheme, D-9; 10 the beta3 additions, B3-D5)')
+        print('rpcversion %d (7 added params.pq and the v4 MINT; 8 the fee structure; 9 the PQ versions per scheme, D-9; '
+              '10 the beta3 additions, B3-D5)' % YELLOWBACK_RPC_VERSION)
         info = user.yed_getinfo()
-        assert_equal(info['rpcversion'], 10)   # 10: the beta3 additions (B3-D5); 9: D-9, the PQ address versions per scheme
+        assert_equal(info['rpcversion'], YELLOWBACK_RPC_VERSION)   # 10: the beta3 additions (B3-D5); 9: D-9, the PQ address versions per scheme
         pq = info['params']['pq']
         assert_equal((pq['schemes'], pq['falconActive'], pq['falconHeight']), ([1], False, FALCON_HEIGHT))
         assert_greater_than(pq['feeRateZatPerKB'], 0)
