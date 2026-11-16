@@ -84,6 +84,14 @@ post-quantum input, snapshot restores, and what `rpcversion` 10 covers; then the
   the block has no room for (`coinbase-does-not-fit: …`).
 - **Not a consensus change**, and `getblocktemplate` and `submitblock` are untouched: the node
   keeps nothing between calls. The same call, answers and error strings as on ycash-dd.
+- **A miner paid at a post-quantum address shields its reward with `z_sendmany`.** Where coinbase
+  must be shielded (mainnet, the testnets) no wallet call could spend such a reward. `z_sendmany`
+  from the address now selects its mature coinbase (101 confirmations) when every recipient is
+  shielded and the address's other coins do not cover the send. Such a send makes no change: the
+  amounts must add up to the selected coins less the fee, and a send that would leave change is
+  refused with the exact amount to send in the message. With a transparent recipient the coinbase
+  is never selected and the refusal says so (`doc/yellowback-rpc.md`, "A post-quantum miner shields
+  its coinbase"). A wallet change only; the same rule, strings and test as on ycash-dd.
 
 ### Chain value pools by address type (`transparentPools`)
 

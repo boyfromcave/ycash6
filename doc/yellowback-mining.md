@@ -351,6 +351,11 @@ getcoinbasetemplatefor "address" {"previousblockhash": "<hex>", "txids": ["<hex>
   invalid (`bad-cb-amount`); adding one leaves its fee unclaimed.
 - The node keeps nothing between calls, and `getblocktemplate` and `submitblock` are unchanged.
   The call needs neither a wallet nor `-mineraddress`.
+- A reward paid to a transparent address (ECC or post-quantum) is spendable after 101 confirmations and, on
+  mainnet and the testnets, can then only be sent to shielded addresses with no change: an ECC
+  miner uses `z_shieldcoinbase`, a post-quantum miner `z_sendmany` from its address to a Sapling
+  address (`doc/yellowback-rpc.md`, "A post-quantum miner shields its coinbase"). A reward paid to
+  a Sapling address needs neither.
 - The call checks that each named transaction is in the mempool, not that the set is complete or in
   order: a child named without its parent is answered (with the child's fee), and the block of that
   set is invalid for the missing input. Name `getblocktemplate`'s list verbatim.
