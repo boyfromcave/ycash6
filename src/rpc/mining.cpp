@@ -973,8 +973,8 @@ UniValue getblocksubsidy(const UniValue& params, bool fHelp)
         // Post-Ycash-fork, pre-mandate-end: 5% YDF.
         nFoundersReward = nBlockSubsidy / 20;
     } else {
-        // Post-mandate: optional YDF capped at MAX_YDF_FEE_PERCENTAGE,
-        // selectable via the miner's -ydf=<n> setting. The RPC reports the
+        // Post-mandate: optional YDF, the miner's -ydf=<n> percent of the
+        // subsidy (0..100, default 0). The RPC reports the
         // configured value so external callers see what this node would
         // include in a coinbase template.
         unsigned int nYdfFeePercentage =
