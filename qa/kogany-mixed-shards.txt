@@ -51,6 +51,7 @@ node     ycash_ydf_default             report  W9
 node     ycash_ydf_mandate_end         report  W9
 node     getcoinbasetemplatefor        report  W9
 node     wallet_reindex_chainstate     report  W9
+node     wallet_pq_coinbase_spend      report  W9
 node     testnet_ceremony              gate    W9
 node     lightwalletd_only             report  W9
 node     yellowback_lightwalletd       report  W9
@@ -153,6 +154,7 @@ sidecar  ycash_ydf_default             report  W9     # node
 sidecar  ycash_ydf_mandate_end         report  W9     # node
 sidecar  getcoinbasetemplatefor        report  W9     # node
 sidecar  wallet_reindex_chainstate     report  W9     # node
+sidecar  wallet_pq_coinbase_spend      report  W9     # node
 sidecar  vault_upgrade                 report  W9   mirror  # vault
 sidecar  vault_primitive               report  W9   mirror  # vault
 sidecar  vault_slashing                report  W9   mirror  # vault
@@ -234,6 +236,7 @@ pair     ycash_ydf_default             report  W9     # node
 pair     ycash_ydf_mandate_end         report  W9     # node
 pair     getcoinbasetemplatefor        report  W9     # node
 pair     wallet_reindex_chainstate     report  W9     # node
+pair     wallet_pq_coinbase_spend      report  W9     # node
 pair     vault_upgrade                 report  W9     # vault
 pair     vault_primitive               report  W9     # vault
 pair     vault_slashing                report  W9     # vault

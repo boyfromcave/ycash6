@@ -106,6 +106,8 @@ BASE_SCRIPTS= [
     'getcoinbasetemplatefor.py',
     # -reindex-chainstate on a node with a wallet: no assert in ThreadStartWalletNotifier, balances kept.
     'wallet_reindex_chainstate.py',
+    # beta3: a post-quantum miner shields its coinbase with z_sendmany (mature only, shielded recipients, no change).
+    'wallet_pq_coinbase_spend.py',
     # ycash-bootstrap against a real node (testnet plan §4.4): a regtest bundle packed, a changed chunk
     # refused, the bundle restored by a real import. Byte-identical on both lines.
     'ycash_bootstrap.py',
