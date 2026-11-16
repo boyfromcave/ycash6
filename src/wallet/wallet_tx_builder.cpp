@@ -616,7 +616,7 @@ WalletTxBuilder::PreparePQTransaction(
         return tl::make_unexpected(ExcessOrchardActionsError(ActionSide::Output, orchardOutputs, this->maxOrchardActions));
     }
 
-    // The source's own coins (never coinbase: a post-quantum address is never mined to).
+    // The source's own coins.
     std::vector<COutput> coins;
     wallet.AvailableCoins(
             coins,
@@ -624,13 +624,22 @@ WalletTxBuilder::PreparePQTransaction(
             false,              // fOnlyConfirmed
             nullptr,            // coinControl
             true,               // fIncludeZeroValue
-            false,              // fIncludeCoinBase
+            true,               // fIncludeCoinBase (mature only; kept apart below)
             true,               // fOnlySpendable
             minDepth,           // nMinDepth
             {CTxDestination(source)});
     coins.erase(std::remove_if(coins.begin(), coins.end(), [](const COutput& o) {
         return !IsPQKeyScript(o.tx->vout[o.i].scriptPubKey);
     }), coins.end());
+    // Beta3: a pool may pay a block reward to a post-quantum address (getcoinbasetemplatefor). Its mature coinbase is
+    // spent only when every recipient is shielded and only with no change (the rule a transparent coinbase is under
+    // where coinbase must be shielded, applied on every network as z_sendmany applies it to an ECC address), and only
+    // when the address's other coins do not cover the send. It never enters a send with a transparent recipient.
+    const bool shieldedOnly = pqPayments.empty() && std::none_of(
+        resolvedPayments.begin(), resolvedPayments.end(), [](const ResolvedPayment& r) {
+            return std::holds_alternative<CKeyID>(r.address) || std::holds_alternative<CScriptID>(r.address);
+        });
+    const CAmount immatureCoinbase = PQImmatureCoinbase(wallet, GetScriptForDestination(source));
     // Defence in depth (the coin locks already keep every YED output out of AvailableCoins): a coin the Yellowback
     // index knows as a token or vault, an unconfirmed output a Yellowback payload assigns YED, or a carrier, is never
     // spent as plain YEC; the send goes on with the other coins and is refused, naming them, only if it needs them.
@@ -639,14 +648,33 @@ WalletTxBuilder::PreparePQTransaction(
     // the Yellowback drop: at an attested price a Falcon token is such a coin, and its refusal must name it.
     const CAmount marginal = PQInputMarginalFee(source.scheme);
     coins.erase(std::remove_if(coins.begin(), coins.end(), [&](const COutput& o) { return o.Value() <= marginal; }), coins.end());
-    if (coins.empty()) {
-        if (!yedRefusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);
-        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient transparent funds, no UTXOs found for taddr from address.");
+    std::vector<COutput> coinbaseCoins;     // mature coinbase of this address, not yet among the candidates
+    CAmount coinbaseValue = 0;
+    for (const COutput& c : coins) {
+        if (c.fIsCoinbase) {
+            coinbaseCoins.push_back(c);
+            coinbaseValue += c.Value();
+        }
     }
+    coins.erase(std::remove_if(coins.begin(), coins.end(), [](const COutput& o) { return o.fIsCoinbase; }), coins.end());
     // Largest first: each post-quantum input costs its full signature in size and fee.
-    std::sort(coins.begin(), coins.end(), [](const COutput& i, const COutput& j) -> bool {
+    const auto largestFirst = [](const COutput& i, const COutput& j) -> bool {
         return i.Value() > j.Value();
-    });
+    };
+    // The ordinary coins fall short and every recipient is shielded: the mature coinbase joins the candidates.
+    const auto addCoinbase = [&]() -> bool {
+        if (!shieldedOnly || coinbaseCoins.empty()) return false;
+        coins.insert(coins.end(), coinbaseCoins.begin(), coinbaseCoins.end());
+        coinbaseCoins.clear();
+        std::sort(coins.begin(), coins.end(), largestFirst);
+        return true;
+    };
+    if (coins.empty() && !addCoinbase()) {
+        if (!yedRefusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);
+        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, PQInsufficientFunds(
+            "Insufficient transparent funds, no UTXOs found for taddr from address.", coinbaseValue, immatureCoinbase));
+    }
+    std::sort(coins.begin(), coins.end(), largestFirst);
 
     std::vector<CTxOut> tOuts;
     size_t saplingOutputs = 0;
@@ -683,11 +711,20 @@ WalletTxBuilder::PreparePQTransaction(
             sum += c.Value();
         }
         if (sum < target) {
+            if (addCoinbase()) {
+                // Start again with the coinbase among the candidates (the fee is settled anew).
+                curFee = fee.value_or(LEGACY_DEFAULT_FEE);
+                round = -1;
+                continue;
+            }
             if (!yedRefusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);
-            throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
+            throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, PQInsufficientFunds(
                                strprintf("Insufficient transparent funds, have %s, need %s",
-                                         FormatMoney(sum), FormatMoney(target)));
+                                         FormatMoney(sum), FormatMoney(target)),
+                               coinbaseCoins.empty() ? 0 : coinbaseValue, immatureCoinbase));
         }
+        // A send that spends coinbase makes no change output: what is left over is refused below.
+        const bool spendsCoinbase = std::any_of(selected.begin(), selected.end(), [](const COutput& o) { return o.fIsCoinbase; });
         change = sum - target;
         // Change below the post-quantum dust threshold (priced on the real spend size) goes to the fee, as
         // sendtoaddress does: no dust output is made.
@@ -707,7 +744,7 @@ WalletTxBuilder::PreparePQTransaction(
         }
         std::vector<CTxOut> outs = tOuts;
         std::vector<PQPayment> pqOuts = pqPayments;
-        if (change > 0) {
+        if (change > 0 && !spendsCoinbase) {
             outs.emplace_back(change, changeScript);
             pqOuts.push_back({source, change, true});
         }
@@ -719,6 +756,9 @@ WalletTxBuilder::PreparePQTransaction(
             CalcZIP317Fee(wallet, selectedInputs, resolvedPayments, std::nullopt, consensusBranchId, pqOuts);
         const CAmount needed = PQBuilderFee(base, shape);
         if (needed <= curFee) {
+            if (spendsCoinbase && change > 0) {
+                throw JSONRPCError(RPC_WALLET_ERROR, PQCoinbaseChangeRefusal(change, sum, curFee));
+            }
             curFee += dustToFee;
             break;
         }

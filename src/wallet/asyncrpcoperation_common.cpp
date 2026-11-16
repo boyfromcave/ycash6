@@ -366,6 +366,45 @@ bool SpendsPQCoin(const SpendableInputs& spendable)
     });
 }
 
+CAmount PQImmatureCoinbase(const CWallet& wallet, const CScript& script)
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(wallet.cs_wallet);
+    CAmount total = 0;
+    for (const std::pair<const uint256, CWalletTx>& item : wallet.mapWallet) {
+        const CWalletTx& wtx = item.second;
+        if (!wtx.IsCoinBase() || wtx.GetDepthInMainChain(std::nullopt) <= 0 || wtx.GetBlocksToMaturity(std::nullopt) <= 0) continue;
+        for (unsigned int i = 0; i < wtx.vout.size(); i++) {
+            if (wtx.vout[i].scriptPubKey == script && !wallet.IsSpent(item.first, i, std::nullopt)) total += wtx.vout[i].nValue;
+        }
+    }
+    return total;
+}
+
+std::string PQInsufficientFunds(const std::string& message, CAmount coinbaseExcluded, CAmount immatureCoinbase)
+{
+    std::string s = message;
+    if (coinbaseExcluded <= 0 && immatureCoinbase <= 0) return s;
+    if (s.empty() || s.back() != '.') s += ".";
+    if (coinbaseExcluded > 0) {
+        s += strprintf(" The address holds %s of coinbase funds, which can only be sent to shielded recipients, with no change.",
+                       FormatMoney(coinbaseExcluded));
+    }
+    if (immatureCoinbase > 0) {
+        s += strprintf(" The address holds %s of immature coinbase funds, which can be spent after %d confirmations.",
+                       FormatMoney(immatureCoinbase), COINBASE_MATURITY + 1);
+    }
+    return s;
+}
+
+std::string PQCoinbaseChangeRefusal(CAmount change, CAmount selected, CAmount fee)
+{
+    return strprintf(
+        "When shielding coinbase funds, the wallet does not allow any change. The proposed transaction would result in "
+        "%s in change. To spend the selected coins, send exactly %s to shielded recipients (the %s selected less the fee %s).",
+        FormatMoney(change), FormatMoney(selected - fee), FormatMoney(selected), FormatMoney(fee));
+}
+
 void EnsurePQFeeWithinCap(CAmount fee)
 {
     const CAmount cap = PQMaxTxFee();

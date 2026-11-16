@@ -167,6 +167,27 @@ CAmount PQInputMarginalFee(uint8_t scheme);
 bool SpendsPQCoin(const SpendableInputs& spendable);
 
 /**
+ * Beta3 (a post-quantum miner shields its coinbase): the value of the immature coinbase outputs of this wallet that
+ * pay `script` (in the main chain, GetBlocksToMaturity() > 0). AvailableCoins never returns them; z_sendmany names the
+ * sum when it refuses a send from the address. cs_main and wallet.cs_wallet held.
+ */
+CAmount PQImmatureCoinbase(const CWallet& wallet, const CScript& script);
+
+/**
+ * Beta3: the "Insufficient transparent funds" message of z_sendmany from a post-quantum address, `message` followed
+ * by what the address holds in coinbase that this send could not use: `coinbaseExcluded`, mature coinbase left out
+ * because a recipient is not shielded, and `immatureCoinbase`. `message` is returned unchanged when both are zero.
+ */
+std::string PQInsufficientFunds(const std::string& message, CAmount coinbaseExcluded, CAmount immatureCoinbase);
+
+/**
+ * Beta3: the refusal of a z_sendmany from a post-quantum address whose selected coins include coinbase and would
+ * leave `change` (a coinbase spend has no transparent output where coinbase must be shielded, so no change returns
+ * to the address): it names the one amount that spends the selected coins, `selected` less `fee`.
+ */
+std::string PQCoinbaseChangeRefusal(CAmount change, CAmount selected, CAmount fee);
+
+/**
  * Beta2 (audit H1, review L-1): refuse a fee above PQMaxTxFee() on a post-quantum spend (RPC_INVALID_PARAMETER, "Fee
  * … is above the … cap on a post-quantum spend"), an explicit one before building and a computed one before signing:
  * the commit submits a PQ transaction without the absurd-fee check only within that cap, so a larger fee would be
