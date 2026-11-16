@@ -1,4 +1,4 @@
-# Yellowback RPC contract (`yed_*`), rpcversion 9
+# Yellowback RPC contract (`yed_*`), rpcversion 10
 
 This file is the interface between the node (`ycash-dd`) and the wallet application
 (`yecwallet-dd`). Nothing else crosses that boundary. It is written *before* the code it
@@ -15,7 +15,7 @@ example value is `null` is one the text marks *null when …* — the checker ac
 documented type for it. A field the text marks **optional** may be absent, and the checker asserts
 it only in the state the text names. Nothing else may be absent.
 
-**`rpcversion` rule.** `yed_getinfo.rpcversion` is `9` (scheme-visible post-quantum prefixes, below; the fee structure took `8`, post-quantum owners `7`, in-term claims `6`, the vault upgrade `5`, v3 `3`). Additions (new commands, new fields)
+**`rpcversion` rule.** `yed_getinfo.rpcversion` is `10` (the beta3 additions to stock calls, below; scheme-visible post-quantum prefixes took `9`, the fee structure `8`, post-quantum owners `7`, in-term claims `6`, the vault upgrade `5`, v3 `3`). Additions (new commands, new fields)
 never bump it; a removal or a shape change does. Phase 8's additions (`yed_estimatesend`,
 `yed_unlockcoin`, `yed_getinfo.lockedOutputs`/`protectedByIndex`, H3/H5/H10) therefore landed
 under `rpcversion = 2`. **v3 bumps to `3` by decision (v3 plan W14), not by the letter of the
@@ -79,6 +79,19 @@ claim); `yed_listpositions` rows gain `earlyRedeemFeeZat`; `yed_estimateredeem` 
 wallet shows before the owner confirms a redeem); `vault-locked` no longer refuses an ACTIVE redeem
 in term and `claim-not-yet` no longer refuses a claim in term (the threshold decides:
 `claim-not-underwater`). Clients go to `6` with the in-term plan's T4.
+
+**The beta3 additions (`rpcversion` 10; workspace docs/plans/beta3/beta3-plan.md B3-D5, docs/plans/beta3/rpc-contract-delta.md),
+by decision as `3` and `4` were.** No `yed_*` field changes shape: every change of the run is an addition to a stock
+call, and the one step tells a client that the node has all of them (check `rpcversion >= 10` rather than probing
+each call). The additions, by beta3 item: `getcoinbasetemplatefor` (3; new call: a coinbase that pays a miner's own
+transparent, Sapling or post-quantum address for a named template, with `fund` and `fundrule`; `doc/yellowback-mining.md`
+§13); `getblocktemplate.coinbasetxn.foundersreward` derived from the coinbase's rule, so a Sapling miner address reports
+it too (3; ycash-dd, where it read `vout[1]`); `transparentPools` in `getblockchaininfo` and `getblock` (2; below,
+"`getblock` and `getblockchaininfo`"); `vin[].address` of an input spending a post-quantum output in `getrawtransaction`,
+`getblock` verbosity 2, `getblockdeltas` and REST `/rest/tx` (6; "Plain-YEC PQ addresses"); `gettransaction.fee` for
+every funding shape, left out when an input's funding transaction is not held (1); `-ydf` default 0, with
+`getblocksubsidy.founders` past the mandate reporting this node's share (4; ycash-dd's `getblocktemplate.coinbasetxn.ydfpercentage`
+too, a key this line's `getblocktemplate` does not have).
 
 **Scheme-visible post-quantum prefixes (`rpcversion` 9; decision D-9, docs/plans/yellowback-quantum-spec.md §4.1).**
 A post-quantum address is Base58Check(3-byte version ‖ 32-byte keyHash), 53 characters, one version per network,
@@ -630,7 +643,7 @@ Result of `yed_getinfo`:
 
 ```json
 {
-  "rpcversion": 9,
+  "rpcversion": 10,
   "enabled": true,
   "network": "regtest",
   "height": 331,

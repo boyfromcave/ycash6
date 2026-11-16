@@ -4,10 +4,10 @@
 
 ## In plain words
 
-A new node on one of the Ycash testnets has to load more than half a million old blocks before it
-is useful. Downloading them from peers takes hours. This tool loads them from one published copy
+A new node has to load more than half a million old blocks on a testnet, more than three million on
+mainnet, before it is useful. Downloading them from peers takes hours. This tool loads them from one published copy
 instead (a "bundle"), but it does not trust that copy: it compares the copy's fingerprint with
-the one written into this release, checks the owner's signature when there is one, re-checks
+the one written into this release, checks the release key's signature when there is one, re-checks
 every block's link to the one before it, and lets the node itself validate every block while it
 loads them, cut off from the network. If any check fails, nothing is started. When it finishes,
 you start the node as usual and it carries on from there.
@@ -19,12 +19,18 @@ you start the node as usual and it carries on from there.
   Its format is frozen as `ycash-prefix/1` (`ycash-infra` `bundles/prefix/FORMAT.md`); it is
   published as the `ycash-infra` release `testnet-prefix-v1`, and this release pins the sha256 of
   its `SHA256SUMS` (`c7b55a2a…cc403`) in the network profiles (`contrib/yellowback/profiles/`).
-- The **state bundle** (§4.1, `--state --source DIR|URL`): a ycash6 datadir at a height H_B above
-  the fork, in the format `ycash-state/1` that `ycash-infra` `bundles/state/FORMAT.md` defines and
-  its snapshotter produces (draft ycash-infra#17 at the time of writing). This tool is its
-  consumer and follows that file; it does not define the format. A ycash-dd node does not start
-  from a state bundle (FORMAT.md: the two lines' on-disk formats are not promised to agree); it
-  syncs from peers, which is what makes it an independent verifier.
+- The **state bundle** (§4.1, `--state --source DIR|URL`): a ycash6 datadir at a height H above
+  the fork, in a format `ycash-infra` `bundles/state/FORMAT.md` defines: `ycash-state/1` (the
+  testnets' snapshotter), `ycash-state/2` (mainnet, one tarball) or `ycash-state/3` (mainnet from
+  beta3: the same tar.gz stream stored in parts of 1 GiB, because the CDN serves no object over
+  50 GB; workspace `docs/plans/beta3/bundle-parts.md`). This tool is their consumer and follows
+  that file; it does not define the formats. A ycash-dd node does not start from a state bundle
+  (FORMAT.md: the two lines' on-disk formats are not promised to agree); it syncs from peers,
+  which is what makes it an independent verifier.
+- **Mainnet** (`--network main`) has no prefix layer: it takes a state bundle only, from
+  `https://snapshots.ycash.team/main/latest/` (a node without the address indexes) or
+  `.../main-insight/latest/` (`-insightexplorer -txindex`, the image's default). Its files sit at
+  the datadir's root, so the bundle's `main/` is stripped as `tar --strip-components=1` would.
 
 ## Usage
 
@@ -35,22 +41,27 @@ contrib/bootstrap/ycash-bootstrap --network testnet-yb-slow --datadir DIR --sour
 contrib/bootstrap/ycash-bootstrap --network testnet-legacy --datadir DIR --reset --ycashd … --cli …   # a testnet reset (T-7)
 contrib/bootstrap/ycash-bootstrap --network regtest --datadir NODE_DATADIR --rpcport P --cli src/ycash-cli \
     --pack OUT --last-height N                                   # a regtest bundle from a running node (tests, the ceremony rehearsal)
+contrib/bootstrap/ycash-bootstrap --network main --datadir ~/.ycash \
+    --source https://snapshots.ycash.team/main-insight/latest/ --ycashd src/ycashd --cli src/ycash-cli   # mainnet, signed, in parts
 ```
 
 | Option | Meaning |
 |---|---|
-| `--network` | `regtest`, `testnet-yb-fast`, `testnet-yb-slow`, `testnet-legacy`: the profile (magic, genesis, datadir, pins) |
-| `--datadir` | the node's `-datadir`; the network's subdirectory (`testnet-yb-fast`, …) must hold no chain yet |
-| `--source` | `prefix` (default: the profile's release URL), an `https://` or `file://` URL, or a directory; a trailing `manifest.json` is accepted |
-| `--state` | restore a `ycash-state/1` bundle from `--source` instead of the prefix |
-| `--reset` | move the network's `wallet.dat` aside (`DATADIR/wallet-before-reset-<net>-<time>.dat`), remove its subdirectory, restore |
+| `--network` | `main` (a state bundle only), `regtest`, `testnet-yb-fast`, `testnet-yb-slow`, `testnet-legacy`: the profile (magic, genesis, datadir, pins; mainnet's are compiled into the tool) |
+| `--datadir` | the node's `-datadir`; the network's subdirectory (`testnet-yb-fast`, …; mainnet: the datadir itself) must hold no chain yet |
+| `--source` | `prefix` (default: the profile's release URL), an `https://` or `file://` URL, or a directory; a trailing `manifest.json` is accepted; a state source ending in `latest/` is read for its height only, then every file comes from `../<height>/` |
+| `--state` | restore a `ycash-state/1`, `/2` or `/3` bundle from `--source` instead of the prefix (always so on mainnet) |
+| `--reset` | move the network's `wallet.dat` aside (`DATADIR/wallet-before-reset-<net>-<time>.dat`), remove its subdirectory, restore (the testnets only) |
 | `--verify-full` | import with `-checkpoints=0`: every block's scripts are validated, not only those above the checkpoint |
-| `--ycashd`, `--cli` | the binaries the import runs (default: on `PATH`) |
-| `--conf`, `--node-arg` | the node's `ycash.conf` (default `DATADIR/ycash.conf`; the import reads a copy without its peer settings), and extra `ycashd` arguments for the import (regtest's `-nuparams=…`; a peer setting is refused) |
-| `--require-signature` | refuse a `SHA256SUMS` without `SHA256SUMS.minisig` |
+| `--ycashd`, `--cli` | the binaries the import runs (default: on `PATH`). A state restore without them (neither given nor on `PATH`) installs the checked files but skips the node's check against the statement at H; its last line says so (`the node check was SKIPPED`), and `bootstrap.json` records `"check": "skipped: no --ycashd/--cli"`: start the node offline and compare it yourself, or restore again with both |
+| `--conf`, `--node-arg` | the node's `ycash.conf` (default `DATADIR/ycash.conf`; the import reads a copy without its peer settings, mode 0600, removed when the restore ends), and extra `ycashd` arguments for the import (regtest's `-nuparams=…`; a peer setting is refused, and so are `-conf` and `-datadir`: the last `-conf` wins and would bring the peers back) |
+| `--require-signature` | refuse a `SHA256SUMS` without `SHA256SUMS.minisig`. A signature is required anyway on mainnet, for a state bundle over http(s), and for a prefix this release does not pin (not regtest's) |
+| `--allow-unsigned` | accept an unsigned `SHA256SUMS` where a signature is the default; the restore logs a warning that names why it was required and the HTTP status of the missing `.minisig`. Refused on mainnet: a mainnet restore always needs `SHA256SUMS.minisig` from the release key |
 | `--allow-unpinned` | accept a `SHA256SUMS` this release does not pin (a newer bundle, checked by its signature and the format alone) |
 | `--frame-only DIR` | check and frame only; print the `-loadblock=` arguments and start nothing |
 | `--work`, `--keep` | the download and framing directory (default `DATADIR/bootstrap-work`, removed when done) |
+| `--keep-parts` | a state bundle: keep each checked part in the work directory after it is extracted, so a re-run after a failure reads it locally (costs the bundle's size in disk; without it the restore needs one part) |
+| `--timeout`, `--part-attempts` | seconds without data before a download attempt fails (120); attempts per part (5, with backoff; each resumes where the last broke off) |
 
 Exit status: 0 restored; 2 refused (the message says which check) or a usage error.
 
@@ -75,16 +86,22 @@ To clear it, read it first (`cat DATADIR/<network>.bootstrap-incomplete`), then 
 - keep the datadir as it is: remove the marker only. The node then starts on whatever the failed
   restore left and syncs the rest from peers, unchecked against the bundle.
 
+On mainnet the marker is `DATADIR/main.bootstrap-incomplete` and the network's directory is the
+datadir itself: to restore again, remove `blocks/`, `chainstate/`, `vaults/`, `yellowback/` and
+`.bootstrap-staging/` (never the whole datadir: it holds your `ycash.conf` and any `wallet.dat`).
+The marker and its directory are synced to disk (`fsync`) when written and when removed.
+
 A datadir restored by an earlier release that had no marker shows a failed restore by a missing
 `DATADIR/<network>/bootstrap.json` (every completed restore writes one) and a leftover
-`DATADIR/bootstrap-work/`.
+`DATADIR/bootstrap-work/`. The image entrypoint refuses such a datadir while `YCASHD_BOOTSTRAP` is
+set, unless `YCASHD_BOOTSTRAP_ACCEPT_DATADIR=1` says to use it as it is.
 
 ## The checks, in order
 
 1. The network's subdirectory holds no `blocks/` or `chainstate/` data (unless `--reset`).
 2. `SHA256SUMS`: its sha256 equals the profile's `prefix.sha256sums_sha256`; every line is
    `<sha256>  <name>` with a name of the format, sorted. A `SHA256SUMS.minisig` beside it must
-   verify with the owner's key, `keys/ycash-release.pub` (`RWQYr5PF…dveOGQ`, key id
+   verify with the release key, `keys/ycash-release.pub` (`RWQYr5PF…dveOGQ`, key id
    `02C923A6C593AF18`, decision T-6), using `minisign`; without a signature the tool says so and
    relies on the pin (optional until the bundle is signed), and `--require-signature` refuses.
    "Without a signature" is an HTTP 404 or 403 for `SHA256SUMS.minisig`: a bucket that is not
@@ -119,26 +136,56 @@ tool then fails and names the node's `debug.log`.
 
 ## The state bundle's checks
 
-1. `SHA256SUMS` (every line `<sha256>  <name>`, sorted bytewise) and its signature as above; no
-   pin (state bundles roll), so the anchors are the statements and the node's own check (§4.2).
-2. `manifest.json`: canonical; `format` `ycash-state/1`, `network` the profile's datadir name,
-   `profile` its `-testnetprofile`, `line` `ycash6`, H_B at or above the fork, the tarball's name
-   rule and sum; `verifiers` at least two, sorted; `SHA256SUMS` names exactly the manifest, the
-   tarball and one `statement-<verifier>.json` each. A compiled checkpoint at H_B must match.
-3. Every statement is canonical, byte-identical to the others and equal to the manifest's fields.
-4. The tarball matches the manifest's sha256 and size; only directories and regular files under
-   `<network>/{blocks,chainstate,vaults,yellowback}` are extracted (no absolute paths, `..`,
-   links, `wallet.dat`, `yellowback/carriers.dat`, LevelDB `LOCK`/`LOG`; the insight index only in
-   the `full-insight` flavour).
-5. The node starts offline (`-connect=0 -listen=0 -dnsseed=0 -disablewallet`, plus
+The order of work is the order of trust. A `ycash-state/1` or `/2` tarball is handled as a bundle
+of one part, so every format takes the same path.
+
+1. **Source.** A source ending in `latest/` (or `latest/manifest.json`) is read for `height` only
+   and re-based to `../<height>/`; the manifest found there must name the same height. `latest/`
+   holds only a manifest with a short cache lifetime, and is never trusted beyond that.
+2. **Anchors.** `SHA256SUMS` (every line `<sha256>  <name>`, sorted bytewise) and its signature as
+   above, always required on mainnet (`--allow-unsigned` is refused there) and over http(s); no pin (state bundles roll), so the anchors are the
+   signature, the statements, the compiled pins and the node's own check (§4.2). `manifest.json`:
+   canonical; `format` one of `ycash-state/1`, `/2`, `/3`; `network` the profile's datadir name
+   (`main` on mainnet), `profile` its `-testnetprofile`, `line` `ycash6`, H at or above the fork,
+   the tarball's name rule; v3's `parts` named `<tarball>.000` on, every one `part_bytes` long but
+   the last, summing to `bytes`; each part's (or v1/v2's tarball's) line in `SHA256SUMS`, which
+   names exactly the manifest, the parts or tarball, the statements and `treestate.json`. v1 needs
+   at least two verifiers, v2/v3 `statement-ycash6.json`. A compiled checkpoint at H must match;
+   v2/v3 `pins` must be this release's (on mainnet: every compiled pin at or below H).
+3. Every statement is canonical, byte-identical to the others and equal to the manifest's fields;
+   `treestate.json` matches its line.
+4. **Disk.** Refused up front, with the numbers, unless the datadir's file system has the unpacked
+   datadir (the manifest's `unpacked_bytes`, which v3 always has; without it 1.5 times the
+   tarball's size, since the published 3,100,949 bundle unpacks to 56.1 GB from 41.8 GB) plus one
+   part plus 1 GiB free.
+5. **Stream.** One extraction reads the parts in order (`tarfile` in its streaming mode). Each part
+   is fetched to `work/download/<name>.part`, its size and sha256 checked against its signed line
+   **before any byte of it reaches the extractor**, renamed, read, and deleted, so one part is on
+   disk at a time. A download that breaks off resumes with `Range: bytes=<have>-` (a server that
+   ignores Range starts the part again), five attempts with backoff; a complete part with the wrong
+   hash is fetched once more from 0 and then refused; a server that sends more than the part's
+   size, or a 416 (an object shorter than the manifest says), is refused. Only directories and
+   regular files under `<network>/{blocks,chainstate,vaults,yellowback}` are extracted (no
+   absolute paths, `..`, links, `wallet.dat`, `yellowback/carriers.dat`, LevelDB `LOCK`/`LOG`; the
+   insight index only in the `full-insight` flavour), into `DATADIR/.bootstrap-staging/`.
+6. **Install.** At the end of the stream its size and sha256, the tree hash of the extracted files
+   (v2/v3) and `unpacked_bytes` (v3) must equal the manifest's, and nothing may follow the end of the
+   tar. Only then are the four directories renamed into the network's directory. A re-run after an
+   interruption starts again from part 0 (a gzip stream cannot resume in the middle), reusing the
+   parts `--keep-parts` kept and a part's partial download.
+7. The node starts offline (`-connect=0 -listen=0 -dnsseed=0 -disablewallet`, plus
    `-experimentalfeatures -insightexplorer -txindex` for `full-insight`) and settles. The bundle's
    block files may hold blocks above H_B (`-stopatheight` stops the chain state, not the
    download), so when the tip is above H_B the tool runs `invalidateblock` on H_B + 1, computes
    every statement field itself (`getblockhash`, `getblockheader`.chainwork,
    `gettxoutsetinfo`.hash_serialized, `vault_getinfo`.statehash at `dbtip` = H_B,
-   `yed_getstatehash H_B`), compares, and `reconsiderblock`s the same block so the datadir keeps no
-   failed-block mark. Any failure removes what was extracted. The node reads the same peerless copy
-   of `ycash.conf` as the prefix import and must report no connection.
+   `yed_getstatehash H_B`; v2/v3 also `getblock`'s `finalsaplingroot` and chain supply, and
+   `getblockhash` at every pin of the manifest), compares, and `reconsiderblock`s the same block so
+   the datadir keeps no failed-block mark. Any failure removes the staging directory and what was
+   installed (never anything else: on mainnet the datadir holds your `ycash.conf`), and leaves the
+   marker. The node reads the same peerless copy of `ycash.conf` as the prefix import and must
+   report no connection. Without `--ycashd`/`--cli` this step is skipped, and the restore's last
+   line says plainly that the node check was skipped.
 
 ## Relation to `ycash-infra`
 
@@ -162,8 +209,21 @@ the import itself. `testdata/testnet-prefix-v1/` holds the release's own `SHA256
 - The state path in the same file: a bundle built to `bundles/state/FORMAT.md` (it passes
   ycash-infra's `verify.py`) restored against a stand-in node that holds blocks above H_B: the
   rollback, the comparison, the `reconsiderblock`, and the refusals (paths outside the format, a
-  left-out file, another network, a changed statement, a height below the fork). No functional
-  test restores a real state bundle yet: that needs a ycash6 datadir from the snapshotter.
+  left-out file, another network, a changed statement, a height below the fork).
+- `PartsTest` (beta3 item 9): a mainnet `ycash-state/3` bundle in three parts, served by a local
+  HTTP server that honours `Range` and breaks off its first answer for part 1 halfway, restored
+  from `latest/` into an empty datadir: every file byte-identical, the tree hash equal, the work
+  directory gone, the part resumed from where it broke off, and never more than one part on disk.
+  The same files as a one-file `ycash-state/2` bundle restore identically. Refused, with the marker
+  left and nothing installed: a corrupted part (fetched twice, never extracted: only part 0's bytes
+  are in staging when it is refused), a missing part, a truncated last part, a server sending more,
+  a missing signature (and `--allow-unsigned`, refused on mainnet before any request), too little
+  disk (a v2 datadir estimated at 1.5 times its tarball), a wrong pin, an unknown format, a
+  `latest/` that names another height. Also: a one-file `ycash-state/2` bundle over HTTP, the last
+  line of a restore without a node, and the marker and its directory `fsync`ed. `HardeningTest`: the item 8 review's findings (`--node-arg
+  -conf`/`-datadir`, `import.conf`'s mode and removal, the unpinned prefix and the http(s) state
+  bundle needing a signature). No functional test restores a real state bundle yet: that needs a
+  ycash6 datadir from the snapshotter.
 - `qa/rpc-tests/ycash_bootstrap.py` (CI, needs `ycashd`): a regtest chain packed with `--pack`,
   restored into a fresh datadir by a real `ycashd`, which then starts at the same tip; a tampered
   chunk refused before any node starts.

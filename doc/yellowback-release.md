@@ -93,6 +93,7 @@ Both are minor bumps over 6.20.0 because 6.20.x patch numbers belong to the upst
 |---|---|---|---|---|
 | 6.22.0-beta1 | 22 | 0 | 0 | `v6.22.0-beta1` |
 | 6.22.0-beta2 | 22 | 0 | 1 | `v6.22.0-beta2` |
+| 6.22.0-beta3 | 22 | 0 | 2 | `v6.22.0-beta3` |
 | 6.22.0-rc1 | 22 | 0 | 25 | `v6.22.0-rc1` |
 | 6.22.0-rc2 | 22 | 0 | 26 | `v6.22.0-rc2` |
 | 6.22.0 | 22 | 0 | 50 | `v6.22.0` |
@@ -266,14 +267,15 @@ The rules (audit W3-P-1; testnet plan §5.1, T-8):
 | R6 | mainnet `pqFalconHeight` 0 |
 | R7 | per testnet profile, the height and that network's own attestor set both set or both unset; testnet-legacy never has a height |
 | R8 | the shadow forks (testnet-yb-slow, testnet-legacy): their split height H_S set, and branch IDs of their own after it, distinct from each other and from mainnet's, slow's Vault ID included |
+| R9 | testnet-yb-fast's development-fund mandate end (`TESTNET_FAST_YDF_MANDATE_END_HEIGHT`, beta3 item 5) set and not the provisional 600,000 the tree carries until the release-candidate cut, which sets it to the fast-testnet tip plus 400 blocks (B3-D4; `qa/yellowback-vault-params.py`) |
 
 Which rules a tag needs depends on the stage its version names:
 
 | Tag | Required | Not required |
 |---|---|---|
 | `v6.22.N-betaM` | parity with ycash-dd, the mainnet set maturity, the 6.22 line; testnet-legacy without a height; R8's branch IDs | heights (H_S included), sets, protocol version |
-| `v6.22.N-rcM` | the above; R3–R6; R7 for the testnet: testnet-yb-fast's height **and** set; testnet-yb-slow's set only with its height (a height alone is its pending activation, T-15); mainnet's height and set both or neither; R8 (H_S and the checkpoint at H_S set) | R1 and R2: mainnet's height and set stay unset on an rc unless the Yellowback lead architect sets both |
-| `v6.22.N` (final) | R1–R8 | — |
+| `v6.22.N-rcM` | the above; R3–R6; R7 for the testnet: testnet-yb-fast's height **and** set; testnet-yb-slow's set only with its height (a height alone is its pending activation, T-15); mainnet's height and set both or neither; R8 (H_S and the checkpoint at H_S set); R9 | R1 and R2: mainnet's height and set stay unset on an rc unless the Yellowback lead architect sets both |
+| `v6.22.N` (final) | R1–R9 | — |
 
 `qa/yellowback-release-heights.sh` reads the stage from `--release-version` (or `--stage`); with
 neither it applies the final rules, the strictest.
@@ -323,11 +325,13 @@ rules themselves: a claim at a wrong price is cancelled by the YED attestor set 
 The quantum line's releases (D-Q-20) carry the chain-wide `sq…`/`tq…`/`rq…` address. Say in the
 release notes:
 
-- **Inputs spending PQ coins carry no address** in `getblockdeltas`, `getspentinfo` and
-  `getrawtransaction` (verbose `vin[].address`): the insight index keys a spent output by its
-  Hash160, and a `TX_PQPKH` key hash is 32 bytes, so the index cannot name it from the input side.
-  `getaddressdeltas` (and `getaddressutxos`/`getaddressbalance`/`getaddresstxids`) name them as
-  requested, by `sq…`/`tq…`/`rq…` or the PQ `yb…`/`yt…`/`yr…` form.
+- **Inputs spending PQ coins name their address** (since beta3, item 6) in `getrawtransaction`
+  (verbose `vin[].address`), `getblock` verbosity 2, `getblockdeltas` and REST `/rest/tx`, in the
+  D-9 form: the insight index keys a spent output by a Hash160 that cannot be inverted, so the node
+  reads the address from the spent output and checks it against the index key. Before beta3 these
+  inputs carried no address. `getspentinfo` names none for any input. `getaddressdeltas` (and
+  `getaddressutxos`/`getaddressbalance`/`getaddresstxids`) name them as requested, by `sq…`/`tq…`/`rq…`
+  or the PQ `yb…`/`yt…`/`yr…` form.
 - **`-reindex` once** on a node with `-insightexplorer` or `-lightwalletd` that synced before this
   build: the address index of earlier blocks holds no `TX_PQPKH` outputs until it is rebuilt.
 - **`createrawtransaction` takes an `sq…` output** without the wallet's payability checks (Falcon

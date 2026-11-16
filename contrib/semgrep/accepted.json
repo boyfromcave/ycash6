@@ -666,6 +666,13 @@
       "by": "@boyfromcave",
       "date": "2026-11-01"
     },
+    "08a9c5555048022e-2": {
+      "rule": "python.lang.security.audit.insecure-file-permissions",
+      "path": "contrib/bootstrap/test_ycash_bootstrap.py",
+      "reason": "Unit test fake ycashd/ycash-cli (the parts tests, beta3 item 9), third occurrence of the same code: the file is a fresh stub executable this unit test just wrote under its own tempfile.mkdtemp() directory; it must be executable to be run, and 0o700 is owner-only (no group or world bits), the most restrictive mode an executable can have.",
+      "by": "@boyfromcave",
+      "date": "2026-11-15"
+    },
     "745509fe9e96d615": {
       "rule": "python.lang.security.audit.insecure-file-permissions",
       "path": "contrib/docker/ycashd/test_entrypoint.py",
@@ -686,6 +693,20 @@
       "reason": "prepare_secrets() chmods the house-seat secrets directory to 0o700 (owner rwx, nothing for group/world), after refusing a path inside a git repository: the rule matches the call, but this mode is the restrictive one it asks for (a directory needs x to be entered).",
       "by": "@boyfromcave",
       "date": "2026-11-01"
+    },
+    "02c25f6573d126c3": {
+      "rule": "python.lang.security.audit.dynamic-urllib-use-detected",
+      "path": "contrib/bootstrap/ycash-bootstrap",
+      "reason": "http_get_part's urlopen of a state-bundle part (beta3 item 9), for the same reason as da53ebf11086ab1f: the base URL is the operator's --source, admitted only as http(s); the part name must match NAME_RE; the reply is never trusted: every byte is checked against the part's size and sha256 in the signed SHA256SUMS before any of it reaches the extractor, and a Range request never takes more than the size the manifest names.",
+      "by": "@boyfromcave",
+      "date": "2026-11-15"
+    },
+    "c273f144e450046b": {
+      "rule": "python.lang.security.audit.insecure-file-permissions",
+      "path": "contrib/bootstrap/test_ycash_bootstrap.py",
+      "reason": "Unit test fake minisign (the mainnet state-bundle tests, beta3 item 9), as ead408271fb184a8: a fresh stub executable this unit test just wrote under its own tempfile.mkdtemp() directory; it must be executable to be run, and 0o700 is owner-only (no group or world bits), the most restrictive mode an executable can have.",
+      "by": "@boyfromcave",
+      "date": "2026-11-15"
     },
     "da53ebf11086ab1f": {
       "rule": "python.lang.security.audit.dynamic-urllib-use-detected",

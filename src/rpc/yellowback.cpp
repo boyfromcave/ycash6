@@ -59,7 +59,7 @@
 
 using namespace yellowback;
 
-static const int YELLOWBACK_RPC_VERSION = 9;   // 9: scheme-visible post-quantum address prefixes (D-9): params.pqAddressVersion and params.pq.plainAddressVersion are objects keyed by scheme; 8: the fee structure (D-Q-23/24/25: params.fees, maxMintCents, supplyCap, vault.pMint, yed_estimatefee's signature; feeMinZat/feeBps gone); 7: post-quantum owners; 5: the vault upgrade (upgrade plan §15.10): no activation/enforcement fields, V vaults, claim intents;
+static const int YELLOWBACK_RPC_VERSION = 10;  // 10: the beta3 additions to stock calls (B3-D5; no yed_* shape change): getcoinbasetemplatefor, transparentPools, post-quantum input addresses, gettransaction's fee, -ydf default 0; 9: scheme-visible post-quantum address prefixes (D-9): params.pqAddressVersion and params.pq.plainAddressVersion are objects keyed by scheme; 8: the fee structure (D-Q-23/24/25: params.fees, maxMintCents, supplyCap, vault.pMint, yed_estimatefee's signature; feeMinZat/feeBps gone); 7: post-quantum owners; 5: the vault upgrade (upgrade plan §15.10): no activation/enforcement fields, V vaults, claim intents;
                                                // 6: in-term claims (in-term plan IT-7): yed_listclaimable rows in term with `claimable`, the early-redeem fee;
                                                // 7: post-quantum owners (quantum spec §6.2): ownerScheme/ownerHash replace ownerPubKey/ownerKeyId,
                                                //    the v4 MINT, params.pq, PQ yb… addresses

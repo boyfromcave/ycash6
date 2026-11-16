@@ -73,40 +73,75 @@ fi
 # URL or directory. ycash-bootstrap checks SHA256SUMS against the release's pin and its minisign
 # signature when there is one, frames the blocks with the network's magic and imports them with an
 # isolated ycashd (-connect=0 -listen=0, no wallet, the conf's peer settings left out), then stops it.
-# A datadir that already holds the network's blocks is left alone, so a restart never imports twice.
+# On mainnet YCASHD_BOOTSTRAP is a state bundle's URL or directory (never "prefix": mainnet has no
+# prefix layer), e.g. https://snapshots.ycash.team/main-insight/latest/ for the default YCASHD_INSIGHT=1
+# (main/latest/ with YCASHD_INSIGHT=0); it is restored with --state and its signature is required.
+# A datadir that already holds the network's blocks is left alone, so a restart never imports twice;
+# but one whose restore never recorded <net>/bootstrap.json (a datadir an image before beta3 started
+# on after a failed restore) is refused while YCASHD_BOOTSTRAP is set, unless
+# YCASHD_BOOTSTRAP_ACCEPT_DATADIR=1 says to use it as it is.
 #
 # A restore that did not complete (refused, failed or killed) leaves $DATADIR/<net>.bootstrap-incomplete
 # behind, with the reason; ycash-bootstrap removes it only on success. While it is there the node is
 # not started, whether YCASHD_BOOTSTRAP is still set or not: a half-restored datadir would otherwise
 # start, look healthy and sync from wherever it stopped, and nothing would show the failure.
+# The one line of this block that differs between the node lines: 1 on ycash6, which restores a mainnet
+# state bundle (a ycash6 datadir); 0 on ycash-dd, which cannot start from one and refuses it.
+BOOTSTRAP_MAINNET=1
 case "${YCASHD_NETWORK:-mainnet}/${YCASHD_TESTNET_PROFILE:-}" in
+  mainnet/*) BNET=main ;;
   testnet/fast) BNET=testnet-yb-fast ;;
   testnet/slow) BNET=testnet-yb-slow ;;
   testnet/legacy) BNET=testnet-legacy ;;
   regtest/*) BNET=regtest ;;
   *) BNET="" ;;
 esac
+# the network's directory: mainnet's files sit at the datadir's root
+NETDIR="$DATADIR/$BNET"
+[ "$BNET" = main ] && NETDIR="$DATADIR"
 refuse_incomplete() {
   MARK="$DATADIR/$BNET.bootstrap-incomplete"
   [ -n "$BNET" ] && [ -e "$MARK" ] || return 0
   {
-    echo "YCASHD_BOOTSTRAP: $MARK is there: the last restore into $DATADIR/$BNET did not complete; the node is not started."
+    echo "YCASHD_BOOTSTRAP: $MARK is there: the last restore into $NETDIR did not complete; the node is not started."
     cat "$MARK"
-    echo "To restore again: remove $DATADIR/$BNET (move a wallet.dat out of it first, if there is one) and $MARK, then restart."
-    echo "To start on the datadir as it is: remove $MARK only."
+    if [ "$BNET" = main ]; then
+      echo "To restore again: remove $DATADIR/blocks, chainstate, vaults, yellowback and .bootstrap-staging and $MARK, then restart."
+    else
+      echo "To restore again: remove $NETDIR (move a wallet.dat out of it first, if there is one) and $MARK, then restart."
+    fi
+    echo "To start on the datadir as it is: remove $MARK only (and, while YCASHD_BOOTSTRAP is set, set YCASHD_BOOTSTRAP_ACCEPT_DATADIR=1)."
   } >&2
   exit 1
 }
 refuse_incomplete
 if [ -n "${YCASHD_BOOTSTRAP:-}" ]; then
   if [ -z "$BNET" ]; then
-    echo "YCASHD_BOOTSTRAP: no bundle for YCASHD_NETWORK=${YCASHD_NETWORK:-mainnet} (testnet with a YCASHD_TESTNET_PROFILE, or regtest)" >&2; exit 2
+    echo "YCASHD_BOOTSTRAP: no bundle for YCASHD_NETWORK=${YCASHD_NETWORK:-mainnet} (mainnet, testnet with a YCASHD_TESTNET_PROFILE, or regtest)" >&2; exit 2
   fi
-  if [ -n "$(ls -A "$DATADIR/$BNET/blocks" 2>/dev/null)" ]; then
-    echo "YCASHD_BOOTSTRAP: $DATADIR/$BNET already holds blocks; starting without a restore"
+  LAYER=""
+  if [ "$BNET" = main ] && [ "$BOOTSTRAP_MAINNET" != 1 ]; then
+    echo "YCASHD_BOOTSTRAP: refused on mainnet: a mainnet snapshot bundle is a ycash6 datadir and this node line cannot start from one; use the ycash6 image, or unset YCASHD_BOOTSTRAP and let ycashd sync from peers" >&2; exit 2
+  fi
+  if [ "$BNET" = main ]; then
+    if [ "$YCASHD_BOOTSTRAP" = prefix ]; then
+      echo "YCASHD_BOOTSTRAP=prefix: mainnet has no prefix layer; give a state bundle's URL, e.g. https://snapshots.ycash.team/main-insight/latest/" >&2; exit 2
+    fi
+    LAYER=--state
+  fi
+  if [ -n "$(ls -A "$NETDIR/blocks" 2>/dev/null)" ]; then
+    if [ ! -e "$NETDIR/bootstrap.json" ] && [ "${YCASHD_BOOTSTRAP_ACCEPT_DATADIR:-0}" != 1 ]; then
+      {
+        echo "YCASHD_BOOTSTRAP: $NETDIR holds blocks but no bootstrap.json: no restore into it completed (an image before beta3 started on a failed one); the node is not started."
+        echo "To restore again: remove the chain ($NETDIR/blocks, chainstate, vaults, yellowback), then restart."
+        echo "To use the datadir as it is: set YCASHD_BOOTSTRAP_ACCEPT_DATADIR=1, or unset YCASHD_BOOTSTRAP."
+      } >&2
+      exit 1
+    fi
+    echo "YCASHD_BOOTSTRAP: $NETDIR already holds blocks; starting without a restore"
   else
     # shellcheck disable=SC2086
-    ycash-bootstrap --network "$BNET" --datadir "$DATADIR" --conf "$CONF" --source "$YCASHD_BOOTSTRAP" \
+    ycash-bootstrap --network "$BNET" --datadir "$DATADIR" --conf "$CONF" --source "$YCASHD_BOOTSTRAP" $LAYER \
       --ycashd "$(command -v ycashd)" --cli "$(command -v ycash-cli)" ${YCASHD_BOOTSTRAP_ARGS:-} || { echo "YCASHD_BOOTSTRAP: the restore failed; the node is not started" >&2; exit 1; }
     refuse_incomplete      # exit 0 with the marker still there is not a completed restore either
   fi

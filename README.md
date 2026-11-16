@@ -6,9 +6,9 @@ This is the Ycash node on the Zcash 6.20.0 code base, plus a proposed network up
 **post-quantum vault system** for Ycash, with the applications built on it. Everything above
 [What is Ycash?](#what-is-ycash) is about that upgrade; the rest is the Ycash README.
 
-> **Status: in development.** Everything runs on regtest and on a one-laptop devnet. No activation
-> height is set on mainnet or testnet, and the upgrade has not been adopted by the Ycash
-> Foundation.
+> **Status: in development.** Everything runs on regtest, on a one-laptop devnet and on the public
+> fast test network (`-testnet -testnetprofile=fast`), where the upgrade is active. No activation
+> height is set on mainnet, and the upgrade has not been adopted by the Ycash Foundation.
 
 ## Which repository is which
 
@@ -73,9 +73,9 @@ Ycash".
 
 | | |
 |---|---|
-| Vault upgrade | Built on both node lines, running on regtest and the devnet |
-| Post-quantum layer | Built on the `upgrade/quantum-vaults` branch; it joins `upgrade/vault` at release |
-| Mainnet / testnet | **No activation height set.** The vault upgrade is a **hard fork**: once a height is set, every node must upgrade before it |
+| Vault upgrade | Built on both node lines, running on regtest, the devnet and the fast testnet |
+| Post-quantum layer | Part of `upgrade/vault`, in every 6.22 release |
+| Mainnet / testnet | **No activation height on mainnet** (nor on the slow testnet yet; the fast testnet activates it at 510,400). The vault upgrade is a **hard fork**: once a height is set, every node must upgrade before it |
 | Reviews | Internal security and consensus audits (in the workspace's `docs/audits/`). No external audit yet |
 
 Attestor and bridge signer keys are still secp256k1; a post-quantum design for them is being
@@ -132,8 +132,8 @@ walk (section 6) and the post-quantum regimes (section 8).
 - **Fees:** the YED protocol fee is priced in dollars and tiered by debt; wallets price network
   fees in dollars per KB at the attested price, with `-pqfeerate` as the fallback when no price
   exists.
-- **RPCs:** 23 `set_*` / `vault_*` calls ([doc/vault-rpc.md](doc/vault-rpc.md), machine-readable
-  in `doc/vault-rpc-contract.json`) and the `yed_*` calls at `rpcversion` 8
+- **RPCs:** 27 `set_*` / `vault_*` calls ([doc/vault-rpc.md](doc/vault-rpc.md), machine-readable
+  in `doc/vault-rpc-contract.json`) and the `yed_*` calls at `rpcversion` 10
   ([doc/yellowback-rpc.md](doc/yellowback-rpc.md)).
 - **Wallet keys:** post-quantum keys derive from the wallet's seed; `-mnemonicfile=<file>`
   restores a new wallet from its recovery phrase alone.
@@ -143,13 +143,12 @@ walk (section 6) and the post-quantum regimes (section 8).
   The post-quantum layer needs no change there.
 - **Releases** of this line are tagged by `.github/workflows/yellowback-release.yml`
   ([doc/yellowback-release.md](doc/yellowback-release.md)): 6.22.x for the vault upgrade,
-  6.21.x for the `harden/yellowback` fallback. The version the post-quantum layer ships under is
-  chosen at its release.
+  6.21.x for the `harden/yellowback` fallback.
 - **Regtest by hand:** `-nuparams=6d5b7a31:<height>` activates the upgrade, `-pqfalcon=1` (or
   `-pqfalconheight=<h>`) activates Falcon, and YED also needs `-yellowbackattestorset=<setid>`,
   the txid of its signer set's `SET_CREATE`. They go on top of the `-nuparams` for Ycash's earlier
   upgrades (`yellowback_node_args` in `qa/rpc-tests/test_framework/yellowback_util.py`).
-- **The fork delta:** `git diff ycash6-legacy...upgrade/quantum-vaults` (`ycash6-legacy` is
+- **The fork delta:** `git diff ycash6-legacy...upgrade/vault` (`ycash6-legacy` is
   ycashd 6.20.0 as published).
 
 | Path | Contents |
