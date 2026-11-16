@@ -608,7 +608,7 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-genproclimit=<n>", strprintf(_("Set the number of threads for coin generation if enabled (-1 = all cores, default: %d)"), DEFAULT_GENERATE_THREADS));
     strUsage += HelpMessageOpt("-equihashsolver=<name>", _("Specify the Equihash solver to be used if enabled (default: \"default\")"));
     strUsage += HelpMessageOpt("-mineraddress=<addr>", _("Send mined coins to a specific single address"));
-    strUsage += HelpMessageOpt("-ydf=<n>", strprintf(_("After the Ycash Development Fund mandate ends, optionally include an output of n%% of the block subsidy in mined blocks. Values outside 0..100 are reset to the default. (default: %u)"), DEFAULT_YDF_FEE_PERCENTAGE));
+    strUsage += HelpMessageOpt("-ydf=<n>", strprintf(_("After the Ycash Development Fund mandate ends, include an output of n%% of the block subsidy in mined blocks as a donation to the fund (0 pays nothing; a miner who donates sets -ydf=5). Before the mandate ends the 5%% output is required whatever -ydf says. Values outside 0..100 are reset to the default. (default: %u)"), DEFAULT_YDF_FEE_PERCENTAGE));
     strUsage += HelpMessageOpt("-minetolocalwallet", strprintf(
             _("Require that mined blocks use a coinbase address in the local wallet (default: %u)"),
  #ifdef ENABLE_WALLET

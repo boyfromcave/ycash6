@@ -115,15 +115,14 @@ Both are minor bumps over 6.20.0 because 6.20.x patch numbers belong to the upst
    while that tag does not exist), builds depends from source as the tag does (no cache; only
    `strict=false` restores one), builds and smoke-tests every package, signs `SHA256SUMS`
    (identity: the branch), and its `release-dry-run` job checks the signed set and the notes file
-   and prints the release the tag would create. It never creates a release and never starts
-   rc-qualify: those two jobs run on a pushed tag only, and a dispatch on a tag ref is refused (it
-   would sign with the tag's identity). `release-dry-run` runs only when strict. Download and spot-check at least one
-   package. Then prove the qualification on the same artifacts (rc-qualify, "Proving run" below).
+   and prints the release the tag would create. It never creates a release: that job runs
+   on a pushed tag only, and a dispatch on a tag ref is refused (it would sign with the tag's
+   identity). `release-dry-run` runs only when strict. Download and spot-check at least one
+   package. Then prove the qualification on the same artifacts ("Release candidates" below).
 4. **Release train.** Add `releases/v<V>.yaml` to the workspace (`boyfromcave/yellowback`,
    its `releases/README.md`) by pull request: every component at the commit this release is
-   qualified with, ycash6 at the commit you are about to tag: the `upgrade/vault` head the proving run qualified
-   (it may be ahead of the dry run's commit by test, doc and workflow changes only, "Proving run"
-   below). Its `release-train` check must pass.
+   qualified with, ycash6 at the commit you are about to tag (it may be ahead of the dry run's
+   commit by test, doc and workflow changes only). Its `release-train` check must pass.
 5. **Tag and push**, ycash-dd's pairing tag first (Network parameters, below):
    ```
    git tag -a v<V> -m "ycashd v<V> (Yellowback)" <commit>
@@ -131,9 +130,9 @@ Both are minor bumps over 6.20.0 because 6.20.x patch numbers belong to the upst
    ```
    The `version` job fails if the tag differs from what `configure.ac` renders, if it is not a
    6.22 version, or if the rules of its stage fail.
-6. **Draft and qualification (automatic).** The workflow drafts the release (pre-release for
+6. **Draft, then qualification.** The workflow drafts the release (pre-release for
    `-rc`/`-beta`) with every package, SBOM, `SHA256SUMS`, `SHA256SUMS.cosign.bundle` and the notes
-   from step 2, then starts `rc-qualify` on the tag (below). Wait for its record.
+   from step 2. Then qualify it from the workspace (below) and wait for its record.
 7. **The lead architect's signature.** In ycash-ops: Actions → *sign-release* → repo `ycash6`, tag `v<V>`,
    asset `SHA256SUMS`. It checks the provenance, signs and uploads `SHA256SUMS.minisig` to the draft.
 8. **Testnets (release candidates; manual, from ycash-ops).** Deploy the rc image to
@@ -148,41 +147,27 @@ means a new rc number.
 In plain words: a release candidate is tested as released, with every other Yellowback program, and
 then run on the three practice networks before anyone is asked to install it.
 
-**Qualification.** [`.github/workflows/rc-qualify.yml`](../.github/workflows/rc-qualify.yml) runs on
-the tag (the release workflow dispatches it; by hand: Actions → *rc-qualify* → *Run workflow* on the
-tag `v<V>`, or `gh workflow run rc-qualify.yml --ref v<V>`). It downloads the files **from the
-release**, checks them against `SHA256SUMS`, the cosign signature at the tag and the build provenance,
-reads the train from the workspace, and runs:
+**Qualification.** The harness lives in the workspace repository, not here (beta3 process
+requirement P-1): [`boyfromcave/yellowback` `qualify/`](https://github.com/boyfromcave/yellowback/tree/upgrade/vault/qualify)
+and its `rc-qualify.yml`, with the release trains beside it in `releases/`. A fix to the harness
+moves the workspace's commit, never this repository's, so the commit under qualification stays
+put; every record names both (`commit`, `harness_commit`). Its README has the commands, the steps
+and what a pass is. In short:
 
-| Step | What | Where |
-|---|---|---|
-| 1 | the node's functional shards and nightly suites against the package's binaries (the unit tier and the instrumented variants are CI builds) | `yellowback-tests.yml` called with `release_package` |
-| 2 | upgrade-walk with chain-viz, lightwalletd fork and baseline and yolo; YEW's devnet suites; x402's `test:devnet`; Hawkeye's `scenario demo` on anvil; YecWallet's QTest devnet cases; each client at its train pin | `qa/yellowback-rc-qualify.sh walk\|yew\|x402\|hawkeye\|yecwallet` |
-| 3 | two ycash-dd nodes (built at the train's `vault-params` commit) on the devnet; block hash, vault and YED state hashes equal at every 100th height | `qa/yellowback-rc-qualify.sh cross-line`, `qa/yellowback-rc-crossline.py` |
-| 4 | the launch ceremony rehearsed on regtest with the fast and slow profiles' maturity | `qa/yellowback-rc-qualify.sh ceremony` (needs `contrib/testnet/ceremony`, N2) |
+1. the node's own suites, tier `all`, at the commit (`gh workflow run yellowback-tests.yml -R
+   boyfromcave/ycash6 --ref v<V> -f tier=all`): step 1 of the qualification is this run, by id;
+2. `gh workflow run rc-qualify.yml -R boyfromcave/yellowback --ref upgrade/vault -f
+   train=releases/v<V>.yaml -f node_suites_run=<id>`; before the tag, add `-f proving_run=<id>`
+   (the strict dry run of step 3; the train's `ycash6.commit` is the commit the tag will be cut
+   at, the built one or ahead of it by `qa/`, `doc/`, `.github/` files the release build does not
+   read).
 
-**Proving run (before the tag).** rc-qualify can run on the proving run's artifacts, so a tag
-never meets it for the first time: once the release train (step 4) names the `upgrade/vault` head as
-`ycash6.commit` and `v<V>` as its tag (on a workspace branch is enough, input `train_ref`), dispatch
-`gh workflow run rc-qualify.yml -R boyfromcave/ycash6 --ref upgrade/vault -f proving_run=<run id>
--f train_ref=<workspace branch>`, where `<run id>` is the green, strict dry run of step 3 at that
-branch (its `release-dry-run` job green; the job refuses any other run and a branch other than
-`upgrade/vault` or `release/*`). The package is proved at the commit that built it: later commits
-on the branch that touch only tests, docs and workflows (`qa/`, `doc/`, `.github/`) do not need a
-new build, unless the release build reads them (`yellowback-release.yml`, `.github/actions/`,
-`qa/yellowback-ci-apt.sh`, `qa/yellowback-release-*`, `qa/yellowback-vault-params.py`, `doc/man/`);
-any other change since that commit, a rename included, is refused. The proof is same-source for
-everything the build reads, not same-bytes (`share/genbuild.sh` embeds `git describe`), and the tag
-is cut at the head. The record keeps both: `commit` (built) and `harness_commit` (the head that
-ran the steps). A failing proving run
-opens no issue (the node suites' issue steps skip it). The candidate
-is that run's `release-signed` artifact, checked the same way (its cosign identity is the workflow
-at the branch); the record (`proving_run: true`) stays a workflow artifact and nothing is written
-to any release.
-
-The record, `rc-qualify-<run id>.json`, is uploaded to the release: each step's result, the train,
-the package's sha256, and `qualified` (true only when every step passed). Step 5, the 24-hour
-canary from rc2 on, needs the live testnet and is part of the deploy below.
+It takes the files of the release (or of the proving run), checks `SHA256SUMS`, the cosign
+signature and the build provenance, and runs every client at its train pin against the package,
+ycash-dd nodes beside it and the ceremony rehearsal, with this repository's own tools (the devnet,
+the attest agent, `contrib/testnet/ceremony`, `qa/rpc-tests`) read at the train's commit. Its
+record `rc-qualify.json` is attached to a draft release as `rc-qualify-<run id>.json`. Step 5, the
+24-hour canary from rc2 on, needs the live testnet and is part of the deploy below.
 
 **Testnets (manual gate; deploys run from the private ycash-ops).** After a qualified record and
 the Yellowback lead architect's signature:

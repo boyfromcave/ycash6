@@ -98,6 +98,8 @@ BASE_SCRIPTS= [
     # -stopatheight (testnet plan §4.3): a clean stop at exactly the height, mined and synced.
     # Byte-identical on both lines (qa/yellowback-cross-line.manifest).
     'stopatheight.py',
+    # -ydf defaults to 0 (beta3 item 4): no fund output past the mandate, -ydf=5 pays 5 %, the mandate unchanged.
+    'ycash_ydf_default.py',
     # ycash-bootstrap against a real node (testnet plan §4.4): a regtest bundle packed, a changed chunk
     # refused, the bundle restored by a real import. Byte-identical on both lines.
     'ycash_bootstrap.py',

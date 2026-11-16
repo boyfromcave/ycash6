@@ -292,6 +292,76 @@ class HttpTest(Quiet):
             os.environ.update(saved)
 
 
+class Bucket(http.server.SimpleHTTPRequestHandler):
+    """A static bucket. Not listable, it answers 403 for an object that is not there (S3, CloudFront
+    without s3:ListBucket); `errors` maps a file name to a forced status."""
+    absent, errors = 404, {}
+
+    def log_message(self, *a):
+        pass
+
+    def send_error(self, code, message=None, explain=None):
+        super().send_error(self.absent if code == 404 else code, message, explain)
+
+    def do_GET(self):
+        code = self.errors.get(os.path.basename(self.path))
+        if code:
+            return super().send_error(code)
+        return super().do_GET()
+
+
+class BucketTest(Quiet):
+    """The optional SHA256SUMS.minisig: 403 and 404 both mean absent (and then a signature that is
+    required is refused); any other error, or a 403 on a file the bundle needs, is a refusal."""
+
+    def serve(self, absent, errors=None):
+        chain = make_chain(4)
+        self.profile = test_profile(chain)
+        out = os.path.join(self.tmp, "b")
+        write(out, self.profile, chain)
+        handler_class = type("B", (Bucket,), {"absent": absent, "errors": errors or {}})
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), lambda *a, **kw: handler_class(*a, directory=out, **kw))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        saved = {k: os.environ.pop(k) for k in list(os.environ) if k.lower() in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")}
+        self.addCleanup(os.environ.update, saved)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.source = yb.Source("http://127.0.0.1:%d/" % server.server_address[1])
+        return out
+
+    def verify(self, **kw):
+        return yb.verify_bundle(self.source, self.profile, os.path.join(self.tmp, "w"), args_for(**kw))
+
+    def test_absent_signature_on_403_and_404(self):
+        for absent in (403, 404):
+            with self.subTest(absent=absent):
+                self.serve(absent)
+                _, _, _, record = self.verify()
+                self.assertFalse(record["signed"])
+                with self.assertRaisesRegex(yb.BundleError, "not signed and --require-signature"):
+                    self.verify(require_signature=True)
+
+    def test_403_on_a_needed_file_or_another_error_on_the_signature_is_a_refusal(self):
+        out = self.serve(403)
+        os.remove(os.path.join(out, "manifest.json"))
+        with self.assertRaisesRegex(yb.BundleError, "manifest.json: HTTP 403"):
+            self.verify()
+        self.serve(403, {"SHA256SUMS.minisig": 500})
+        with self.assertRaisesRegex(yb.BundleError, "SHA256SUMS.minisig: HTTP 500"):
+            self.verify()
+
+    def test_a_present_signature_behind_403_is_still_verified(self):
+        out = self.serve(403)
+        with open(os.path.join(out, "SHA256SUMS.minisig"), "w") as f:
+            f.write("untrusted comment: signature\nRW...\n")
+        bad = os.path.join(self.tmp, "bad-minisign")
+        with open(bad, "w") as f:
+            f.write("#!/bin/sh\nexit 1\n")
+        os.chmod(bad, 0o700)
+        with self.assertRaisesRegex(yb.BundleError, "does not verify"):
+            self.verify(minisign=bad)
+
+
 FAKE_YCASHD = r'''#!%(python)s
 # A stand-in ycashd: "imports" every -loadblock file (magic, length, block) into fake-chain.json,
 # logs the node's "Loaded N blocks from external file" line, and runs until ycash-cli stop.
@@ -302,6 +372,23 @@ net = "regtest" if "-regtest" in args else "testnet-yb-" + [a.split("=", 1)[1] f
 netdir = os.path.join(datadir, net)
 os.makedirs(netdir, exist_ok=True)
 with open(os.path.join(datadir, "fake-args.json"), "w") as f: json.dump(args, f)
+# Peers the way ycashd 0.11-lineage arguments give them: -addnode and -connect from the command line
+# and from the conf are appended to one list (the conf never overrides, it adds), and -connect=0 alone
+# turns automatic connections off. A node with a peer syncs past the bundle: FAKE_PEER_BLOCKS more.
+conf = ([a.split("=", 1)[1] for a in args if a.startswith("-conf=")] or [os.path.join(datadir, "ycash.conf")])[-1]
+multi = {"addnode": [], "connect": [], "seednode": []}
+for a in args:
+    k, _, v = a.lstrip("-").partition("=")
+    if k in multi: multi[k].append(v)
+if os.path.exists(conf):
+    with open(conf) as f: text = f.read()
+    with open(os.path.join(datadir, "fake-conf-seen.txt"), "w") as f: f.write(text)
+    for line in text.splitlines():
+        k, _, v = line.strip().partition("=")
+        if k.strip() in multi: multi[k.strip()].append(v.strip())
+peers = multi["addnode"] + multi["seednode"] + ([] if multi["connect"] == ["0"] else [c for c in multi["connect"] if c != "0"])
+peer_count = len(peers) or int(os.environ.get("FAKE_PEERS", "0"))
+with open(os.path.join(netdir, "fake-peers.json"), "w") as f: json.dump(peer_count, f)
 blocks, log = [], open(os.path.join(netdir, "debug.log"), "a")
 refuse = os.environ.get("FAKE_REFUSE_HEIGHT")
 for path in [a.split("=", 1)[1] for a in args if a.startswith("-loadblock=")]:
@@ -312,6 +399,7 @@ for path in [a.split("=", 1)[1] for a in args if a.startswith("-loadblock=")]:
         if refuse is None or len(blocks) < int(refuse): blocks.append(data[i + 8:i + 8 + size].hex())
         i += 8 + size; n += 1
     log.write("Loaded %%d blocks from external file in 1ms\n" %% n); log.flush()
+if peers: blocks += [blocks[-1]] * 3                   # synced from a peer, past the bundle's last height
 with open(os.path.join(netdir, "fake-chain.json"), "w") as f: json.dump(blocks, f)
 stop = os.path.join(netdir, "fake-stop")
 while not os.path.exists(stop): time.sleep(0.05)
@@ -334,6 +422,7 @@ cmd = args[0]
 if cmd == "getblockchaininfo": print(json.dumps({"blocks": len(blocks) - 1, "chain": "regtest"}))
 elif cmd == "getblockhash": print(h(blocks[int(args[1])]))
 elif cmd == "getbestblockhash": print(h(blocks[-1]))
+elif cmd == "getconnectioncount": print(json.load(open(os.path.join(netdir, "fake-peers.json"))))
 elif cmd == "stop": open(os.path.join(netdir, "fake-stop"), "w").close(); print("stopping")
 else: sys.exit("unknown " + cmd)
 '''
@@ -400,6 +489,72 @@ class RestoreTest(Quiet):
         self.assertEqual(code, 2)
         self.assertIn("stopped at height 4 of 8", err)
 
+    def marker(self):
+        return os.path.join(self.datadir, "regtest.bootstrap-incomplete")
+
+    def test_peers_in_the_conf_do_not_reach_the_import(self):
+        # beta3 item 8: an addnode in ycash.conf let the import node sync past the bundle; the
+        # restore was then refused ("above the bundle's") and the next start used the datadir anyway.
+        os.makedirs(self.datadir)
+        user_conf = os.path.join(self.datadir, "ycash.conf")
+        with open(user_conf, "w") as f:
+            f.write("rpcuser=u\nrpcpassword=p\naddnode=203.0.113.7\n connect = 203.0.113.8\nseednode=203.0.113.9\n"
+                    "listen=1\nbind=0.0.0.0\nnoconnect=0\ntxindex=1\n")
+        for conf_arg in ((), ("--conf", user_conf)):
+            with self.subTest(conf=conf_arg):
+                shutil.rmtree(os.path.join(self.datadir, "regtest"), ignore_errors=True)
+                code, err = self.run_restore(*conf_arg)
+                self.assertEqual(code, 0, err)
+                args = load_json(os.path.join(self.datadir, "fake-args.json"))
+                confs = [a for a in args if a.startswith("-conf=")]
+                self.assertEqual(len(confs), 1)
+                self.assertNotEqual(confs[0], "-conf=%s" % user_conf)
+                seen = read_text(os.path.join(self.datadir, "fake-conf-seen.txt"))
+                for kept in ("rpcuser=u", "rpcpassword=p", "txindex=1"):
+                    self.assertIn(kept, seen)
+                for dropped in ("addnode", "connect", "seednode", "listen", "bind"):
+                    self.assertNotIn(dropped + "=", seen.replace(" ", ""))
+                self.assertFalse(os.path.exists(self.marker()))
+        self.assertIn("addnode=203.0.113.7", read_text(user_conf))      # the user's file is not touched
+
+    def test_a_peer_at_the_import_is_a_refusal(self):
+        os.environ["FAKE_PEERS"] = "1"
+        try:
+            code, err = self.run_restore()
+        finally:
+            del os.environ["FAKE_PEERS"]
+        self.assertEqual(code, 2)
+        self.assertIn("1 peer", err)
+        self.assertTrue(os.path.exists(self.marker()))
+
+    def test_peer_flags_in_node_arg_are_refused(self):
+        for flag in ("-addnode=203.0.113.7", "-connect=203.0.113.7", "-listen=1", "-seednode=x", "-noconnect=0"):
+            with self.subTest(flag=flag), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.run_restore("--node-arg=%s" % flag)
+        self.assertFalse(os.path.exists(self.marker()))
+
+    def test_a_failed_restore_leaves_a_marker_until_one_succeeds(self):
+        os.environ["FAKE_REFUSE_HEIGHT"] = "5"
+        try:
+            code, err = self.run_restore()
+        finally:
+            del os.environ["FAKE_REFUSE_HEIGHT"]
+        self.assertEqual(code, 2)
+        text = read_text(self.marker())
+        self.assertIn("failed", text)
+        self.assertIn("stopped at height 4 of 8", text)
+        self.assertFalse(os.path.exists(os.path.join(self.datadir, "regtest", "bootstrap.json")))
+        code, err = self.run_restore()                       # the fake left no blocks/: a retry may run
+        self.assertEqual(code, 0, err)
+        self.assertFalse(os.path.exists(self.marker()))
+
+    def test_a_datadir_with_a_chain_gets_no_marker(self):
+        os.makedirs(os.path.join(self.datadir, "regtest", "blocks"))
+        open(os.path.join(self.datadir, "regtest", "blocks", "blk00000.dat"), "w").close()
+        code, err = self.run_restore()
+        self.assertEqual(code, 2)
+        self.assertFalse(os.path.exists(self.marker()))       # nothing was changed: the node may start
+
     def test_frame_only(self):
         out = os.path.join(self.tmp, "framed")
         with contextlib.redirect_stdout(io.StringIO()) as printed:
@@ -428,6 +583,7 @@ elif cmd == "vault_getinfo": print(json.dumps({"dbtip": {"hash": h(tip), "height
 elif cmd == "yed_getstatehash": print(json.dumps({"blockhash": h(int(args[1])), "statehash": "yed-%%s" %% args[1]}))
 elif cmd == "invalidateblock": st["tip"] = int(args[1], 16) - 1; st["calls"].append(cmd); json.dump(st, open(path, "w"))
 elif cmd == "reconsiderblock": st["tip"] = st["top"]; st["calls"].append(cmd); json.dump(st, open(path, "w"))
+elif cmd == "getconnectioncount": print(json.load(open(os.path.join(datadir, net, "fake-peers.json"))))
 elif cmd == "stop": open(os.path.join(datadir, net, "fake-stop"), "w").close()
 else: sys.exit("unknown " + cmd)
 """
@@ -512,6 +668,16 @@ class StateTest(Quiet):
         self.assertEqual(code, 2)
         self.assertIn("disagrees with the statements", err)
         self.assertFalse(os.path.exists(os.path.join(self.datadir, "testnet-yb-fast", "chainstate")))
+
+    def test_a_failed_state_restore_leaves_a_marker(self):
+        marker = os.path.join(self.datadir, "testnet-yb-fast.bootstrap-incomplete")
+        code, err = self.restore(make_state_bundle(os.path.join(self.tmp, "b"), statement_override={"utxo_hash_serialized": "other"}))
+        self.assertEqual(code, 2)
+        self.assertIn("disagrees with the statements", read_text(marker))
+        shutil.rmtree(os.path.join(self.datadir, "testnet-yb-fast"), ignore_errors=True)
+        code, err = self.restore(make_state_bundle(os.path.join(self.tmp, "b2")))
+        self.assertEqual(code, 0, err)
+        self.assertFalse(os.path.exists(marker))
 
     def test_refusals(self):
         code, err = self.restore(make_state_bundle(os.path.join(self.tmp, "b1"), extra_entry="testnet-yb-fast/wallet.dat"))

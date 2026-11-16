@@ -28,7 +28,9 @@ Restoring, in order, refusing at the first failure:
      chain, the genesis, every manifest hash, the raw size and sha256 on the way;
   5. `ycashd` imports the framed files with `-connect=0 -listen=0 -disablewallet` (so a wallet is
      created, from -mnemonicfile or not, only at the node's first normal start; and `-checkpoints=0` under
-     `--verify-full`, which validates every block's scripts instead of trusting the checkpoint);
+     `--verify-full`, which validates every block's scripts instead of trusting the checkpoint), reading
+     a copy of ycash.conf without its peer settings (addnode, connect, seednode, listen, bind, ...:
+     the conf adds to the command line's -connect=0, it does not yield to it); a peer at any poll fails it;
   6. the node must reach the last height with `getblockhash` equal to the manifest at every listed
      height and to the compiled checkpoint at the last; then it is stopped and the framed files
      are removed. Start the node normally afterwards.
@@ -41,6 +43,11 @@ only (no wallet, no LevelDB LOCK/LOG, no links); then the node starts offline, s
 with `invalidateblock H_B+1` when it connected blocks above H_B, must produce the statement's
 fields itself (getblockhash, chainwork, gettxoutsetinfo, vault_getinfo, yed_getstatehash), and
 `reconsiderblock`s. A failure removes what was extracted.
+
+A restore that changes the datadir first writes DATADIR/<network>.bootstrap-incomplete and removes it
+only when it has succeeded: a refused, failed or killed restore leaves it behind, with the reason,
+and the image entrypoint (contrib/docker/ycashd) does not start ycashd while it is there. Exit
+status: 0 restored, 2 refused (the message and the marker say why).
 
 Nothing in a bundle is executed; file names are checked against the format before they become a
 path or a URL. Python standard library only (plus the `minisign` binary when a signature is
@@ -312,7 +319,10 @@ class Source:
                 with urllib.request.urlopen(self.base + name, timeout=120) as reply, open(dest + ".part", "wb") as out:
                     shutil.copyfileobj(reply, out, READ_SIZE)
             except urllib.error.HTTPError as e:
-                if optional and e.code == 404:
+                # A bucket that is not listable (S3, CloudFront without s3:ListBucket) answers 403, not
+                # 404, for an object that is not there: both mean absent, for an optional file only.
+                # Absent is never "verified": the caller then relies on the pin, or refuses.
+                if optional and e.code in (403, 404):
                     return False
                 raise BundleError("%s%s: HTTP %d" % (self.base, name, e.code))
             except (urllib.error.URLError, OSError) as e:
@@ -416,9 +426,11 @@ def free_port():
 class Node:
     """ycashd started for the import only, and ycash-cli against it (same -datadir, -conf, network)."""
 
-    def __init__(self, args, profile, port):
+    def __init__(self, args, profile, port, conf=None):
+        """conf: the ycash.conf both use; an offline import passes import_conf()'s copy."""
         self.ycashd, self.cli_bin = args.ycashd, args.cli
-        self.common = ["-datadir=%s" % args.datadir] + (["-conf=%s" % args.conf] if args.conf else []) + profile["node"]["args"] + ["-rpcport=%d" % port]
+        conf = conf or args.conf
+        self.common = ["-datadir=%s" % args.datadir] + (["-conf=%s" % conf] if conf else []) + profile["node"]["args"] + ["-rpcport=%d" % port]
         self.extra = list(args.node_arg or [])
         self.process = None
 
@@ -445,6 +457,12 @@ class Node:
 
     def alive(self):
         return self.process is not None and self.process.poll() is None
+
+    def check_offline(self):
+        """The import node must have no peer: a block from the network is not a block of the bundle."""
+        peers = int(self.cli("getconnectioncount"))
+        if peers:
+            raise BundleError("the import node has %d peer(s): it must be offline (a peer setting reached it)" % peers)
 
     def stop(self):
         if self.process is None:
@@ -483,6 +501,7 @@ def import_and_check(node, files, manifest, expect, args, profile):
             if text is None:
                 continue                      # the RPC is warming up (loading the block index)
             blocks = int(json.loads(text)["blocks"])
+            node.check_offline()
             if blocks != prev:
                 prev, last_move = blocks, now
             if now - last_report >= 60 or blocks == last:
@@ -507,6 +526,7 @@ def import_and_check(node, files, manifest, expect, args, profile):
                 raise BundleError("getblockhash %d is %s, expected %s" % (height, got, want))
             checked += 1
         best = node.cli("getbestblockhash")
+        node.check_offline()
         if best != expect[last]:
             raise BundleError("best block %s, expected %s" % (best, expect[last]))
         info = json.loads(node.cli("getblockchaininfo"))
@@ -699,8 +719,6 @@ def state_statement(node, height):
 
 def restore_state(args, profile, netdir):
     """§4.4 for a ycash-state/1 bundle: fetch, check, extract, then the node itself checks the statements at H_B."""
-    if not args.source or args.source == "prefix":
-        sys.exit("ycash-bootstrap: --state needs --source (the bundle's directory or URL, e.g. <base>/%s/latest/)" % profile["node"]["datadir"])
     source = Source(args.source)
     work = args.work or os.path.join(args.datadir, "bootstrap-work")
     download = os.path.join(work, "download")
@@ -758,7 +776,7 @@ def restore_state(args, profile, netdir):
               "sha256sums_sha256": sha256_file(sums_path)[0]}
     if args.ycashd and args.cli:
         try:
-            record["check"] = check_state(args, profile, m, statement)
+            record["check"] = check_state(args, profile, m, statement, import_conf(args, work))
         except BundleError:
             shutil.rmtree(netdir, ignore_errors=True)  # a state the node does not confirm is not left behind
             raise
@@ -772,11 +790,11 @@ def restore_state(args, profile, netdir):
     return 0
 
 
-def check_state(args, profile, m, statement):
+def check_state(args, profile, m, statement, conf):
     """Start the restored node offline; roll back to H_B if it connected blocks above it (FORMAT.md, "Blocks
     above H_B"), compare every statement field, then reconsider so the datadir keeps no failed-block mark."""
     height = m["height"]
-    node = Node(args, profile, args.rpcport or free_port())
+    node = Node(args, profile, args.rpcport or free_port(), conf)
     insight = ["-experimentalfeatures", "-insightexplorer", "-txindex"] if m["flavour"] == "full-insight" else []
     node.start([], False, args.dbcache, insight)
     try:
@@ -789,6 +807,7 @@ def check_state(args, profile, m, statement):
             if text is None:
                 continue
             tip = int(text)
+            node.check_offline()
             still = still + 1 if tip == prev else 0
             prev = tip
             if time.time() - t0 > args.stall_timeout:
@@ -802,6 +821,7 @@ def check_state(args, profile, m, statement):
             if int(node.cli("getblockcount")) != height:
                 raise BundleError("invalidateblock %s did not bring the tip to %d" % (invalidated, height))
         mine = state_statement(node, height)
+        node.check_offline()
         mine["network"] = m["network"]
         bad = {k: (statement[k], mine.get(k)) for k in statement if mine.get(k) != statement[k]}
         if invalidated:
@@ -833,20 +853,93 @@ def reset(args, netdir):
     log("--reset: removed %s" % netdir)
 
 
+def marker_path(args):
+    """DATADIR/<network>.bootstrap-incomplete: beside the network's subdirectory, not in it, so a
+    failure that removes the subdirectory keeps it. The image entrypoint reads the same name."""
+    return os.path.join(args.datadir, "%s.bootstrap-incomplete" % args.network)
+
+
+def write_marker(args, netdir, status):
+    os.makedirs(args.datadir, exist_ok=True)
+    path = marker_path(args)
+    with open(path + ".part", "w", encoding="utf-8") as f:
+        f.write("ycash-bootstrap: the restore of %s into %s %s (%s).\n"
+                "ycashd must not start on this datadir until it is cleared: remove %s and remove the marker,\n"
+                "then restore again (or remove only the marker to start on the datadir as it is).\n"
+                % (args.network, netdir, status, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), netdir))
+    os.replace(path + ".part", path)
+
+
+# ycashd arguments that give the import node a peer, or a listening socket (-noX is X=0 on the line).
+PEER_SETTINGS = ("addnode", "connect", "seednode", "bind", "whitebind", "externalip", "listen", "discover", "dnsseed", "upnp")
+
+
+def is_peer_setting(key):
+    key = key.strip().lstrip("-")
+    return key in PEER_SETTINGS or (key.startswith("no") and key[2:] in PEER_SETTINGS)
+
+
+def import_conf(args, work):
+    """The ycash.conf the offline import reads: the node's (--conf, else DATADIR/ycash.conf, which
+    ycashd reads by default) without its peer settings. ycashd appends a conf's addnode/connect/
+    seednode lines to the command line's, so -connect=0 alone does not keep a conf's peers out.
+    RPC credentials, indexes (txindex, insightexplorer) and the network stay as the node has them."""
+    original = args.conf or os.path.join(args.datadir, "ycash.conf")
+    lines = []
+    if os.path.isfile(original):
+        with open(original, encoding="utf-8", errors="replace") as f:
+            for line in f.read().splitlines():
+                key = line.split("=", 1)[0] if "=" in line else line
+                if not line.lstrip().startswith("#") and is_peer_setting(key):
+                    lines.append("# (left out by ycash-bootstrap for the offline import) %s" % key.strip())
+                else:
+                    lines.append(line)
+    os.makedirs(work, exist_ok=True)
+    path = os.path.abspath(os.path.join(work, "import.conf"))     # ycashd reads a relative -conf against the datadir
+    with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:   # it holds the RPC password
+        f.write("# ycash-bootstrap: %s without its peer settings, for the offline import only\n" % original)
+        f.write("\n".join(lines) + "\n")
+    return path
+
+
 def restore(args, profile):
     netdir = os.path.join(args.datadir, profile["node"]["datadir"])
+    bad = [a for a in (args.node_arg or []) if is_peer_setting(a.split("=", 1)[0])]
+    if bad:
+        sys.exit("ycash-bootstrap: --node-arg %s: the import node is offline, peer settings are not taken" % " ".join(bad))
+    if args.state:
+        if not args.source or args.source == "prefix":
+            sys.exit("ycash-bootstrap: --state needs --source (the bundle's directory or URL, e.g. <base>/%s/latest/)" % profile["node"]["datadir"])
+    else:
+        where = profile["prefix"]["url"] if args.source in (None, "prefix") else args.source
+        if not where:
+            sys.exit("ycash-bootstrap: %s has no published prefix: pass --source" % profile["name"])
+        if not args.frame_only and not (args.ycashd and args.cli):
+            sys.exit("restoring needs --ycashd and --cli (or --frame-only DIR to stop after framing)")
+    changes = not (args.frame_only and not args.state)
     if args.reset:
+        write_marker(args, netdir, "started with --reset and has not completed")
         reset(args, netdir)
     if has_chain(netdir):
+        # Nothing was changed: no marker (an existing one, from an earlier failure, stays).
         raise BundleError("%s already holds a chain: ycash-bootstrap restores into an empty datadir (--reset wipes it first)" % netdir)
-    if args.state:
-        return restore_state(args, profile, netdir)
-    where = profile["prefix"]["url"] if args.source in (None, "prefix") else args.source
-    if not where:
-        sys.exit("ycash-bootstrap: %s has no published prefix: pass --source" % profile["name"])
+    if not changes:
+        return restore_prefix(args, profile, netdir, where)
+    write_marker(args, netdir, "started and has not completed (killed, or still running)")
+    try:
+        code = restore_state(args, profile, netdir) if args.state else restore_prefix(args, profile, netdir, where)
+    except BundleError as e:
+        write_marker(args, netdir, "failed: %s" % e)
+        raise
+    except BaseException as e:
+        write_marker(args, netdir, "failed: %s" % (e.__class__.__name__ + (": %s" % e if str(e) else "")))
+        raise
+    os.remove(marker_path(args))
+    return code
+
+
+def restore_prefix(args, profile, netdir, where):
     source = Source(where)
-    if not args.frame_only and not (args.ycashd and args.cli):
-        sys.exit("restoring needs --ycashd and --cli (or --frame-only DIR to stop after framing)")
     work = args.work or os.path.join(args.datadir, "bootstrap-work")
     os.makedirs(work, exist_ok=True)
     log("restoring the %s prefix from %s into %s" % (profile["name"], source, netdir))
@@ -859,7 +952,7 @@ def restore(args, profile):
             os.replace(f, moved[-1])
         print("\n".join("-loadblock=%s" % f for f in moved))
         return 0
-    node = Node(args, profile, args.rpcport or free_port())
+    node = Node(args, profile, args.rpcport or free_port(), import_conf(args, work))
     record["import"] = import_and_check(node, files, manifest, expect, args, profile)
     os.makedirs(netdir, exist_ok=True)
     with open(os.path.join(netdir, "bootstrap.json"), "w", encoding="utf-8") as f:

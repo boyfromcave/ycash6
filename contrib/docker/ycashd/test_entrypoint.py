@@ -25,10 +25,16 @@ printf '%%s\\n' "$@" > "%(dir)s/%(name)s.args"
 exit 0
 """
 # ycash-bootstrap's stand-in creates the network's blocks/ the way a restore would.
+# STUB_BOOTSTRAP_REFUSE behaves as the import whose node synced past the bundle did (beta3 item 8):
+# blocks written, the marker left with the reason, exit 2. STUB_BOOTSTRAP_LEAVE_MARKER exits 0 with it.
 BOOTSTRAP_EXTRA = """[ -n "${STUB_BOOTSTRAP_FAIL:-}" ] && exit 1
 net=""; dd=""
 while [ $# -gt 0 ]; do case "$1" in --network) net=$2; shift 2 ;; --datadir) dd=$2; shift 2 ;; *) shift ;; esac; done
 mkdir -p "$dd/$net/blocks" && touch "$dd/$net/blocks/blk00000.dat"
+if [ -n "${STUB_BOOTSTRAP_REFUSE:-}${STUB_BOOTSTRAP_LEAVE_MARKER:-}" ]; then
+  echo "the restore failed: the node is at 510312, above the bundle's 510247" > "$dd/$net.bootstrap-incomplete"
+  [ -n "${STUB_BOOTSTRAP_REFUSE:-}" ] && exit 2
+fi
 """
 
 
@@ -100,6 +106,39 @@ class EntrypointTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("the node is not started", result.stdout)
         self.assertIsNone(self.args("ycashd"))
+
+    def test_a_refused_restore_is_not_started_past(self):
+        # beta3 item 8: the restore was refused after the import wrote blocks; the restart then saw
+        # blocks and started the node on them. The marker stops every later start until it is cleared.
+        env = dict(YCASHD_NETWORK="testnet", YCASHD_TESTNET_PROFILE="fast", YCASHD_BOOTSTRAP="prefix")
+        result = self.run_entrypoint(STUB_BOOTSTRAP_REFUSE="1", **env)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIsNone(self.args("ycashd"))
+        os.remove(os.path.join(self.tmp, "ycash-bootstrap.args"))
+        marker = os.path.join(self.data, "testnet-yb-fast.bootstrap-incomplete")
+        for again in (env, dict(YCASHD_NETWORK="testnet", YCASHD_TESTNET_PROFILE="fast")):     # restarted, or YCASHD_BOOTSTRAP dropped
+            result = self.run_entrypoint(**again)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn(marker, result.stdout)
+            self.assertIn("above the bundle's 510247", result.stdout)
+            self.assertIsNone(self.args("ycashd"))
+            self.assertIsNone(self.args("ycash-bootstrap"))
+        os.remove(marker)                                        # the operator clears it: the datadir is used as it is
+        result = self.run_entrypoint(**env)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIsNotNone(self.args("ycashd"))
+
+    def test_a_marker_after_a_zero_exit_is_not_a_restore(self):
+        result = self.run_entrypoint(YCASHD_NETWORK="regtest", YCASHD_BOOTSTRAP="/b", STUB_BOOTSTRAP_LEAVE_MARKER="1")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIsNone(self.args("ycashd"))
+
+    def test_another_networks_marker_does_not_stop_this_one(self):
+        os.makedirs(self.data)
+        open(os.path.join(self.data, "testnet-yb-slow.bootstrap-incomplete"), "w").close()
+        result = self.run_entrypoint(YCASHD_NETWORK="testnet", YCASHD_TESTNET_PROFILE="fast")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIsNotNone(self.args("ycashd"))
 
     def test_unset_changes_nothing(self):
         result = self.run_entrypoint(YCASHD_NETWORK="testnet", YCASHD_TESTNET_PROFILE="fast")
