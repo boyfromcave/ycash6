@@ -158,6 +158,8 @@ BASE_SCRIPTS= [
     'wallet_yed_ecc_token.py',
     'wallet_beta2_followups.py',
     'wallet_beta2_followups2.py',
+    # beta3 item 6: vin[].address of an input spending an FN-DSA or SLH-DSA output (getrawtransaction, getblock 2, getblockdeltas).
+    'getrawtransaction_insight_pq.py',
     # Longest test should go first, to favor running tests in parallel
     # vv Tests less than 5m vv
     'wallet.py',
