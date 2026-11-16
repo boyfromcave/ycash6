@@ -6,7 +6,7 @@
 """Extract and compare the Vault chain parameters of the two Yellowback node lines.
 
   yellowback-vault-params.py extract [--root DIR | --git-ref REF [--git-dir DIR]]
-  yellowback-vault-params.py compare A.json B.json [--release main [--stage beta|rc|final]]
+  yellowback-vault-params.py compare A.json B.json [--release main [--release-version VER | --stage beta|rc|final]]
   yellowback-vault-params.py stage VERSION
 
 Both node lines must activate the vault upgrade with the same parameters (upgrade plan P8; audit
@@ -22,7 +22,7 @@ mainnet's values, then the testnet's). Their split height H_S (TESTNET_SHADOW_SP
 network's Vault and shadow branch IDs (NetworkUpgradeInfo, or a network's own nBranchId) are read too.
 `compare --release main` applies the release rules to A (the tag guard) for the stage the tag names
 (testnet plan §5.1, T-8): a beta needs only the invariants (testnet-legacy never activates Vault;
-slow and legacy have branch IDs of their own); an rc needs R3-R6, the testnet's R7 (fast named, slow
+slow and legacy have branch IDs of their own) and, from 6.22.0-beta3 on, R9; an rc needs R3-R6, the testnet's R7 (fast named, slow
 pending or named, legacy never), R8 (H_S set) and R9 (fast's YDF mandate end set, not provisional), and mainnet's height and set only together if the
 owner sets them; a final release needs R1-R9. Part D, raising PROTOCOL_VERSION, is taken with rc1
 (T-8): UPGRADE_VAULT.nProtocolVersion and PROTOCOL_VERSION move together, MIN_PEER_PROTO_VERSION
@@ -48,9 +48,12 @@ SHADOW_SPLIT_CONSTANT = "TESTNET_SHADOW_SPLIT_HEIGHT"
 SHADOW_HASH_CONSTANT = "TESTNET_SHADOW_SPLIT_HASH"
 # testnet-yb-fast's own end of the YDF mandate (beta3 item 5, B3-D4). The tree carries the provisional
 # value until the release-candidate cut sets the fast-testnet tip plus 400 blocks; R9 refuses an rc or
-# final tag that still carries it.
+# final tag that still carries it, and a beta tag from R9_BETA_FROM on (the beta3 cut: a beta is what
+# the fast testnet runs, so a beta that kept the provisional value would never end the mandate there).
+# The 6.22.0-beta1 and -beta2 tags predate the fast profile's own value and stay valid history.
 FAST_YDF_END_CONSTANT = "TESTNET_FAST_YDF_MANDATE_END_HEIGHT"
 PROVISIONAL_FAST_YDF_MANDATE_END_HEIGHT = 600000
+R9_BETA_FROM = (6, 22, 0, 3)
 PROFILE_NAMES = {"fast": "testnet-yb-fast", "slow": "testnet-yb-slow", "legacy": "testnet-legacy"}
 # The YED columns: MainParams (main), TestParams (testnet-yb-slow; testnet-legacy, inert), TestFastParams.
 YB_COLUMNS = ("MainParams", "TestParams", "TestFastParams")
@@ -272,6 +275,31 @@ def stage_of(version):
     return m.group("line"), m.group("pre") or "final"
 
 
+def r9_applies(stage, version=None):
+    """Whether R9 binds a tag at STAGE named VERSION: always on an rc or a final release; on a beta from
+    R9_BETA_FROM on, and on a beta whose version is not given or not of the betaM shape (the strictest
+    reading: only a version that is a beta and older than R9_BETA_FROM is exempt)."""
+    if stage != "beta":
+        return True
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)-beta([1-9]\d*)\Z", version or "")
+    if not m:
+        return True
+    return tuple(int(g) for g in m.groups()) >= R9_BETA_FROM
+
+
+def fast_ydf_problems(test):
+    """R9 (beta3 item 5, B3-D4): the fast profile's YDF mandate end is the value chosen at the
+    release-candidate cut, never the provisional one the tree carries until then."""
+    fast_ydf = test.get("fast", {}).get("ydf_mandate_end_height")
+    if not _height_set(fast_ydf):
+        return ["R9: testnet-yb-fast's YDF mandate end (%s) is unset" % FAST_YDF_END_CONSTANT]
+    if fast_ydf == PROVISIONAL_FAST_YDF_MANDATE_END_HEIGHT:
+        return ["R9: testnet-yb-fast's YDF mandate end (%s) is still the provisional %d; set it at the "
+                "release-candidate cut (the fast-testnet tip plus 400 blocks)"
+                % (FAST_YDF_END_CONSTANT, PROVISIONAL_FAST_YDF_MANDATE_END_HEIGHT)]
+    return []
+
+
 def shadow_id_problems(main, test):
     """R8's branch-ID half (docs/plans/yellowback-testnet-shadow-fork-plan.md), an invariant at every
     stage: slow and legacy sign after H_S under branch IDs of their own, distinct from each other and
@@ -292,12 +320,13 @@ def shadow_id_problems(main, test):
     return problems
 
 
-def release_problems(doc, stage="final"):
-    """The release rules for a tag of this tree at STAGE (audit W3-P-1 part C; testnet plan §5.1).
+def release_problems(doc, stage="final", release_version=None):
+    """The release rules for a tag of this tree at STAGE, named RELEASE_VERSION when known (audit W3-P-1 part C;
+    testnet plan §5.1).
 
     beta   only the invariants: testnet-legacy never activates Vault, and testnet-yb-slow and
            testnet-legacy have branch IDs of their own (R8's ID half; parity, maturity and the
-           version line are the caller's).
+           version line are the caller's); and R9 from 6.22.0-beta3 on (r9_applies).
     rc     R3-R6; R7 for the testnet: testnet-yb-fast has its height and its set, testnet-yb-slow
            names a set only with a height (a height alone is its pending activation, T-15),
            testnet-legacy never; mainnet's height and set stay unset unless the owner sets both;
@@ -325,6 +354,8 @@ def release_problems(doc, stage="final"):
         problems.append("R7: testnet-legacy must never set an UPGRADE_VAULT activation height")
     problems.extend(shadow_id_problems(main, test))
     if stage == "beta":
+        if r9_applies(stage, release_version):
+            problems.extend(fast_ydf_problems(test))
         return problems
     vault_v = main.get("vault_protocol_version")
     if not isinstance(vault_v, int) or isinstance(vault_v, bool) or vault_v <= LIVE_NETWORK_PROTOCOL_VERSION:
@@ -360,15 +391,8 @@ def release_problems(doc, stage="final"):
         elif not re.fullmatch(r"[0-9a-f]{64}", test.get(profile, {}).get("shadow_split_hash") or ""):
             problems.append("R8: %s shadow fork not ready: the checkpoint at H_S (%s) is unset"
                             % (PROFILE_NAMES[profile], SHADOW_HASH_CONSTANT))
-    # R9 (rc and final; beta3 item 5, B3-D4): the fast profile's YDF mandate end is the value chosen at the
-    # release-candidate cut, never the provisional one the tree carries until then.
-    fast_ydf = test.get("fast", {}).get("ydf_mandate_end_height")
-    if not _height_set(fast_ydf):
-        problems.append("R9: testnet-yb-fast's YDF mandate end (%s) is unset" % FAST_YDF_END_CONSTANT)
-    elif fast_ydf == PROVISIONAL_FAST_YDF_MANDATE_END_HEIGHT:
-        problems.append("R9: testnet-yb-fast's YDF mandate end (%s) is still the provisional %d; set it at the "
-                        "release-candidate cut (the fast-testnet tip plus 400 blocks)"
-                        % (FAST_YDF_END_CONSTANT, PROVISIONAL_FAST_YDF_MANDATE_END_HEIGHT))
+    # R9 (rc and final; a beta above, from 6.22.0-beta3 on).
+    problems.extend(fast_ydf_problems(test))
     return problems
 
 
@@ -394,7 +418,9 @@ def main(argv):
     cp.add_argument("a")
     cp.add_argument("b")
     cp.add_argument("--release", choices=("main",), default=None)
-    cp.add_argument("--stage", choices=STAGES, default="final", help="the release stage --release applies (default final)")
+    cp.add_argument("--stage", choices=STAGES, default=None, help="the release stage --release applies (default final)")
+    cp.add_argument("--release-version", default=None,
+                    help="the release version the tag names: its stage, and whether R9 binds a beta")
     st = sub.add_parser("stage")
     st.add_argument("version")
     args = ap.parse_args(argv)
@@ -427,11 +453,19 @@ def main(argv):
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
 
+    stage = args.stage
+    if args.release_version is not None:
+        found = stage_of(args.release_version)
+        if found is None or (stage is not None and stage != found[1]):
+            print("yellowback-vault-params: %r is not a release version of stage %s" % (args.release_version, stage or "any"),
+                  file=sys.stderr)
+            return 1
+        stage = found[1]
     with open(args.a, encoding="utf-8") as fa, open(args.b, encoding="utf-8") as fb:
         loaded_a, loaded_b = json.load(fa), json.load(fb)
     bad = compare(loaded_a, loaded_b)
     if args.release == "main":
-        bad.extend(release_problems(loaded_a, args.stage))
+        bad.extend(release_problems(loaded_a, stage or "final", args.release_version))
     for line in bad:
         print("DIFFERENT %s" % line)
     if bad:

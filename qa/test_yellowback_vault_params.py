@@ -422,9 +422,21 @@ class VaultParams(unittest.TestCase):
         with self.assertRaises(ValueError):
             vp.release_problems(final, "gamma")
         # R9 (beta3 item 5): fast's YDF mandate end must be set, and not the provisional value, on an rc
-        # or a final tag; a beta may carry the provisional value.
+        # or a final tag, and on a beta from 6.22.0-beta3 on (the beta3 cut); the beta1 and beta2 tags
+        # stay valid, and a beta named by no version gets the strictest reading.
         provisional = vp.PROVISIONAL_FAST_YDF_MANDATE_END_HEIGHT
-        self.assertEqual(rules(doc(fast_ydf=provisional), "beta"), [])
+        for version in ("6.22.0-beta1", "6.22.0-beta2"):
+            self.assertEqual(sorted(p.split(":")[0] for p in vp.release_problems(doc(fast_ydf=provisional), "beta", version)), [])
+        for version in ("6.22.0-beta3", "6.22.0-beta10", "6.22.1-beta1", "6.23.0-beta1", None, "6.22.0"):
+            self.assertEqual(sorted(p.split(":")[0] for p in vp.release_problems(doc(fast_ydf=provisional), "beta", version)),
+                             ["R9"], version)
+            self.assertEqual(sorted(p.split(":")[0] for p in vp.release_problems(doc(fast_ydf=None), "beta", version)),
+                             ["R9"], version)
+            self.assertEqual(vp.release_problems(doc(fast_ydf=511752), "beta", version), [], version)
+        self.assertFalse(vp.r9_applies("beta", "6.22.0-beta2"))
+        self.assertTrue(vp.r9_applies("beta", "6.22.0-beta3"))
+        self.assertTrue(vp.r9_applies("rc", "6.22.0-rc1"))
+        self.assertEqual(rules(doc(fast_ydf=provisional), "beta"), ["R9"])
         self.assertEqual(rules(doc(fast_ydf=provisional), "rc"), ["R9"])
         self.assertIn("R9", rules(doc(fast_ydf=provisional, main_height=3300000, main_att=att), "final"))
         self.assertEqual(rules(doc(fast_ydf=None), "rc"), ["R9"])

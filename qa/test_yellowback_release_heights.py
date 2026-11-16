@@ -222,11 +222,24 @@ class ReleaseHeights(unittest.TestCase):
 
     def test_provisional_fast_ydf_mandate_end_by_stage(self):
         # beta3 item 5 (R9): an rc or final tag is refused while the fast profile's YDF mandate end is the
-        # provisional value; a beta ships with it.
+        # provisional value, and so is a beta from 6.22.0-beta3 on (the beta3 cut); the beta1 and beta2
+        # tags, which predate the fast profile's own value, still pass.
         root = self.rc_tree("rc-provisional-ydf", fast_ydf=str(vp_provisional()))
-        code, out = run(["--root", root, "--release-version", "6.22.0-rc1"])
+        for version in ("6.22.0-rc1", "6.22.0-beta3", "6.22.1-beta1"):
+            code, out = run(["--root", root, "--release-version", version])
+            self.assertEqual(code, 1, version + ": " + out)
+            self.assertIn("problem: R9: testnet-yb-fast's YDF mandate end", out)
+            self.assertIn("YDF mandate end %d" % vp_provisional(), out)
+        for version in ("6.22.0-beta1", "6.22.0-beta2"):
+            code, out = run(["--root", root, "--release-version", version])
+            self.assertEqual(code, 0, version + ": " + out)
+        code, out = run(["--root", root, "--stage", "beta"])
         self.assertEqual(code, 1, out)
-        self.assertIn("problem: R9: testnet-yb-fast's YDF mandate end", out)
+        warn, warned = run(["--warn", "--root", root, "--release-version", "6.22.0-beta3"])
+        self.assertEqual(warn, 0, warned)
+        self.assertIn("problem: R9", warned)
+        # The value set at the cut passes a beta3 tag.
+        root = self.rc_tree("rc-cut-ydf", fast_ydf="511752")
         code, out = run(["--root", root, "--release-version", "6.22.0-beta3"])
         self.assertEqual(code, 0, out)
 
