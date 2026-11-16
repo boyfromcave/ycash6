@@ -1299,7 +1299,7 @@ class HardeningTest(RestoreTest):
         old = os.path.join(work, "import.conf")
         with open(old, "w") as f:
             f.write("left behind\n")
-        os.chmod(old, 0o644)
+        os.chmod(old, 0o640)                                               # a leftover readable by more than its owner
         with open(os.path.join(self.datadir, "ycash.conf"), "w") as f:
             f.write("rpcpassword=secret\n")
         path = yb.import_conf(type("A", (), {"conf": None, "datadir": self.datadir})(), work)
