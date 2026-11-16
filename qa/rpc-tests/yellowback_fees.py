@@ -28,6 +28,7 @@ from decimal import Decimal
 
 from test_framework.util import assert_equal, assert_greater_than, wait_and_assert_operationid_status, z_sendmany_opid
 from test_framework.yellowback_util import (
+    YELLOWBACK_RPC_VERSION,
     BPS,
     CLAIM_DELAY,
     COIN,
@@ -132,7 +133,7 @@ class YellowbackFeesTest(ArmedModeMixin, YellowbackTestFramework):
         print('yed_getinfo rpcversion 8: params.fees, maxMintCents, supplyCap')
         info = user.yed_getinfo()
         params = info['params']
-        assert_equal(info['rpcversion'], 10)   # 10: the beta3 additions (B3-D5); 9: D-9 (additive here); 8 brought the fee structure
+        assert_equal(info['rpcversion'], YELLOWBACK_RPC_VERSION)   # 10: the beta3 additions (B3-D5); 9: D-9 (additive here); 8 brought the fee structure
         assert 'feeMinZat' not in params and 'feeBps' not in params
         assert_equal(params['maxMintCents'], MAX_MINT)
         fees = params['fees']

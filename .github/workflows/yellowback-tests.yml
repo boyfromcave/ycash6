@@ -1629,6 +1629,8 @@ jobs:
         run: python3 qa/test_yellowback_cross_line.py -v
       - name: Cross-line overlay-tree checker unit tests (audit W3-P-2)
         run: python3 qa/test_yellowback_cross_line_trees.py -v
+      - name: rpcversion literal checker unit tests (the audit's rpcversion leg)
+        run: python3 qa/test_yellowback_rpcversion.py -v
       - name: kogany mixed-line harness unit tests (test_framework/test_kogany.py; no node)
         if: ${{ !cancelled() }}
         working-directory: qa/rpc-tests

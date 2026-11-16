@@ -137,6 +137,21 @@ YCASH_UPGRADE_ARGS = [
     nuparams(YCASH_CANOPY_BRANCH_ID, 1),
 ]
 
+# The rpcversion yed_getinfo reports: YELLOWBACK_RPC_VERSION (src/rpc/yellowback.cpp), read from the
+# RPC contract that CI keeps equal to it, so a bump changes no test (qa/yellowback-rpcversion.py, the
+# audit leg that refuses a literal). None in a checkout without doc/ (a sparse client checkout).
+def _contract_rpcversion():
+    import json
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'doc', 'yellowback-rpc-contract.json')
+    try:
+        with open(path, encoding='utf-8') as f:
+            return json.load(f)['rpcversion']
+    except FileNotFoundError:
+        return None
+
+
+YELLOWBACK_RPC_VERSION = _contract_rpcversion()
+
 # Every Yellowback transaction a test builds is signed after the vault upgrade (VAULT_ACTIVATION),
 # so CurrentEpochBranchId(chainActive.Height() + 1) — the branch id the owner signature binds
 # (section 3.4) — is the Vault branch's on every node (upgrade plan U-9).

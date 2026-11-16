@@ -39,6 +39,7 @@ from test_framework.util import assert_equal, assert_greater_than
 from test_framework.util import bytes_to_hex_str
 from test_framework.yellowback_attest import wallet_mint, wallet_claim, wallet_notice, wallet_report_equivocation
 from test_framework.yellowback_util import (
+    YELLOWBACK_RPC_VERSION,
     ATTEST_ARM_MIN,
     ATTEST_MAX_AGE,
     BOND_MATURITY,
@@ -200,7 +201,7 @@ class YellowbackRpcContractTest(YellowbackTestFramework):
         nodes = self.nodes
         user, claimant = nodes[0], nodes[5]
         c = Contract(CONTRACT)
-        assert_equal(c.doc['rpcversion'], 10)   # 10: the beta3 additions (B3-D5); 9: D-9 PQ address versions per scheme; 8: the fee structure (D-Q-23/24/25)
+        assert_equal(c.doc['rpcversion'], YELLOWBACK_RPC_VERSION)   # 10: the beta3 additions (B3-D5); 9: D-9 PQ address versions per scheme; 8: the fee structure (D-Q-23/24/25)
 
         print('before the reference height reaches the upgrade: index-below-start (U-22: live from the upgrade height)')
         assert_equal(user.yed_getinfo()['rpcversion'], c.doc['rpcversion'])

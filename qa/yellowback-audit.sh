@@ -16,6 +16,8 @@
 #   attribution   The Ycash developers on every fork file and every modified upstream file with a
 #                 copyright line, no copyright line removed, no ycash6/YDollar/DigiDollar naming
 #   secops        the RustSec ignores of osv-scanner.toml and contrib/secops/deny-node.toml agree
+#   rpcversion    no literal rpcversion check outside qa/yellowback-rpcversion.py's allow-list: tests
+#                 and scripts read it from doc/yellowback-rpc-contract.json, equal to the constant
 #   cross-line    the other node line: the manifest, the overlay trees and the Vault chain parameters
 #
 # Usage: qa/yellowback-audit.sh [--report-only] [--only LEG,..] [--skip LEG,..] [--require-cross-line] [base]
@@ -50,13 +52,13 @@ while [ $# -gt 0 ]; do
     --skip) skip="${2:-}"; shift 2 ;;
     --skip=*) skip="${1#--skip=}"; shift ;;
     --require-cross-line) require_cross_line=1; shift ;;
-    -h|--help) sed -n '6,35p' "$0"; exit 0 ;;
+    -h|--help) sed -n '6,37p' "$0"; exit 0 ;;
     -*) echo "unknown argument: $1" >&2; exit 2 ;;
     *) base="$1"; shift ;;
   esac
 done
 base="${base:-ycash6-baseline}"
-LEGS="frozen pq-wipes ci-guards golden rpc-cvt registration attribution secops cross-line"
+LEGS="frozen pq-wipes ci-guards golden rpc-cvt registration attribution secops rpcversion cross-line"
 for l in ${only//,/ } ${skip//,/ }; do
   case " $LEGS " in *" $l "*) ;; *) echo "unknown leg $l (one of: $LEGS)" >&2; exit 2 ;; esac
 done
@@ -332,6 +334,12 @@ find_other_line() {   # find_other_line <other main-tree name> <other worktree p
   echo "other line found at the sibling path (committed state only; uncommitted changes there are not read)"
 }
 
+leg_rpcversion() {
+  # One source for the RPC version (beta3): YELLOWBACK_RPC_VERSION equals the contract's rpcversion, and
+  # no test or script states it as a literal (every bump from 5 to 10 left one behind).
+  py qa/yellowback-rpcversion.py check
+}
+
 leg_cross_line() {
   # Both node lines carry identical behaviour (upgrade plan §9): the manifest's identical files, trees and
   # pinned shims, the overlay trees, and every Vault chain parameter (audit W3-P-1, W3-P-2), as the
@@ -375,5 +383,6 @@ leg rpc-cvt leg_rpc_cvt
 leg registration leg_registration
 leg attribution leg_attribution
 leg secops leg_secops
+leg rpcversion leg_rpcversion
 leg cross-line leg_cross_line
 exit $rc

@@ -27,7 +27,7 @@ Steps (each can be skipped with --skip NAME[,NAME]):
              with its agent stopped and revives with a SET_HEARTBEAT when it comes back
   mint       arming (ARMED, seated), mints -> the V template (tag YED, the attestor set, CLAIM_DELAY)
   transfer   yed_send to the holder and the claimant
-  pq         the post-quantum line (quantum plan §4.9): rpcversion 10 and params.pq; a wallet mint's SLH-DSA owner (53-character
+  pq         the post-quantum line (quantum plan §4.9): the current rpcversion and params.pq; a wallet mint's SLH-DSA owner (53-character
              owner address, the V's PQ owner slot, the v4 MINT) and its holder (P2PKH before Falcon, FN-DSA-512 after);
              the primitive with PQ owners (vault_getnewowner -> vault_lock -> vault_ownerspend: SLH-DSA, and FN-DSA-512 once
              Falcon is active); PQ holder transfers (user -> holder's PQ address -> claimant's PQ address, a PQ holder
@@ -95,8 +95,29 @@ dv = _load_devnet()                         # the devnet's own helpers (state, r
 from test_framework.mininode import CBlock, CTransaction           # noqa: E402
 from test_framework.util import bytes_to_hex_str, hex_str_to_bytes, sync_blocks   # noqa: E402
 from test_framework.yellowback_util import (CLAIM_DELAY, PQ_OWNER_SECRETS, REF_LAG, SIGNING_BRANCH_ID, VAULT_ACTIVATION,   # noqa: E402
+                                            YELLOWBACK_RPC_VERSION,
                                             _low_s, _select_funding, _spk_of_address, new_pq_owner, template_coinbase, wif_to_secret)
 from test_framework import yellowback_model as ym                  # noqa: E402
+
+# The rpcversion ladder, newest first: each version yed_getinfo can report and what first shows it, read
+# from yed_getinfo.params and getblockchaininfo, so the walk names the version of the node it walks. The
+# newest row is the tree's own (YELLOWBACK_RPC_VERSION, read from doc/yellowback-rpc-contract.json; the
+# clients step fails until a bump adds its row here).
+RPCVERSION_LADDER = [
+    (10, "the beta3 additions to stock calls (B3-D5): getblockchaininfo.transparentPools",
+     lambda params, chain: "transparentPools" in chain and isinstance(params.get("pqAddressVersion"), dict)),
+    (9, "post-quantum address versions per scheme (D-9)", lambda params, chain: isinstance(params.get("pqAddressVersion"), dict)),
+    (8, "the fee structure: params.fees (D-Q-23..26)", lambda params, chain: "fees" in params),
+    (7, "the post-quantum line: params.pq (quantum spec 6.2)", lambda params, chain: "pq" in params),
+    (6, "in-term claims (IT-7)", lambda params, chain: params.get("inTermClaims") is True),
+    (5, "the vault upgrade", lambda params, chain: True),
+]
+
+
+def expected_rpcversion(params, chain):
+    """The newest ladder row whose feature the node shows."""
+    return next(version for version, _what, shows in RPCVERSION_LADDER if shows(params, chain))
+
 
 # Which steps run off regtest (testnet plan §3.2: "a check that cannot run on testnet is marked so in
 # the walk itself"). Every step below mines its own blocks on the eleven-node private chain and
@@ -524,11 +545,10 @@ class Walk:
                 "UPGRADE_VAULT (branch 6d5b7a31) active since %d" % VAULT_ACTIVATION)
         up = self.call(USER, "yed_getinfo", keys=["rpcversion", "upgrade", "attest"])
         params = self.node(USER).yed_getinfo()["params"]
-        # 5: the upgrade; 6: in-term claims (IT-7); 7: the post-quantum line (params.pq, quantum spec §6.2);
-        # 8: its fee structure (params.fees, D-Q-23..26); 9: PQ address versions per scheme (D-9);
-        # 10: the beta3 additions to stock calls (B3-D5), seen as getblockchaininfo's transparentPools (item 2)
-        beta3 = "transparentPools" in self.node(USER).getblockchaininfo()
-        want = 10 if beta3 and isinstance(params.get("pqAddressVersion"), dict) else 9 if isinstance(params.get("pqAddressVersion"), dict) else 8 if "fees" in params else 7 if "pq" in params else 6 if params.get("inTermClaims") is True else 5
+        chain = self.node(USER).getblockchaininfo()
+        want = expected_rpcversion(params, chain)
+        self.ok(RPCVERSION_LADDER[0][0] == YELLOWBACK_RPC_VERSION,
+                "the ladder's newest row is the tree's rpcversion %s (doc/yellowback-rpc-contract.json)" % YELLOWBACK_RPC_VERSION)
         self.ok(up["rpcversion"] == want and up["upgrade"]["attestorSetId"] == self.set_id, "Yellowback rpcversion %d on the attestor set %s" % (want, self.set_id[:16]))
         self.fails(STOCK, "yed_getinfo", expect="Method not found")
         self.note("node 1 runs without -yellowbackattestorset: no yed_* there, but the primitive (set_*/vault_*) runs on every node")
@@ -819,8 +839,9 @@ class Walk:
         pq = self.call(USER, "yed_getinfo", keys=["rpcversion"])
         pq = self.pq_params()
         self.out("    = params.pq %s" % jdump(pq))
-        self.ok(self.node(USER).yed_getinfo()["rpcversion"] == 10 and pq.get("schemes") == ([1, 2] if falcon else [1]),
-                "rpcversion 10; params.pq.schemes %s, falconActive %s, falconHeight %s" % (pq.get("schemes"), pq.get("falconActive"), pq.get("falconHeight")))
+        self.ok(self.node(USER).yed_getinfo()["rpcversion"] == YELLOWBACK_RPC_VERSION and pq.get("schemes") == ([1, 2] if falcon else [1]),
+                "rpcversion %s; params.pq.schemes %s, falconActive %s, falconHeight %s"
+                % (YELLOWBACK_RPC_VERSION, pq.get("schemes"), pq.get("falconActive"), pq.get("falconHeight")))
         # every YED vault's owner is SLH-DSA (D-Q-1): vault E, minted by the wallet's yed_mint (with --only: the wallet's newest)
         if "E" not in self.vaults:
             self.vaults["E"] = max(self.node(USER).yed_listpositions("ACTIVE"), key=lambda r: r.get("refHeight", 0))["txid"]
