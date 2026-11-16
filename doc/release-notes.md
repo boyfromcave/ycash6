@@ -154,6 +154,10 @@ post-quantum input, snapshot restores, and what `rpcversion` 10 covers; then the
   before any request; elsewhere a state bundle over http(s) and an unpinned prefix need it too, and
   `--allow-unsigned` accepts an unsigned one with a warning. The "not signed" message names the HTTP
   status of the missing `.minisig`.
+- **No restore hangs**: the node check after a state restore fails after `--stall-timeout` (default
+  1800 s) also when the restored `ycashd` never leaves warm-up (it used to wait forever), and a full
+  disk during a part's download fails at once with "no space left on the disk" instead of being
+  retried as a broken connection.
 - **The container image restores mainnet**: on mainnet `YCASHD_BOOTSTRAP` is a state bundle's URL or
   directory (never `prefix`), and the marker is `main.bootstrap-incomplete`. ycash-dd's image refuses
   a mainnet bundle, which is a ycash6 data directory.
