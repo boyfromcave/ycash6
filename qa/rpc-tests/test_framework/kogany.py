@@ -32,7 +32,9 @@ Environment
                           reject fails the run instead of being skipped with a note (default 0).
 ``KOGANY_MEMPOOL``        1: assert ``getrawmempool`` set equality at every mempool sync point and
                           compare transaction verdicts (default 0, until W6 lands kogany's policy).
-``KOGANY_SYNC_TIMEOUT``   seconds a follower may take to reach the peer's tip (default 120).
+``KOGANY_SYNC_TIMEOUT``   seconds a follower's tip may stay unmoved before a sync point fails (default
+                          120): a stall fails, a catch-up that keeps moving does not, up to ten times
+                          this in all (``MixedLine._wait_tip``).
 ``KOGANY_TX_TIMEOUT``     seconds ``offer_tx`` waits for kogany's ``sendrawtransaction`` (default 10): Zakura
                           waits up to six minutes for a missing input, and no answer is compared as
                           ``reject-state`` (ycashd's "Missing inputs").
@@ -2179,6 +2181,9 @@ class MixedLine:
         self.yewd = yewd
         self.connect_settle = 5.0
         self.connect_retry = 60.0     # a restarted peer: seconds of re-dials (_connect)
+        self.dial_settle = 3.0        # _connect: seconds the follower's own dial gets
+        self.sync_cap = 10            # _wait_tip: the hard cap, in sync_timeouts
+        self.recheck = 10.0           # _wait_tip: seconds between connection checks
         self.mirror_invalidate = mirror_invalidate
         self.tx_timeout = tx_timeout
         self.mirrored = {}
@@ -2339,28 +2344,50 @@ class MixedLine:
     def _config_for(self, f):
         return koganyd_config(self.peer_args, f.k, [p2p_port(self.peer)], f.datadir)
 
+    def _dial_peer(self, f):
+        """The follower's own ``addnode <peer> onetry``: it dials the peer now, so a reconnection
+        never waits for the peer to dial in (koganyd refuses an inbound reconnection from the
+        address it just lost for about two minutes, a denial-of-service guard, so the peer's
+        ``addnode <follower>`` fails in that window).  Best effort: an error is ignored."""
+        try:
+            f.rpc.addnode('127.0.0.1:%d' % p2p_port(self.peer), 'onetry')
+        except (OSError, JSONRPCException):
+            pass
+
     def _connect(self, proxy, f, settle=None, restart=False):
-        """One connection per follower: the follower dials the peer (``initial_testnet_peers``);
-        only when it still has no peer after ``settle`` seconds (a peer restart, say) does the peer
+        """One connection per follower, the follower dialing: at a first start it dials the peer
+        by itself (``initial_testnet_peers``); when it has no peer after ``settle`` seconds it is
+        told to (``_dial_peer``), and at a restart of the peer it is told to at once.  Only when
+        that has not connected it after ``dial_settle`` seconds does the peer
         ``addnode <follower> onetry``.  Never two: a script that counts ``getpeerinfo`` sees one
         extra peer per follower, not two (recorded)."""
         addr = '127.0.0.1:%d' % kogany_p2p_port(f.k)
-        deadline = time.time() + (self.connect_settle if settle is None else settle)
-        while True:
+
+        def connected():
             try:
                 if restart:
                     # the restarted peer's own view: a follower peer per follower (all followers
-                    # share the one peer)
-                    if sum(1 for p in proxy.getpeerinfo() if KOGANY_SUBVER.search(p.get('subver', ''))) \
-                            >= len(self.followers):
-                        return
-                elif f.rpc.getpeerinfo():
-                    return
+                    # share the one peer); the follower's own list may still hold the dead one
+                    return sum(1 for p in proxy.getpeerinfo()
+                               if KOGANY_SUBVER.search(p.get('subver', ''))) >= len(self.followers)
+                return bool(f.rpc.getpeerinfo())
             except (OSError, JSONRPCException):
-                pass
-            if time.time() > deadline:
-                break
-            time.sleep(0.25)
+                return False
+
+        def wait(seconds):
+            deadline = time.time() + seconds
+            while not connected():
+                if time.time() > deadline:
+                    return False
+                time.sleep(0.25)
+            return True
+
+        settle = self.connect_settle if settle is None else settle
+        if not restart and wait(settle):
+            return
+        self._dial_peer(f)
+        if wait(self.dial_settle if not restart else max(settle, self.dial_settle)):
+            return
         try:
             if not any(p.get('addr') == addr for p in proxy.getpeerinfo()):
                 proxy.addnode(addr, 'onetry')
@@ -2378,6 +2405,7 @@ class MixedLine:
                     if sum(1 for p in peers if KOGANY_SUBVER.search(p.get('subver', ''))) >= len(self.followers):
                         return
                     if not any(p.get('addr') == addr for p in peers):
+                        self._dial_peer(f)
                         proxy.addnode(addr, 'onetry')
                 except (OSError, JSONRPCException):
                     pass
@@ -2425,25 +2453,72 @@ class MixedLine:
                 self._check_isolated(f)
             else:
                 self._connect(ref, f)
-            deadline = time.time() + self.sync_timeout
-            while True:
-                try:
-                    got = f.rpc.getbestblockhash()
-                except (OSError, JSONRPCException):
-                    got = None
-                if got == tip:
-                    break
-                if self.mirror_invalidate and got is not None:
-                    self._mirror(ref, f, got)
-                if self.sidecar and got is not None and time.time() > deadline - self.sync_timeout + self.pump_after:
-                    self._pump(ref, f, got)
-                if time.time() > deadline:
-                    hint = self.invalidate_hint()
-                    raise AssertionError('kogany %d did not reach the peer tip %s (height %d) %s: at %s%s'
-                                         % (f.k, tip, ref.getblockcount(), label, got,
-                                            ('; ' + hint) if hint else ''))
-                time.sleep(0.2)
+            self._wait_tip(ref, f, tip, label)
             self._compare_statehash(ref, f, label)
+
+    def _wait_tip(self, ref, f, tip, label, clock=time.time, sleep=time.sleep):
+        """Wait for follower ``f`` to reach ``tip``.  The timeout is on NO PROGRESS: it fails when
+        the follower's tip has not moved for ``sync_timeout`` seconds (a stall), not after
+        ``sync_timeout`` seconds in all, so a long catch-up that keeps moving is not cut off; a
+        hard cap of ``sync_cap`` times that still bounds the wait.  While it waits it checks the
+        connection every ``recheck`` seconds and re-makes it when the follower has no peer.  On
+        failure it prints both nodes' ``getpeerinfo`` and the tail of the koganyd log."""
+        start = last_move = last_check = clock()
+        cap = start + self.sync_cap * self.sync_timeout
+        seen = None
+        while True:
+            try:
+                got = f.rpc.getbestblockhash()
+            except (OSError, JSONRPCException):
+                got = None
+            if got == tip:
+                return
+            now = clock()
+            if got is not None and got != seen:
+                seen, last_move = got, now
+            if self.mirror_invalidate and got is not None:
+                self._mirror(ref, f, got)
+            if self.sidecar and got is not None and now > start + self.pump_after:
+                self._pump(ref, f, got)
+            if not self.sidecar and now - last_check >= self.recheck:
+                last_check = now
+                try:
+                    if not f.rpc.getpeerinfo():
+                        print('kogany %d: no peer while waiting for %s; reconnecting' % (f.k, tip[:16]))
+                        self._connect(ref, f, settle=0)
+                except (OSError, JSONRPCException):
+                    pass
+            stalled = now - last_move > self.sync_timeout
+            if stalled or now > cap:
+                hint = self.invalidate_hint()
+                self._dump_stall(ref, f)
+                raise AssertionError('kogany %d did not reach the peer tip %s (height %d) %s: at %s, %s%s'
+                                     % (f.k, tip, ref.getblockcount(), label, got,
+                                        ('no progress for %ds' % self.sync_timeout) if stalled
+                                        else ('still moving after %ds' % (now - start)),
+                                        ('; ' + hint) if hint else ''))
+            sleep(0.2)
+
+    def _dump_stall(self, ref, f, lines=40):
+        """A failed wait's evidence: both sides' peers and the koganyd log's tail."""
+        for who, node in (('ycashd peer node %d' % self.peer, ref), ('kogany %d' % f.k, f.rpc)):
+            try:
+                peers = [(p.get('addr'), p.get('inbound'), p.get('subver'), p.get('synced_blocks', p.get('startingheight')))
+                         for p in node.getpeerinfo()]
+            except Exception as e:                  # the dump never hides the assertion
+                peers = 'getpeerinfo failed: %r' % (e,)
+            print('kogany: %s getpeerinfo: %s' % (who, peers))
+        log = os.path.join(getattr(f, 'datadir', ''), 'koganyd.log')
+        try:
+            with open(log, 'rb') as fh:
+                fh.seek(0, os.SEEK_END)
+                fh.seek(max(0, fh.tell() - 16384))
+                tail = fh.read().decode('utf-8', 'replace').splitlines()[-lines:]
+            print('kogany: the last %d lines of %s:' % (len(tail), log))
+            for line in tail:
+                print('  ' + line)
+        except OSError as e:
+            print('kogany: no koganyd log to show (%s)' % e)
 
     def _mirror_restart(self, ref, f):
         """KOGANY_MIRROR_INVALIDATE=1, at a restart of the peer, before the follower reconnects: a

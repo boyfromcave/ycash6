@@ -500,10 +500,14 @@ class FakeFollower:
         self.datadir = '/tmp/fake%d' % k
         self.config = None
         self.events = []
+        self.dials = []
         self.rpc = self
 
     def getpeerinfo(self):
         return []
+
+    def addnode(self, addr, how):
+        self.dials.append((addr, how))
 
     def write_config(self, config, notes):
         self.config = config
@@ -808,6 +812,7 @@ class MixedLineHookTest(unittest.TestCase):
         m = kg.MixedLine(binary='/bin/z', peer=0)
         m.connect_settle = 0
         m.connect_retry = 0
+        m.dial_settle = 0
         f = FakeFollower(0)
         m.followers = [f]
         peer = FakePeer()
@@ -829,6 +834,8 @@ class MixedLineHookTest(unittest.TestCase):
         m.on_node_start(1, START + ['-frobnicate'], peer)   # not the peer: ignored
         self.assertEqual(f.events, [])
         self.assertEqual(peer.added, [('127.0.0.1:%d' % kg.kogany_p2p_port(0), 'onetry')] * 3)
+        # the follower dialed first each time (a reconnection never waits for an inbound dial)
+        self.assertEqual(f.dials, [('127.0.0.1:%d' % util.p2p_port(0), 'onetry')] * 3)
 
     def test_invalidate_hint(self):
         class Script:                              # a class defined here: this file names the calls
@@ -1279,6 +1286,94 @@ class FollowerYcashArgsTest(unittest.TestCase):
             self.assertTrue(os.path.isdir(os.path.join(cache, 'node0')))          # the plain cache untouched
         finally:
             shutil.rmtree(tmp)
+
+
+class FakeClock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+    def sleep(self, d):
+        self.t += d
+
+
+class MovingFollower(FakeFollower):
+    """A follower whose tip moves one block every ``every`` seconds of the fake clock, up to
+    ``stop_at`` blocks (then it stalls); ``peers`` is what its getpeerinfo answers."""
+
+    def __init__(self, clock, every, stop_at, peers=({'addr': 'x'},)):
+        super().__init__(0)
+        self.clock, self.every, self.stop_at, self.peers = clock, every, stop_at, list(peers)
+        self.t0 = clock()
+
+    def height(self):
+        return min(self.stop_at, int((self.clock() - self.t0) / self.every))
+
+    def getbestblockhash(self):
+        return '%064x' % self.height()
+
+    def getpeerinfo(self):
+        return self.peers
+
+
+class FakeRef(FakePeer):
+    def getblockcount(self):
+        return 50
+
+    def getpeerinfo(self):
+        return [{'addr': '127.0.0.1:1', 'inbound': True, 'subver': '/kogany:1.8.0/'}]
+
+
+class WaitTipTest(unittest.TestCase):
+    """sync_point's wait fails on no progress, not on total time (beta3 follower-stall lane)."""
+
+    def setUp(self):
+        util.PortSeed.n = 8
+        self.clock = FakeClock()
+        self.m = kg.MixedLine(binary='/bin/z', peer=0, sync_timeout=30)
+        self.m.dial_settle = 0
+        self.tip = '%064x' % 50
+
+    def wait(self, f):
+        import io
+        from contextlib import redirect_stdout
+        out = io.StringIO()
+        with redirect_stdout(out), mock.patch.object(kg.time, 'time', self.clock), \
+                mock.patch.object(kg.time, 'sleep', self.clock.sleep):
+            try:
+                self.m._wait_tip(FakeRef(), f, self.tip, 'test', clock=self.clock, sleep=self.clock.sleep)
+            finally:
+                self.out = out.getvalue()
+
+    def test_a_slow_catch_up_that_keeps_moving_passes(self):
+        f = MovingFollower(self.clock, every=5, stop_at=50)      # 250 s in all, > sync_timeout
+        self.wait(f)
+        self.assertGreater(self.clock() - f.t0, self.m.sync_timeout)
+
+    def test_a_stall_fails_after_sync_timeout_without_progress(self):
+        f = MovingFollower(self.clock, every=1, stop_at=20)
+        with self.assertRaises(AssertionError) as cm:
+            self.wait(f)
+        self.assertIn('no progress for 30s', str(cm.exception))
+        self.assertLess(self.clock() - f.t0, 20 + 30 + 1)
+        self.assertIn('getpeerinfo', self.out)                       # the evidence is printed
+        self.assertIn('koganyd.log', self.out)
+
+    def test_the_hard_cap_still_bounds_it(self):
+        self.m.sync_cap = 2
+        f = MovingFollower(self.clock, every=5, stop_at=50)
+        with self.assertRaises(AssertionError) as cm:
+            self.wait(f)
+        self.assertIn('still moving', str(cm.exception))
+
+    def test_a_lost_connection_is_made_again_by_the_follower(self):
+        f = MovingFollower(self.clock, every=1, stop_at=0, peers=())
+        with self.assertRaises(AssertionError):
+            self.wait(f)
+        self.assertIn(('127.0.0.1:%d' % util.p2p_port(0), 'onetry'), f.dials)
+        self.assertIn('reconnecting', self.out)
 
 
 if __name__ == '__main__':
