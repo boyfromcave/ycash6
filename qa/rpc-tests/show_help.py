@@ -112,7 +112,9 @@ Options:
        for block files)
 
   -reindex-chainstate
-       Rebuild chain state from the currently indexed blocks (implies -rescan)
+       Rebuild chain state from the currently indexed blocks (the wallet is not
+       rescanned; its balances read low until the rebuild reaches its last
+       block)
 
   -reindex
        Rebuild chain state and block index from the blk*.dat files on disk

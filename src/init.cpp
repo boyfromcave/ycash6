@@ -425,7 +425,7 @@ std::string HelpMessage(HelpMessageMode mode)
             "Warning: Reverting this setting requires re-downloading the entire blockchain. "
             "(default: 0 = disable pruning blocks, >%u = target size in MiB to use for block files)"), MIN_BLOCKS_TO_KEEP, MIN_DISK_SPACE_FOR_BLOCK_FILES / 1024 / 1024));
 #ifdef ENABLE_WALLET
-    strUsage += HelpMessageOpt("-reindex-chainstate", _("Rebuild chain state from the currently indexed blocks (implies -rescan)"));
+    strUsage += HelpMessageOpt("-reindex-chainstate", _("Rebuild chain state from the currently indexed blocks (the wallet is not rescanned; its balances read low until the rebuild reaches its last block)"));
     strUsage += HelpMessageOpt("-reindex", _("Rebuild chain state and block index from the blk*.dat files on disk (implies -rescan)"));
 #else
     strUsage += HelpMessageOpt("-reindex-chainstate", _("Rebuild chain state from the currently indexed blocks"));
@@ -815,6 +815,7 @@ void ThreadStartWalletNotifier()
             // node writes chain data out roughly hourly, while the wallet writes it
             // every 10 minutes. We need to wait for ThreadImport to catch up, or any
             // missing blocks to be fetched from peers.
+            bool fLoggedWait = false;
             while (true) {
                 boost::this_thread::interruption_point();
 
@@ -828,7 +829,17 @@ void ThreadStartWalletNotifier()
                         (pindexLastTip->nHeight < pindexFork->nHeight || pindexLastTip->nHeight - pindexFork->nHeight < 100) &&
                         !pindexLastTip->GetBlockPos().IsNull())
                     {
+                        if (fLoggedWait) {
+                            LogPrintf("Wallet notifier: the active chain is within 100 blocks of the wallet's last block; "
+                                      "notifying the wallet from height %d\n", pindexLastTip->nHeight);
+                        }
                         break;
+                    }
+                    if (!fLoggedWait) {
+                        fLoggedWait = true;
+                        LogPrintf("Wallet notifier: waiting for the active chain (height %d) to reach the wallet's last "
+                                  "block %s (height %d); until then the wallet's balances may read low\n",
+                                  chainActive.Height(), pindexLastTip->GetBlockHash().GetHex(), pindexLastTip->nHeight);
                     }
                 }
 

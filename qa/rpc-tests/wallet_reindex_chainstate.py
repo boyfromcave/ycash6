@@ -7,8 +7,11 @@
 -reindex-chainstate on a node WITH a wallet (the default), after a clean stop and after an unclean one (SIGKILL after
 blocks the block index had not yet written): the node must not stop at the assert in init.cpp
 ThreadStartWalletNotifier (`pindexFork != nullptr`: the chainstate is emptied, so the active chain is empty while the
-notifier first looks), and the wallet must end up synced: the same balances as before, then a payment received after
-the reindex counted too.
+notifier first looks), and the wallet must end up synced: the same balances as before (transparent and Sapling), a
+payment received after the reindex counted too, and a Sapling spend from a note held before the reindexes confirms
+(its witness is intact). The notifier logs when it starts waiting for the chain and when it resumes. Last, the same
+with -rescan added (it clears the note witness cache, and no scan runs on the emptied chain): balances unchanged, a
+block disconnected and reconnected without tripping DecrementNoteWitnesses' cache-size assert, and a Sapling spend.
 
     ZCASHD=<ycashd> .venv/bin/python -u qa/rpc-tests/wallet_reindex_chainstate.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
@@ -25,10 +28,11 @@ from test_framework.util import (
     connect_nodes_bi,
     start_node,
     stop_node,
-    sync_blocks,
+    wait_and_assert_operationid_status,
+    z_sendmany_opid,
 )
 
-ARGS = ['-allowdeprecated=getnewaddress']
+ARGS = ['-allowdeprecated=getnewaddress', '-allowdeprecated=z_getnewaddress']
 
 
 class WalletReindexChainstateTest(BitcoinTestFramework):
@@ -54,19 +58,31 @@ class WalletReindexChainstateTest(BitcoinTestFramework):
         self.nodes[0].generate(1)
         self.sync_all()
 
-    def restart1(self, kill):
+    def debug_log(self, i):
+        with open(os.path.join(self.options.tmpdir, 'node%d' % i, 'regtest', 'debug.log'), encoding='utf-8',
+                  errors='replace') as f:
+            return f.read()
+
+    def restart1(self, kill, extra=()):
         if kill:
             p = bitcoind_processes.pop(1)
             os.kill(p.pid, signal.SIGKILL)
             p.wait()
         else:
             stop_node(self.nodes[1], 1)
-        self.nodes[1] = start_node(1, self.options.tmpdir, ARGS + ['-reindex-chainstate'])
+        logged = len(self.debug_log(1))
+        self.nodes[1] = start_node(1, self.options.tmpdir, ARGS + ['-reindex-chainstate'] + list(extra))
         connect_nodes_bi(self.nodes, 0, 1)
         deadline = time.time() + 120
         while self.nodes[1].getbestblockhash() != self.nodes[0].getbestblockhash():
             assert time.time() < deadline, 'node 1 did not catch up after -reindex-chainstate'
             time.sleep(0.25)
+        # the notifier says when it starts waiting for the chain and when it resumes
+        deadline = time.time() + 60
+        while 'Wallet notifier: the active chain is within 100 blocks' not in self.debug_log(1)[logged:]:
+            assert time.time() < deadline, 'no "notifying the wallet" log line'
+            time.sleep(0.5)
+        assert 'Wallet notifier: waiting for the active chain' in self.debug_log(1)[logged:], 'no "waiting" log line'
 
     def check(self, label, expected):
         # the wallet notifier catches up after the chain does
@@ -77,10 +93,38 @@ class WalletReindexChainstateTest(BitcoinTestFramework):
         assert_equal(self.balances(0), self.before0)
         print('    ok   %s: balances unchanged' % label)
 
+    def sapling_spend(self, label):
+        """node 1 spends from its Sapling note (which needs an intact witness); the spend confirms."""
+        n0, n1 = self.nodes
+        before = self.balances(1)
+        opid = z_sendmany_opid(n1, self.z1, [(n0.getnewaddress(), Decimal('1'))])
+        txid = wait_and_assert_operationid_status(n1, opid, timeout=300)
+        self.sync_all()
+        n0.generate(1)
+        self.sync_all()
+        assert n1.gettransaction(txid)['confirmations'] >= 1, 'the Sapling spend did not confirm'
+        after = self.balances(1)
+        assert after[1] <= before[1] - Decimal('1'), (before, after)
+        self.before0 = self.balances(0)
+        print('    ok   %s: a Sapling spend from the note confirms (%s)' % (label, txid))
+
     def run_test(self):
-        self.addr1 = self.nodes[1].getnewaddress()
+        n0, n1 = self.nodes
+        self.addr1 = n1.getnewaddress()
+        # a Sapling note for node 1, held before any reindex
+        self.z1 = n1.z_getnewaddress('sapling')
+        t0 = n0.getnewaddress()
+        n0.sendtoaddress(t0, 6)
+        self.sync_all()
+        n0.generate(1)
+        self.sync_all()
+        wait_and_assert_operationid_status(n0, z_sendmany_opid(n0, t0, [(self.z1, Decimal('5'))]), timeout=300)
+        self.sync_all()
+        n0.generate(1)
+        self.sync_all()
         self.pay(Decimal('7'))
         self.before0, before1 = self.balances(0), self.balances(1)
+        assert_equal(before1[1], Decimal('5'))
 
         print('A. a clean stop, then -reindex-chainstate')
         self.restart1(kill=False)
@@ -97,6 +141,23 @@ class WalletReindexChainstateTest(BitcoinTestFramework):
         t, p, total = self.balances(1)
         assert_equal(t, before1[0] + Decimal('2'))
         print('    ok   a payment after the reindex is counted')
+
+        print('D. the Sapling witnesses survived: a spend from the note held before the reindexes')
+        self.sapling_spend('after two -reindex-chainstate starts')
+
+        print('E. -reindex-chainstate with -rescan: the cleared witness cache and the notifier')
+        # -rescan clears the wallet's note witness cache, and on the emptied chain no scan runs. Checked here: the
+        # balances, a block disconnected and reconnected (DecrementNoteWitnesses' cache-size assert), a Sapling spend.
+        self.before0, before1 = self.balances(0), self.balances(1)
+        self.restart1(kill=False, extra=['-rescan'])
+        self.check('after -reindex-chainstate -rescan', before1)
+        tip, height = self.nodes[1].getbestblockhash(), self.nodes[1].getblockcount()
+        self.nodes[1].invalidateblock(tip)
+        assert_equal(self.nodes[1].getblockcount(), height - 1)
+        self.nodes[1].reconsiderblock(tip)
+        assert_equal(self.nodes[1].getbestblockhash(), tip)
+        print('    ok   a block disconnected and reconnected: the node stays up')
+        self.sapling_spend('after -reindex-chainstate -rescan')
         print('wallet_reindex_chainstate OK')
 
 
