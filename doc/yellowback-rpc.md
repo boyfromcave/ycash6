@@ -178,11 +178,19 @@ client is a Falcon key; `yed_listtokens` lists it under the client's address.
 `sqs…` SLH-DSA-SHA2-128s, likewise `tqf…`/`tqs…`, `rqf…`/`rqs…`, and `ybf…`/`ybs…`, `ytf…`/`yts…`, `yrf…`/`yrs…` for the
 YED form): what node operators and clients should know.**
 
-- **Inputs spending PQ coins carry no address** in `getblockdeltas`, `getspentinfo` and
-  `getrawtransaction` (verbose `vin[].address`): the insight index keys a spent output by its
-  Hash160, and a `TX_PQPKH` key hash is 32 bytes, so the index cannot name it from the input side.
+- **Inputs spending PQ coins name their address** (beta3) in `getrawtransaction` (verbose
+  `vin[].address`, beside `value`/`valueSat`), `getblock` verbosity 2 and `getblockdeltas`
+  (`inputs[].address`), in the D-9 form `sqf…`/`sqs…` (`tqf…`/`tqs…`, `rqf…`/`rqs…`): the insight
+  index keys a spent output by `Hash160(scheme || keyHash)`, which cannot be turned back into the
+  address, so the node reads it from the spent output itself (`-insightexplorer` requires `-txindex`)
+  and names it only if it hashes to the index key. Before beta3 these inputs carried no address.
   `getaddressdeltas` (and `getaddressutxos`/`getaddressbalance`/`getaddresstxids`) name them as
-  requested, by `sq…`/`tq…`/`rq…` or the PQ `yb…`/`yt…`/`yr…` form.
+  requested, by `sq…`/`tq…`/`rq…` or the PQ `yb…`/`yt…`/`yr…` form. An input spending a YED-carrying
+  output shows the plain post-quantum form (`sqf…`/`tqf…`/`rqf…`), as `vout[].scriptPubKey.addresses`
+  shows that output, not the YED form. On an insight node `decoderawtransaction` names input
+  addresses and values as `getrawtransaction` does (it formats through the same code and reads the
+  same spent index; this was already so for ECC inputs). `getspentinfo` returns no address for any
+  input.
 - **`-reindex` once** on a node with `-insightexplorer` or `-lightwalletd` that synced before this
   build: the address index of earlier blocks holds no `TX_PQPKH` outputs until it is rebuilt.
 - **`createrawtransaction` takes an `sq…` output** without the wallet's payability checks (Falcon

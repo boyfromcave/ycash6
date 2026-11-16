@@ -36,6 +36,9 @@
 using namespace std;
 
 extern void TxToJSON(const CTransaction& tx, const uint256 hashBlock, UniValue& entry);
+extern void TxToJSON(const CTransaction& tx, const uint256 hashBlock, UniValue& entry, std::map<uint256, CTransaction>* prevTxs);
+extern CTxDestination SpentInfoDestination(
+    const COutPoint& prevout, CSpentIndexValue& spentInfo, std::map<uint256, CTransaction>* prevTxs);
 void ScriptPubKeyToJSON(const CScript& scriptPubKey, UniValue& out, bool fIncludeHex);
 
 double GetDifficultyINTERNAL(const CBlockIndex* blockindex, bool networkDifficulty)
@@ -158,6 +161,7 @@ UniValue blockToDeltasJSON(const CBlock& block, const CBlockIndex* blockindex)
     KeyIO keyIO(Params());
     UniValue deltas(UniValue::VARR);
     deltas.reserve(block.vtx.size());
+    std::map<uint256, CTransaction> prevTxs;   // post-quantum inputs' parents, read once (SpentInfoDestination)
     for (unsigned int i = 0; i < block.vtx.size(); i++) {
         const CTransaction &tx = block.vtx[i];
         const uint256 txhash = tx.GetHash();
@@ -178,7 +182,7 @@ UniValue blockToDeltasJSON(const CBlock& block, const CBlockIndex* blockindex)
                 if (!GetSpentIndex(spentKey, spentInfo)) {
                     throw JSONRPCError(RPC_INTERNAL_ERROR, "Spent information not available");
                 }
-                CTxDestination dest = DestFromAddressHash(spentInfo.addressType, spentInfo.addressHash);
+                CTxDestination dest = SpentInfoDestination(input.prevout, spentInfo, &prevTxs);
                 if (IsValidDestination(dest)) {
                     delta.pushKV("address", keyIO.EncodeDestination(dest));
                 }
@@ -261,12 +265,13 @@ UniValue blockToJSON(const CBlock& block, const CBlockIndex* blockindex, bool tx
     result.pushKV("chainhistoryroot", blockindex->hashChainHistoryRoot.GetHex());
     UniValue txs(UniValue::VARR);
     txs.reserve(block.vtx.size());
+    std::map<uint256, CTransaction> prevTxs;   // post-quantum inputs' parents, read once (SpentInfoDestination)
     for (const CTransaction&tx : block.vtx)
     {
         if(txDetails)
         {
             UniValue objTx(UniValue::VOBJ);
-            TxToJSON(tx, uint256(), objTx);
+            TxToJSON(tx, uint256(), objTx, &prevTxs);
             txs.push_back(std::move(objTx));
         }
         else
@@ -737,7 +742,7 @@ UniValue getblockdeltas(const UniValue& params, bool fHelp)
             "      \"index\": n,              (numeric) The offset of the tx in the block\n"
             "      \"inputs\": [                (array of json objects)\n"
             "        {\n"
-            "          \"address\": \"taddr\",  (string) transparent address\n"
+            "          \"address\": \"taddr\",  (string) transparent or post-quantum address\n"
             "          \"satoshis\": n,       (numeric) negative of spend amount\n"
             "          \"index\": n,          (numeric) vin index\n"
             "          \"prevtxid\": \"hash\",  (string) source utxo tx ID\n"
@@ -746,7 +751,7 @@ UniValue getblockdeltas(const UniValue& params, bool fHelp)
             "      ],\n"
             "      \"outputs\": [             (array of json objects)\n"
             "        {\n"
-            "          \"address\": \"taddr\",  (string) transparent address\n"
+            "          \"address\": \"taddr\",  (string) transparent or post-quantum address\n"
             "          \"satoshis\": n,       (numeric) amount\n"
             "          \"index\": n           (numeric) vout index\n"
             "        }, ...\n"

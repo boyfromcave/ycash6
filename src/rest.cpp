@@ -1,6 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2014 The Bitcoin Core developers
 // Copyright (c) 2017-2023 The Zcash developers
+// Copyright (c) 2026 The Ycash developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -393,7 +394,10 @@ static bool rest_tx(HTTPRequest* req, const std::string& strURIPart)
 
     case RF_JSON: {
         UniValue objTx(UniValue::VOBJ);
-        TxToJSON(tx, hashBlock, objTx);
+        {
+            LOCK(cs_main);   // TxToJSON reads the spent index (GetSpentIndex asserts cs_main)
+            TxToJSON(tx, hashBlock, objTx);
+        }
         string strJSON = objTx.write() + "\n";
         req->WriteHeader("Content-Type", "application/json");
         req->WriteReply(HTTP_OK, strJSON);

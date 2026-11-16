@@ -193,9 +193,11 @@ class WalletBeta2Followups2Test(BitcoinTestFramework):
         n0.sendtoaddress(shield_from, Decimal('10.0001'))
         self.mine(1)
         opid = n0.z_sendmany(shield_from, [{'address': zaddr, 'amount': Decimal('10')}], 1, SHIELDING_SEND_FEE)
-        wait_and_assert_operationid_status(n0, opid)
+        shield_txid = wait_and_assert_operationid_status(n0, opid)
         self.mine(1)
         assert_equal(n0.z_getbalance(zaddr), Decimal('10'))
+        shield_note = [(u['txid'], u['outindex']) for u in n0.z_listunspent(1, 9999999, False, [zaddr])]
+        assert_equal([t for t, _ in shield_note], [shield_txid])
         # a coin the user locks stays locked through everything below
         kept_op = [(u['txid'], u['vout']) for u in n0.listunspent(1, 9999999, [kept])]
         assert_equal(len(kept_op), 1)
@@ -223,7 +225,10 @@ class WalletBeta2Followups2Test(BitcoinTestFramework):
         self.isolate(0)
         ztx = n0.vault_lock(self.params(Decimal('1'), zaddr))['txid']
         assert ztx in n0.getrawmempool()
-        assert_equal(n0.z_getbalance(zaddr, 0), Decimal('0'))   # the note is spent by the unconfirmed lock
+        # the note is spent by the unconfirmed lock (not the balance at minconf 0: the lock's own change note can be
+        # counted there at a racy moment, seen on ycash6 CI as 8.9999)
+        unspent0 = [(u['txid'], u['outindex']) for u in n0.z_listunspent(0, 9999999, False, [zaddr])]
+        assert shield_note[0] not in unspent0, (shield_note, unspent0)
         assert_equal(n0.getrawtransaction(ztx, 1)['vin'], [])
         n1.generate(EXPIRY_BLOCKS)                                  # node 1 mines without it
         self.rejoin(0)
