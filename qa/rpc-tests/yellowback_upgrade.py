@@ -194,7 +194,7 @@ class YellowbackUpgradeTest(BitcoinTestFramework):
             assert_equal(act['attestorSetId'], self.set_id)
             assert_equal(act['claimDelay'], CLAIM_DELAY)
             gi = n.yed_getinfo()
-            assert_equal(gi['rpcversion'], 9)   # 9: scheme-visible PQ prefixes (D-9); 8: the fee structure (D-Q-23); 7 was post-quantum owners (quantum spec §6.2); 6 was in-term claims (IT-7)
+            assert_equal(gi['rpcversion'], 10)   # 10: the beta3 additions to stock calls (B3-D5); 9: scheme-visible PQ prefixes (D-9); 8: the fee structure (D-Q-23); 7 was post-quantum owners (quantum spec §6.2); 6 was in-term claims (IT-7)
             assert_equal(gi['startHeight'], ACTIVATION)
             for gone in ('enforcing', 'valveTripped', 'sunset', 'rejectedBlocks', 'abandoned', 'activation'):
                 assert gone not in gi, gone
