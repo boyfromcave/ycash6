@@ -31,10 +31,12 @@
 #   ycash_bootstrap, lightwalletd_only, vault_pq_wallet, vault_pq_wallet_restore, wallet_pq_address,
 #   wallet_balance_by_type, wallet_getnewaddress_type, wallet_address_matrix, wallet_pq_fee_cap,
 #   wallet_yed_ecc_token, wallet_yed_held_guard, wallet_yed_output_guard, wallet_beta2_followups,
-#   wallet_beta2_followups2, wallet_seed_restore_ecc, wallet_seed_lookahead_exposure and getrawtransaction_insight_pq run regtest chains without the Ycash upgrades below Canopy (the framework's
+#   wallet_beta2_followups2, wallet_seed_restore_ecc, wallet_seed_lookahead_exposure, getrawtransaction_insight_pq and wallet_gettransaction_fee run regtest chains without the Ycash upgrades below Canopy (the framework's
 #   200-block cache, or Vault alone by -nuparams); kogany follows only chains with the Ycash
 #   upgrades at 1 (cumulative upgrades, K-6). They stay `report` in their mixed group so the
 #   sidecar column (the pair mines its own Ycash chain) keeps them; they are never flipped to gate.
+#
+#   ycash_ydf_default: report until beta3 4k (kogany still pays 5 % and has no -ydf), then gate.
 #
 #   column-gated steps (a pair runs the script, one step skips with a printed reason): yellowback_mining
 #   stale_invalid_mint_never_templated (yewd plan F-S5-20): a kogany pair re-verifies its mempool at a
@@ -46,6 +48,8 @@ node     kogany_mixed_smoke            gate    W1   direct
 node     stopatheight                  report  W9
 node     ycash_bootstrap               report  W9
 node     ycash_ydf_default             report  W9
+node     ycash_ydf_mandate_end         report  W9
+node     getcoinbasetemplatefor        report  W9
 node     testnet_ceremony              gate    W9
 node     lightwalletd_only             report  W9
 node     yellowback_lightwalletd       report  W9
@@ -80,6 +84,8 @@ vault    wallet_beta2_followups2       report  W9
 vault    wallet_seed_restore_ecc       report  W9
 vault    wallet_seed_lookahead_exposure report W9
 vault    getrawtransaction_insight_pq  report  W9
+vault    wallet_gettransaction_fee     report  W9
+vault    value_pools_by_type           report  W9   mirror
 
 # --- the YED module's lifecycle (W5-f, three-way with yellowback_model.py)
 yed      yellowback_lifecycle          gate    W5
@@ -143,6 +149,8 @@ excluded:sidecar lightwalletd_only            no wallet RPC: a -lightwalletd nod
 excluded:sidecar yellowback_lightwalletd      no wallet RPC: a -lightwalletd node generating across Vault
 sidecar  z_validateaddress_nowallet    report  W9     # node
 sidecar  ycash_ydf_default             report  W9     # node
+sidecar  ycash_ydf_mandate_end         report  W9     # node
+sidecar  getcoinbasetemplatefor        report  W9     # node
 sidecar  vault_upgrade                 report  W9   mirror  # vault
 sidecar  vault_primitive               report  W9   mirror  # vault
 sidecar  vault_slashing                report  W9   mirror  # vault
@@ -169,6 +177,8 @@ sidecar  wallet_beta2_followups2       report  W9     # vault
 sidecar  wallet_seed_restore_ecc       report  W9     # vault
 sidecar  wallet_seed_lookahead_exposure report W9    # vault
 sidecar  getrawtransaction_insight_pq  report  W9     # vault
+sidecar  wallet_gettransaction_fee     report  W9     # vault
+sidecar  value_pools_by_type           report  W9   mirror  # vault
 sidecar  yellowback_lifecycle          report  W9     # yed
 sidecar  yellowback_activation_reorg   report  W9   mirror  # yed
 sidecar  yellowback_reorg_restart      report  W9   mirror  # yed
@@ -219,6 +229,8 @@ excluded yellowback_framework_smoke    peer-count: asserts an exact getpeerinfo 
 excluded:pair yellowback_wr_flags  F-S5-15: Sapling consolidation (-consolidation, a background wallet option with no RPC) stays outside K-25 by decision; the script also needs -deletetx and reads debug.log (F-S5-13 class)
 pair     z_validateaddress_nowallet    report  W9     # node
 pair     ycash_ydf_default             report  W9     # node
+pair     ycash_ydf_mandate_end         report  W9     # node
+pair     getcoinbasetemplatefor        report  W9     # node
 pair     vault_upgrade                 report  W9     # vault
 pair     vault_primitive               report  W9     # vault
 pair     vault_slashing                report  W9     # vault
@@ -245,6 +257,8 @@ pair     wallet_beta2_followups2       report  W9     # vault
 pair     wallet_seed_restore_ecc       report  W9     # vault
 pair     wallet_seed_lookahead_exposure report W9    # vault
 pair     getrawtransaction_insight_pq  report  W9     # vault
+pair     wallet_gettransaction_fee     report  W9     # vault
+pair     value_pools_by_type           report  W9     # vault
 pair     yellowback_lifecycle          report  W9     # yed
 pair     yellowback_activation_reorg   report  W9     # yed
 pair     yellowback_reorg_restart      report  W9     # yed

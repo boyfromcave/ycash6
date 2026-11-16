@@ -234,6 +234,13 @@ class VaultParams(unittest.TestCase):
         self.assertEqual(r["test"]["slow"]["shadow_split_height"], r["test"]["legacy"]["shadow_split_height"])
         self.assertNotIn("shadow_split_height", r["test"]["fast"])
         self.assertNotIn("shadow_split_height", r["main"])
+        # beta3 item 5: the YDF mandate's end on every network (the fast value is the release-cut one, R9).
+        self.assertEqual(r["main"]["ydf_mandate_end_height"], 2275000)
+        self.assertEqual(r["regtest"]["ydf_mandate_end_height"], 5)
+        for p in ("slow", "legacy"):
+            self.assertEqual(r["test"][p]["ydf_mandate_end_height"], 2275000)
+        fast_ydf = r["test"]["fast"]["ydf_mandate_end_height"]
+        self.assertTrue(r["test"]["fast"]["vault_activation_height"] < fast_ydf < 900000)
 
     def test_shadow_profiles_read_mainnet_then_their_own(self):
         # slow and legacy are CMainParams, then CTestNetShadowParams, then their own body; a later body overrides.
@@ -279,6 +286,7 @@ class VaultParams(unittest.TestCase):
         doc["main"]["vault_branch_id"] = "6d5b7a31"
         doc["test"]["slow"].update(vault_branch_id="e1f1cc08", shadow_branch_id="57a24d5d", shadow_split_height=3100000, shadow_split_hash=SPLIT_HASH)
         doc["test"]["legacy"].update(vault_branch_id="6d5b7a31", shadow_branch_id="35706728", shadow_split_height=3100000, shadow_split_hash=SPLIT_HASH)
+        doc["test"]["fast"]["ydf_mandate_end_height"] = 511752   # R9 (test_release_rules_by_stage)
         self.assertEqual(vp.release_problems(doc), [])
         doc["main"]["vault_activation_height"] = "NO_ACTIVATION_HEIGHT"
         self.assertTrue(any(p.startswith("R1:") for p in vp.release_problems(doc)))
@@ -319,7 +327,7 @@ class VaultParams(unittest.TestCase):
         doc = {
             "version": {"PROTOCOL_VERSION": 270200, "MIN_PEER_PROTO_VERSION": 170002},
             "main": dict(net, vault_activation_height=3300000),
-            "test": {"fast": dict(net),
+            "test": {"fast": dict(net, ydf_mandate_end_height=511752),
                      "slow": dict(net, vault_branch_id="e1f1cc08", shadow_branch_id="57a24d5d",
                                   shadow_split_height=3100000, shadow_split_hash=SPLIT_HASH),
                      "legacy": dict(net, shadow_branch_id="35706728", shadow_split_height=3100000, shadow_split_hash=SPLIT_HASH)},
@@ -370,13 +378,13 @@ class VaultParams(unittest.TestCase):
         no = "NO_ACTIVATION_HEIGHT"
 
         def doc(proto=270200, main_height=no, main_att=None, fast=510400, fast_att=att, slow=no, slow_att=None,
-                legacy=no):
+                legacy=no, fast_ydf=512400):
             net = {"vault_protocol_version": proto, "pq_falcon_height": 0, "vault_min_set_maturity": 16128,
                    "vault_branch_id": "6d5b7a31"}
             return {
                 "version": {"PROTOCOL_VERSION": proto, "MIN_PEER_PROTO_VERSION": 270013},
                 "main": dict(net, vault_activation_height=main_height),
-                "test": {"fast": dict(net, vault_activation_height=fast),
+                "test": {"fast": dict(net, vault_activation_height=fast, ydf_mandate_end_height=fast_ydf),
                          "slow": dict(net, vault_activation_height=slow, vault_branch_id="e1f1cc08",
                                       shadow_branch_id="57a24d5d", shadow_split_height=3099999, shadow_split_hash=SPLIT_HASH),
                          "legacy": dict(net, vault_activation_height=legacy, shadow_branch_id="35706728",
@@ -413,6 +421,37 @@ class VaultParams(unittest.TestCase):
         self.assertEqual(rules(final, "final"), [])
         with self.assertRaises(ValueError):
             vp.release_problems(final, "gamma")
+        # R9 (beta3 item 5): fast's YDF mandate end must be set, and not the provisional value, on an rc
+        # or a final tag; a beta may carry the provisional value.
+        provisional = vp.PROVISIONAL_FAST_YDF_MANDATE_END_HEIGHT
+        self.assertEqual(rules(doc(fast_ydf=provisional), "beta"), [])
+        self.assertEqual(rules(doc(fast_ydf=provisional), "rc"), ["R9"])
+        self.assertIn("R9", rules(doc(fast_ydf=provisional, main_height=3300000, main_att=att), "final"))
+        self.assertEqual(rules(doc(fast_ydf=None), "rc"), ["R9"])
+        self.assertEqual(rules(doc(fast_ydf=511752), "rc"), [])
+
+    def test_ydf_mandate_end_height(self):
+        """beta3 item 5: nYdfMandateEndHeight per network; fast overrides its base through the named constant."""
+        def tree(fast_extra, const="600000"):
+            return ("static const int TESTNET_FAST_YDF_MANDATE_END_HEIGHT = %s;\n" % const
+                    + klass("CMainParams", NO, "        nYdfMandateEndHeight = 2275000;\n")
+                    + testnet(base_extra="        nYdfMandateEndHeight = 900000;\n", fast_extra=fast_extra)
+                    + klass("CRegTestParams", NO, "        nYdfMandateEndHeight = 5;\n"))
+        own = "        nYdfMandateEndHeight = TESTNET_FAST_YDF_MANDATE_END_HEIGHT;\n"
+        r = vp.extract(reader(tree(own)))
+        self.assertEqual(r["main"]["ydf_mandate_end_height"], 2275000)
+        self.assertEqual(r["regtest"]["ydf_mandate_end_height"], 5)
+        self.assertEqual(r["test"]["fast"]["ydf_mandate_end_height"], 600000)
+        for p in ("slow", "legacy"):   # mainnet's, through CMainParams
+            self.assertEqual(r["test"][p]["ydf_mandate_end_height"], 2275000)
+        # Without the override the fast profile reads its base's value.
+        self.assertEqual(vp.extract(reader(tree("")))["test"]["fast"]["ydf_mandate_end_height"], 900000)
+        # A different constant on the other line is a cross-line difference.
+        other = vp.extract(reader(tree(own, const="511752")))
+        self.assertEqual(vp.compare(r, other), ["test.fast.ydf_mandate_end_height: 600000 != 511752"])
+        # The constant named but not defined: fail closed.
+        with self.assertRaises(vp.ParseError):
+            vp.extract(reader(tree(own).replace("static const int TESTNET_FAST_YDF_MANDATE_END_HEIGHT = 600000;\n", "")))
 
 
 if __name__ == "__main__":

@@ -74,10 +74,11 @@ UPGRADES_CPP = """    { .nBranchId = SLOW_SHADOW_BRANCH_ID, .strName = "Shadow",
 SPLIT_HASH = "000005030be4763e433447000ef6b98c7ce310a8b0b7bb50f1a6aca3d31e4bef"
 
 
-def testnet(fast=NO, proto=270200, slow=NO, split="3100000"):
+def testnet(fast=NO, proto=270200, slow=NO, split="3100000", fast_ydf="511752"):
     """CTestNetParams and testnet-yb-fast (testnet plan Revision 3); the shadow-fork base on mainnet and
     testnet-yb-slow and testnet-legacy (the shadow-fork plan), legacy's Vault unset, split height `split`."""
-    out = """static const int TESTNET_SHADOW_SPLIT_HEIGHT = %s;
+    out = """static const int TESTNET_FAST_YDF_MANDATE_END_HEIGHT = %s;
+static const int TESTNET_SHADOW_SPLIT_HEIGHT = %s;
 static const char* const TESTNET_SHADOW_SPLIT_HASH = "%s";
 class CTestNetParams : public CChainParams {
 protected:
@@ -90,6 +91,7 @@ public:
     CTestNetFastParams() {
         consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
             %s;
+        nYdfMandateEndHeight = TESTNET_FAST_YDF_MANDATE_END_HEIGHT;
     }
 };
 class CTestNetShadowParams : public CMainParams {
@@ -98,7 +100,7 @@ protected:
         SetShadowSplitHeight(TESTNET_SHADOW_SPLIT_HEIGHT);
     }
 };
-""" % (split, "" if split == NO else SPLIT_HASH, proto, fast)
+""" % (fast_ydf, split, "" if split == NO else SPLIT_HASH, proto, fast)
     for cls, height, extra in (("CTestNetSlowParams", slow,
                                 "        consensus.vUpgrades[Consensus::UPGRADE_SHADOW].nBranchId = SLOW_SHADOW_BRANCH_ID;\n"
                                 "        consensus.vUpgrades[Consensus::UPGRADE_VAULT].nBranchId = SLOW_VAULT_BRANCH_ID;\n"),
@@ -118,9 +120,9 @@ public:
 def write_tree(root, main_height="3300000", main_extra="        consensus.pqFalconHeight = 0;\n",
                test_height=NO, reg_extra="        consensus.nVaultMinSetMaturity = 2;\n",
                att=ATT, params_h=PARAMS_H, slow_height=NO, fast_att=None, slow_att=None, proto=270200,
-               version_h=VERSION_H, split="3100000"):
+               version_h=VERSION_H, split="3100000", fast_ydf="511752"):
     chain = (klass("CMainParams", main_height, main_extra, proto)
-             + testnet(test_height, proto, slow_height, split)
+             + testnet(test_height, proto, slow_height, split, fast_ydf)
              + klass("CRegTestParams", NO, reg_extra, proto))
     files = {
         "src/chainparams.cpp": chain,
@@ -135,6 +137,15 @@ def write_tree(root, main_height="3300000", main_extra="        consensus.pqFalc
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(text)
+
+
+def vp_provisional():
+    """PROVISIONAL_FAST_YDF_MANDATE_END_HEIGHT, read from the extractor so the test follows it."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("vp", os.path.join(REPO, "qa", "yellowback-vault-params.py"))
+    vp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(vp)
+    return vp.PROVISIONAL_FAST_YDF_MANDATE_END_HEIGHT
 
 
 def run(args, cwd=REPO):
@@ -208,6 +219,16 @@ class ReleaseHeights(unittest.TestCase):
         code, out = run(["--root", root, "--release-version", "6.22.0-beta1"])
         self.assertEqual(code, 0, out)
         self.assertIn("release stage: beta", out)
+
+    def test_provisional_fast_ydf_mandate_end_by_stage(self):
+        # beta3 item 5 (R9): an rc or final tag is refused while the fast profile's YDF mandate end is the
+        # provisional value; a beta ships with it.
+        root = self.rc_tree("rc-provisional-ydf", fast_ydf=str(vp_provisional()))
+        code, out = run(["--root", root, "--release-version", "6.22.0-rc1"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("problem: R9: testnet-yb-fast's YDF mandate end", out)
+        code, out = run(["--root", root, "--release-version", "6.22.0-beta3"])
+        self.assertEqual(code, 0, out)
 
     def test_unset_attestor_set_is_still_refused(self):
         root = os.path.join(self.tmp, "noset")

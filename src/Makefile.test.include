@@ -82,6 +82,7 @@ BITCOIN_TESTS =\
   test/checkblock_tests.cpp \
   test/Checkpoints_tests.cpp \
   test/checkqueue_tests.cpp \
+  test/coinbase_for_tests.cpp \
   test/coins_tests.cpp \
   test/compress_tests.cpp \
   test/convertbits_tests.cpp \

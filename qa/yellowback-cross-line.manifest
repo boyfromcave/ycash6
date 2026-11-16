@@ -56,7 +56,10 @@ identical qa/rpc-tests/vault_activation_restart.py
 identical qa/rpc-tests/vault_prune_floor.py
 identical qa/rpc-tests/stopatheight.py
 identical qa/rpc-tests/ycash_ydf_default.py
+identical qa/rpc-tests/ycash_ydf_mandate_end.py
 identical src/test/testnet_params_tests.cpp
+identical qa/rpc-tests/getcoinbasetemplatefor.py
+identical src/test/coinbase_for_tests.cpp
 identical doc/yellowback-testnet-shadow-fork.md
 identical qa/rpc-tests/ycash_bootstrap.py
 identical qa/rpc-tests/testnet_ceremony.py
@@ -73,6 +76,8 @@ identical qa/rpc-tests/wallet_getnewaddress_type.py
 identical qa/rpc-tests/vault_lock_from.py
 identical qa/rpc-tests/wallet_yed_held_guard.py
 identical qa/rpc-tests/wallet_yed_output_guard.py
+identical qa/rpc-tests/wallet_gettransaction_fee.py
+identical qa/rpc-tests/value_pools_by_type.py
 tree contrib/bootstrap
 tree contrib/testnet
 tree contrib/yellowback/profiles

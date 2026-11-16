@@ -100,6 +100,11 @@ struct CBlockTemplate
 };
 
 CMutableTransaction CreateCoinbaseTransaction(const CChainParams& chainparams, CAmount nFees, const MinerAddress& minerAddress, int nHeight);
+/** The same coinbase with the scriptSig bytes after `<height> OP_0` given by the caller instead of read from the
+ *  global COINBASE_FLAGS (which belongs to CreateNewBlock, under cs_main). The outputs, the development-fund
+ *  rule (-ydf included) and the Sapling proof are those of the function above: it calls this one. Holds no lock
+ *  and needs none, so getcoinbasetemplatefor proves outside cs_main. */
+CMutableTransaction CreateCoinbaseTransaction(const CChainParams& chainparams, CAmount nFees, const MinerAddress& minerAddress, int nHeight, const CScript& coinbaseFlags);
 
 /** Generate a new block, without valid proof-of-work */
 class BlockAssembler
