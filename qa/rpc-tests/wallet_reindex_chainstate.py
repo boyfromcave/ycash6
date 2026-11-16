@@ -9,9 +9,9 @@ blocks the block index had not yet written): the node must not stop at the asser
 ThreadStartWalletNotifier (`pindexFork != nullptr`: the chainstate is emptied, so the active chain is empty while the
 notifier first looks), and the wallet must end up synced: the same balances as before (transparent and Sapling), a
 payment received after the reindex counted too, and a Sapling spend from a note held before the reindexes confirms
-(its witness is intact). The notifier logs when it starts waiting for the chain and when it resumes. Last, the same
-with -rescan added (it clears the note witness cache, and no scan runs on the emptied chain): balances unchanged, a
-block disconnected and reconnected without tripping DecrementNoteWitnesses' cache-size assert, and a Sapling spend.
+(its witness is intact). The notifier logs when it starts waiting for the chain and when it resumes. Last,
+-reindex-chainstate with -rescan (or -zapwallettxes, which implies it) is refused at startup: -rescan would clear the
+note witness cache with no scan to rebuild it, leaving notes at or below the wallet's last saved block unspendable.
 
     ZCASHD=<ycashd> .venv/bin/python -u qa/rpc-tests/wallet_reindex_chainstate.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
@@ -24,6 +24,7 @@ from decimal import Decimal
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
+    assert_start_raises_init_error,
     bitcoind_processes,
     connect_nodes_bi,
     start_node,
@@ -145,19 +146,20 @@ class WalletReindexChainstateTest(BitcoinTestFramework):
         print('D. the Sapling witnesses survived: a spend from the note held before the reindexes')
         self.sapling_spend('after two -reindex-chainstate starts')
 
-        print('E. -reindex-chainstate with -rescan: the cleared witness cache and the notifier')
-        # -rescan clears the wallet's note witness cache, and on the emptied chain no scan runs. Checked here: the
-        # balances, a block disconnected and reconnected (DecrementNoteWitnesses' cache-size assert), a Sapling spend.
-        self.before0, before1 = self.balances(0), self.balances(1)
-        self.restart1(kill=False, extra=['-rescan'])
-        self.check('after -reindex-chainstate -rescan', before1)
-        tip, height = self.nodes[1].getbestblockhash(), self.nodes[1].getblockcount()
-        self.nodes[1].invalidateblock(tip)
-        assert_equal(self.nodes[1].getblockcount(), height - 1)
-        self.nodes[1].reconsiderblock(tip)
-        assert_equal(self.nodes[1].getbestblockhash(), tip)
-        print('    ok   a block disconnected and reconnected: the node stays up')
-        self.sapling_spend('after -reindex-chainstate -rescan')
+        print('E. -reindex-chainstate with -rescan (or a flag implying it) is refused at startup')
+        # -rescan would clear the wallet's note witness cache while the chain is still empty (no scan runs), and the
+        # notifier resumes from the wallet's last saved block: notes mined at or below it would lose their witnesses
+        # for good ("Missing witness"), and a disconnected block would stop the node at DecrementNoteWitnesses' assert.
+        stop_node(self.nodes[1], 1)
+        msg = '-reindex-chainstate and -rescan cannot be used together'
+        for extra in (['-rescan'], ['-zapwallettxes=1']):
+            assert_start_raises_init_error(1, self.options.tmpdir, ARGS + ['-reindex-chainstate'] + extra, msg)
+            print('    ok   -reindex-chainstate %s: refused' % ' '.join(extra))
+        # each separately still starts; the wallet is intact and can spend its Sapling note
+        self.nodes[1] = start_node(1, self.options.tmpdir, ARGS + ['-rescan'])
+        connect_nodes_bi(self.nodes, 0, 1)
+        self.sync_all()
+        self.sapling_spend('after the refused starts and a -rescan start')
         print('wallet_reindex_chainstate OK')
 
 

@@ -104,8 +104,8 @@ post-quantum input, snapshot restores, and what `rpcversion` 10 covers; then the
   totals computed from genesis`). On such a node blocks below the seed report `"monitored": false` (a node that syncs or
   reindexes with this build covers them all). A pruned node that lacks old undo data
   reports `"monitored": false` until it is reindexed. `-reindex` and `-reindex-chainstate` rebuild the index from
-  genesis and check the seed on the way (with a wallet, its balances read low until a `-reindex-chainstate` completes;
-  do not add `-rescan`: see "`-reindex-chainstate` with a wallet" below). Downgrading ignores the directory.
+  genesis and check the seed on the way (with a wallet, its balances read low until a `-reindex-chainstate` completes,
+  and `-rescan` is refused with it: see below). Downgrading ignores the directory.
 - **Not a consensus change.** The index is written after a block has passed every check and never rejects a block; a
   failure is logged and the index stops covering the blocks after it. A failed write (a full disk) turns the index
   off until the next restart, which resumes the fill. The one case in which the node refuses to start is a fill from
@@ -178,10 +178,12 @@ post-quantum input, snapshot restores, and what `rpcversion` 10 covers; then the
   already did for a block missing after an unclean stop, and the wallet follows from where it was. The log says
   when it starts waiting and when it resumes.
 - **With a wallet, balances read low until the reindex completes**: the wallet is not rescanned, and transactions in
-  blocks not yet reconnected count as unconfirmed. Do not add `-rescan` to a `-reindex-chainstate` start: no scan runs
-  on the emptied chain, so the flag does nothing there except clear the wallet's note witness cache (regtest showed
-  the notes still spendable afterwards, but this is not tested at mainnet scale); run `-rescan` on a later start if
-  one is needed. The `-reindex-chainstate` help no longer says it implies `-rescan`.
+  blocks not yet reconnected count as unconfirmed. **`-reindex-chainstate` with `-rescan` is refused at startup** (also when
+  `-salvagewallet` or `-zapwallettxes` implies `-rescan`): `-rescan` clears the wallet's note witness cache while the
+  chain is still empty, so no scan rebuilds it, and Sapling notes mined at or below the wallet's last saved block
+  became unspendable ("Missing witness"); disconnecting a block then stopped the node at an assert. Start with
+  `-reindex-chainstate` alone and use `-rescan` on a later start if one is needed. The `-reindex-chainstate` help no
+  longer says it implies `-rescan`.
 
 ### `rpcversion` 10: what changed
 

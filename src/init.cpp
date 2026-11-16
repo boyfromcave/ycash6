@@ -1227,6 +1227,19 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 #endif
     }
 
+#ifdef ENABLE_WALLET
+    // -rescan clears the wallet's note witness cache when the wallet loads, but on a -reindex-chainstate start the active
+    // chain is still empty then, so no scan runs, and the wallet notifier resumes from the wallet's last saved block: notes
+    // mined at or below it are never witnessed again (unspendable, "Missing witness"), and disconnecting a block then
+    // stops the node at DecrementNoteWitnesses' cache-size assert. (-reindex starts the wallet from genesis instead.)
+    if (GetBoolArg("-reindex-chainstate", false) && !GetBoolArg("-reindex", false) && GetBoolArg("-rescan", false) &&
+        !GetBoolArg("-disablewallet", false)) {
+        return InitError(_("-reindex-chainstate and -rescan cannot be used together (-rescan is also implied by "
+                           "-salvagewallet and -zapwallettxes). Start with -reindex-chainstate alone, then use -rescan on a "
+                           "later start once the rebuild has completed."));
+    }
+#endif
+
     // Make sure enough file descriptors are available
     int nBind = std::max((int)mapArgs.count("-bind") + (int)mapArgs.count("-whitebind"), 1);
     int nUserMaxConnections = GetArg("-maxconnections", DEFAULT_MAX_PEER_CONNECTIONS);
