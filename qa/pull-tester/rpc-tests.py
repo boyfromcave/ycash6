@@ -104,6 +104,8 @@ BASE_SCRIPTS= [
     'ycash_ydf_mandate_end.py',
     # getcoinbasetemplatefor (beta3 item 3): a coinbase per payout address for a named template, exact amounts.
     'getcoinbasetemplatefor.py',
+    # -reindex-chainstate on a node with a wallet: no assert in ThreadStartWalletNotifier, balances kept.
+    'wallet_reindex_chainstate.py',
     # beta3: a post-quantum miner shields its coinbase with z_sendmany (mature only, shielded recipients, no change).
     'wallet_pq_coinbase_spend.py',
     # ycash-bootstrap against a real node (testnet plan §4.4): a regtest bundle packed, a changed chunk

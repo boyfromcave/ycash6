@@ -119,12 +119,16 @@ post-quantum input, snapshot restores, and what `rpcversion` 10 covers; then the
   totals computed from genesis`). On such a node blocks below the seed report `"monitored": false` (a node that syncs or
   reindexes with this build covers them all). A pruned node that lacks old undo data
   reports `"monitored": false` until it is reindexed. `-reindex` and `-reindex-chainstate` rebuild the index from
-  genesis and check the seed on the way. Downgrading ignores the directory.
+  genesis and check the seed on the way (with a wallet, its balances read low until a `-reindex-chainstate` completes,
+  and `-rescan` is refused with it: see below). Downgrading ignores the directory.
 - **Not a consensus change.** The index is written after a block has passed every check and never rejects a block; a
   failure is logged and the index stops covering the blocks after it. A failed write (a full disk) turns the index
   off until the next restart, which resumes the fill. The one case in which the node refuses to start is a fill from
   genesis (`-valuepoolsseed=0` on an empty index) whose totals contradict the compiled seed: the message says to
   delete `blocks/valuepools`, which rebuilds the index from the seed (`-reindex` would repeat the check).
+- **An unclean stop does not restart the fill.** After a kill, an out-of-memory kill or a power loss the block index
+  can come back older than the index's last block; the fill now resumes from the highest block of the restored chain
+  that has a record (two log lines say so: the unknown last block, then the height it resumes from), in seconds, instead of refilling from the compiled seed.
 
 ### `gettransaction` shows the real fee for every funding shape
 
@@ -180,6 +184,21 @@ post-quantum input, snapshot restores, and what `rpcversion` 10 covers; then the
   but has no `bootstrap.json` (an image before beta3 started on a failed restore), unless
   `YCASHD_BOOTSTRAP_ACCEPT_DATADIR=1`.
 - Tooling only: no node, RPC or consensus change.
+
+### `-reindex-chainstate` with a wallet no longer stops the node
+
+- A node with a wallet (the default) started with `-reindex-chainstate` stopped at an assert in the wallet
+  notifier (`pindexFork != nullptr`, `init.cpp`, inherited from Zcash): the chainstate is emptied, so the active
+  chain is empty when the notifier first looks. The notifier now waits for the chain to be reconnected, as it
+  already did for a block missing after an unclean stop, and the wallet follows from where it was. The log says
+  when it starts waiting and when it resumes.
+- **With a wallet, balances read low until the reindex completes**: the wallet is not rescanned, and transactions in
+  blocks not yet reconnected count as unconfirmed. **`-reindex-chainstate` with `-rescan` is refused at startup** (also when
+  `-salvagewallet` or `-zapwallettxes` implies `-rescan`): `-rescan` clears the wallet's note witness cache while the
+  chain is still empty, so no scan rebuilds it, and Sapling notes mined at or below the wallet's last saved block
+  became unspendable ("Missing witness"); disconnecting a block then stopped the node at an assert. Start with
+  `-reindex-chainstate` alone and use `-rescan` on a later start if one is needed. The `-reindex-chainstate` help no
+  longer says it implies `-rescan`.
 
 ### `rpcversion` 10: what changed
 

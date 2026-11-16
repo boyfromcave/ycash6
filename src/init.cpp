@@ -425,7 +425,7 @@ std::string HelpMessage(HelpMessageMode mode)
             "Warning: Reverting this setting requires re-downloading the entire blockchain. "
             "(default: 0 = disable pruning blocks, >%u = target size in MiB to use for block files)"), MIN_BLOCKS_TO_KEEP, MIN_DISK_SPACE_FOR_BLOCK_FILES / 1024 / 1024));
 #ifdef ENABLE_WALLET
-    strUsage += HelpMessageOpt("-reindex-chainstate", _("Rebuild chain state from the currently indexed blocks (implies -rescan)"));
+    strUsage += HelpMessageOpt("-reindex-chainstate", _("Rebuild chain state from the currently indexed blocks (the wallet is not rescanned; its balances read low until the rebuild reaches its last block)"));
     strUsage += HelpMessageOpt("-reindex", _("Rebuild chain state and block index from the blk*.dat files on disk (implies -rescan)"));
 #else
     strUsage += HelpMessageOpt("-reindex-chainstate", _("Rebuild chain state from the currently indexed blocks"));
@@ -815,19 +815,31 @@ void ThreadStartWalletNotifier()
             // node writes chain data out roughly hourly, while the wallet writes it
             // every 10 minutes. We need to wait for ThreadImport to catch up, or any
             // missing blocks to be fetched from peers.
+            bool fLoggedWait = false;
             while (true) {
                 boost::this_thread::interruption_point();
 
                 {
                     LOCK(cs_main);
                     const CBlockIndex *pindexFork = chainActive.FindFork(pindexLastTip);
-                    // We know we have the genesis block.
-                    assert(pindexFork != nullptr);
-
-                    if ((pindexLastTip->nHeight < pindexFork->nHeight || pindexLastTip->nHeight - pindexFork->nHeight < 100) &&
+                    // The active chain is empty while -reindex-chainstate reconnects it from genesis (the
+                    // chainstate was wiped, the block index kept): wait for it like any other missing block.
+                    // IsInitialBlockDownload holds meanwhile, so timedOut() does not count that time.
+                    if (pindexFork != nullptr &&
+                        (pindexLastTip->nHeight < pindexFork->nHeight || pindexLastTip->nHeight - pindexFork->nHeight < 100) &&
                         !pindexLastTip->GetBlockPos().IsNull())
                     {
+                        if (fLoggedWait) {
+                            LogPrintf("Wallet notifier: the active chain is within 100 blocks of the wallet's last block; "
+                                      "notifying the wallet from height %d\n", pindexLastTip->nHeight);
+                        }
                         break;
+                    }
+                    if (!fLoggedWait) {
+                        fLoggedWait = true;
+                        LogPrintf("Wallet notifier: waiting for the active chain (height %d) to reach the wallet's last "
+                                  "block %s (height %d); until then the wallet's balances may read low\n",
+                                  chainActive.Height(), pindexLastTip->GetBlockHash().GetHex(), pindexLastTip->nHeight);
                     }
                 }
 
@@ -1214,6 +1226,19 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         }
 #endif
     }
+
+#ifdef ENABLE_WALLET
+    // -rescan clears the wallet's note witness cache when the wallet loads, but on a -reindex-chainstate start the active
+    // chain is still empty then, so no scan runs, and the wallet notifier resumes from the wallet's last saved block: notes
+    // mined at or below it are never witnessed again (unspendable, "Missing witness"), and disconnecting a block then
+    // stops the node at DecrementNoteWitnesses' cache-size assert. (-reindex starts the wallet from genesis instead.)
+    if (GetBoolArg("-reindex-chainstate", false) && !GetBoolArg("-reindex", false) && GetBoolArg("-rescan", false) &&
+        !GetBoolArg("-disablewallet", false)) {
+        return InitError(_("-reindex-chainstate and -rescan cannot be used together (-rescan is also implied by "
+                           "-salvagewallet and -zapwallettxes). Start with -reindex-chainstate alone, then use -rescan on a "
+                           "later start once the rebuild has completed."));
+    }
+#endif
 
     // Make sure enough file descriptors are available
     int nBind = std::max((int)mapArgs.count("-bind") + (int)mapArgs.count("-whitebind"), 1);

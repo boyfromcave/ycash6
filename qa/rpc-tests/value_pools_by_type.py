@@ -32,17 +32,21 @@ Every check is against the test's own model, which classifies each output by the
 5. restart, fill and reindex: a restart, a restart with blocks/valuepools deleted (the startup fill: the migration
    test, no old binary needed) and -reindex each give identical records at every height;
 6. a node without the undo data (a pruned node, simulated by moving the undo file aside; -checklevel=1 so the
-   block-database check does not read it): "monitored": false and the log line, then the fill once the data is back.
+   block-database check does not read it): "monitored": false and the log line, then the fill once the data is back;
+7. an unclean stop (SIGKILL after blocks were connected since the last block-index write, DATABASE_WRITE_INTERVAL):
+   the index's last block is not in the restored block index, and the fill resumes from the highest ancestor of the
+   restored tip that has a record (the log says so) instead of refilling from genesis; identical records after.
 
     ZCASHD=<ycashd> (BITCOIND=<ycashd> on v4.5.0) .venv/bin/python -u qa/rpc-tests/value_pools_by_type.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
 
 import os
 import shutil
+import signal
 import time
 from decimal import Decimal
 
-from test_framework.util import assert_equal, connect_nodes_bi, start_node, stop_node, sync_blocks
+from test_framework.util import assert_equal, bitcoind_processes, connect_nodes_bi, start_node, stop_node, sync_blocks
 from test_framework import pq
 from test_framework import vault as v
 from test_framework import yellowback_model as ym
@@ -210,8 +214,14 @@ class ValuePoolsByTypeTest(VaultTestBase):
         with open(os.path.join(self.datadir(i), 'debug.log'), encoding='utf-8', errors='replace') as f:
             return f.read()
 
-    def restart0(self, extra=(), wipe_index=False, before_start=None, wait_sync=True):
-        stop_node(self.nodes[0], 0)
+    def restart0(self, extra=(), wipe_index=False, before_start=None, wait_sync=True, kill=False, connect=True):
+        if kill:
+            # an unclean stop, nothing flushed (as vault_harness restart_node0(kill=True))
+            p = bitcoind_processes.pop(0)
+            os.kill(p.pid, signal.SIGKILL)
+            p.wait()
+        else:
+            stop_node(self.nodes[0], 0)
         if wipe_index:
             path = os.path.join(self.datadir(0), 'blocks', 'valuepools')
             assert os.path.isdir(path), 'no value pools index at %s' % path
@@ -221,6 +231,8 @@ class ValuePoolsByTypeTest(VaultTestBase):
         # a fresh debug.log per start, so a log check sees this start only
         os.rename(os.path.join(self.datadir(0), 'debug.log'), os.path.join(self.datadir(0), 'debug.log.%d' % time.time()))
         self.nodes[0] = start_node(0, self.options.tmpdir, self.node_args(0) + list(extra))
+        if not connect:
+            return
         connect_nodes_bi(self.nodes, 0, 1)
         if wait_sync:
             deadline = time.time() + 120
@@ -237,6 +249,7 @@ class ValuePoolsByTypeTest(VaultTestBase):
         self.section_reorg()
         self.section_restart()
         self.section_pruned()
+        self.section_unclean_stop()
         self.check_chain(self.nodes[1], 'node 1')
         print('value_pools_by_type OK')
 
@@ -410,6 +423,42 @@ class ValuePoolsByTypeTest(VaultTestBase):
         self.restart0(before_start=lambda: shutil.move(aside, rev))
         assert_equal(self.record_table(self.node), self.table)
         print('    ok   the undo data back: the fill gives identical records')
+
+    def section_unclean_stop(self):
+        print('E. an unclean stop: the fill resumes from the last recorded ancestor of the restored tip')
+        # The last start was clean, so the block index on disk names this tip; the blocks mined below reach the value
+        # pools index as they connect but the block index only at its next periodic write (an hour away).
+        flushed = self.node.getblockcount()
+        self.mine(5)
+        lost = self.node.getbestblockhash()
+        self.restart0(kill=True, connect=False)
+        restored = self.node.getblockcount()
+        assert restored < flushed + 5, 'the unclean stop lost no block (restored tip %d)' % restored
+        log = self.debug_log()
+        fills = [l for l in log.splitlines() if 'valuepools: filling' in l]
+        assert not [l for l in fills if 'from height 1 ' in l], 'the fill restarted from genesis: %s' % fills
+        assert 'valuepools: the last block written (%s) is not in the block index' % lost in log, \
+            'no "not in the block index" log line'
+        assert 'valuepools: resuming from the highest ancestor of the tip with a record, height %d' % restored in log, \
+            'no "resuming" log line'
+        connect_nodes_bi(self.nodes, 0, 1)
+        deadline = time.time() + 120
+        while self.nodes[0].getbestblockhash() != self.nodes[1].getbestblockhash():
+            assert time.time() < deadline, 'node 0 did not resync after the unclean stop'
+            time.sleep(0.25)
+        self.check_chain(self.node, 'after the unclean stop and the resync')
+        print('    ok   restored tip %d below the lost tip %d: the fill resumed there, not from genesis' % (restored, flushed + 5))
+        if self.line() == 6:
+            # ycash6 also wipes the index on -reindex-chainstate: after the same unclean stop, a wiped store has no last
+            # block, so nothing resumes; the reindex rebuilds identical records. -disablewallet: with a wallet,
+            # -reindex-chainstate trips the inherited assert in init.cpp ThreadStartWalletNotifier (pindexFork).
+            self.mine(2)
+            self.restart0(kill=True, extra=['-reindex-chainstate', '-disablewallet'])
+            log = self.debug_log()
+            assert 'valuepools: resuming' not in log and 'is not in the block index' not in log, 'a wiped index resumed'
+            assert_equal(self.record_table(self.node), self.record_table(self.nodes[1]))
+            self.restart0()
+            print('    ok   -reindex-chainstate after an unclean stop: the index is wiped, not resumed; identical records')
 
 
 if __name__ == '__main__':
