@@ -391,7 +391,7 @@ std::string PQInsufficientFunds(const std::string& message, CAmount coinbaseExcl
                        FormatMoney(coinbaseExcluded));
     }
     if (immatureCoinbase > 0) {
-        s += strprintf(" The address holds %s of immature coinbase funds, which can be spent after %d confirmations.",
+        s += strprintf(" The address holds %s of immature coinbase funds, which can be sent to shielded recipients only, with no change, after %d confirmations.",
                        FormatMoney(immatureCoinbase), COINBASE_MATURITY + 1);
     }
     return s;

@@ -66,7 +66,7 @@ INSUFFICIENT, WALLET_ERROR, INVALID_PARAMETER = -6, -4, -8
 
 NO_UTXOS = 'Insufficient transparent funds, no UTXOs found for taddr from address.'
 COINBASE_NOTE = ' The address holds %s of coinbase funds, which can only be sent to shielded recipients, with no change.'
-IMMATURE_NOTE = ' The address holds %s of immature coinbase funds, which can be spent after 101 confirmations.'
+IMMATURE_NOTE = ' The address holds %s of immature coinbase funds, which can be sent to shielded recipients only, with no change, after 101 confirmations.'
 CHANGE_REFUSAL = re.compile(
     r'^When shielding coinbase funds, the wallet does not allow any change\. The proposed transaction would result in '
     r'([0-9.]+) in change\. To spend the selected coins, send exactly ([0-9.]+) to shielded recipients '
@@ -392,6 +392,24 @@ class WalletPQCoinbaseSpendTest(BitcoinTestFramework):
         shielded += total - 1
         self.wait_balance(lambda: zat(wallet.z_getbalance(z)), shielded)
         assert_equal(self.unspent(mix), [])
+
+        print('FN-DSA: two rewards, the way the mining guide moves them')
+        fn_c, fn_d = self.pool_block(fn), self.pool_block(fn)
+        late = fn_c[1]                                                   # the reward at this height
+        assert_equal(fn_d[1], late)
+        self.mine_to(fn_d[2] + MATURE_AT - 1)
+        assert_equal(self.unspent(fn), sorted([(fn_c[0], late, True), (fn_d[0], late, True)]))
+        # an amount within one reward selects one coin (largest first); an amount above it selects both
+        self.change_refusal(fn, [(z, Decimal('1'))], late, zat('1'))
+        both, fee_both = self.change_refusal(fn, [(z, yec(late + COIN // 2))], 2 * late, late + COIN // 2)
+        txid, tx = self.send(fn, [(z, yec(both))])
+        assert_equal(sorted((i['txid'], i['vout']) for i in tx['vin']), sorted([(fn_c[0], 0), (fn_d[0], 0)]))
+        assert_equal(tx['vout'], [])
+        assert_equal(self.value_of(tx), (2 * late, fee_both))
+        self.mine()
+        shielded += both
+        self.wait_balance(lambda: zat(wallet.z_getbalance(z)), shielded)
+        assert_equal(self.unspent(fn), [])
 
         print('nothing is left at a post-quantum address')
         info = wallet.getwalletinfo()
