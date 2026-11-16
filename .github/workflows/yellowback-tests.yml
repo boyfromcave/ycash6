@@ -202,7 +202,7 @@ env:
   # yellowback_stratum drives the real pool software: boyfromcave/yolo (Rust), checked out at this
   # commit and built in the main job, exported as YOLO_BIN. Without the binary the script SKIPs.
   YOLO_REPO: boyfromcave/yolo
-  YOLO_COMMIT: ${{ inputs.yolo_commit || 'dc9c57a671e37821c21932b4859f9d28800d27e9' }}
+  YOLO_COMMIT: ${{ inputs.yolo_commit || 'b3abf818ba2c9f0d5234da461757efbcd96eb4a5' }}
   # yellowback_chainviz drives the chain observer: boyfromcave/chain-viz (Rust), checked out at
   # this commit (bump by PR, audit I-5) and built --locked the same way, exported as CHAINVIZ_BIN.
   # Since 2026-10-06 its harden/yellowback build (H5: rpcversion 4 fields), the pin ycash-dd's CI
@@ -211,16 +211,16 @@ env:
   # On the upgrade line: chain-viz's upgrade/vault (rpcversion 5 tolerant, set/vault panels; upgrade
   # plan P6), the build yellowback_chainviz passed against on ycash-dd. It must be pushed to
   # boyfromcave/chain-viz before this pin resolves.
-  CHAINVIZ_COMMIT: ${{ inputs.chainviz_commit || 'dfbef2b76dc6825186ed12919b6f37c97949ca3b' }}  # chain-viz upgrade/quantum-vaults: v4 MINT and PQ payees (yellowback_chainviz on the quantum line)
+  CHAINVIZ_COMMIT: ${{ inputs.chainviz_commit || '35d8eae6aca2c013429e7b63727bc3d8f7685f48' }}
   # The lightwalletd fork the nightly drives, at a commit (audit E-6; bump by PR when it moves),
   # and the Go toolchain it builds with, verified against go.dev's published sha256.
   LWD_REPO: boyfromcave/lightwalletd
   # On the upgrade line: lightwalletd-dd's upgrade/vault build (rpcversion 5, the vault read RPCs;
   # upgrade plan P6), as ycash-dd's CI pins it; it must be pushed before this resolves.
-  # On upgrade/vault since the post-quantum merge: lightwalletd-dd's upgrade/vault (bf8005a, rpcversion 9,
+  # On upgrade/vault since the post-quantum merge: lightwalletd-dd's upgrade/vault (56660e5, rpcversion 9 and 10, beta3;
   # D-9: an older build refuses the node's rpcversion and leaves YellowbackStreamer unregistered).
   # It must be pushed before the nightly resolves it, and it moves with every rpcversion bump.
-  LWD_COMMIT: ${{ inputs.lwd_commit || 'bf8005adc0f29d881bc85e32e6db565e0036b839' }}
+  LWD_COMMIT: ${{ inputs.lwd_commit || '56660e56838052ab0f9e7555e2e068e4471fc0b3' }}
   GO_VERSION: 1.24.7
   GO_SHA256: da18191ddb7db8a9339816f3e2b54bdded8047cdc2a5d67059478f8d1595c43f
   # sprout-groth16.params for the nightly's ycash-gtest (Joinsplit.FullApiTest); the hash zcutil/fetch-params.sh
@@ -284,14 +284,14 @@ env:
   # docs/plans/beta3/rpc-contract-delta.md section 4.13).
   YB_WORKSPACE_COMMIT: ${{ inputs.workspace_commit || 'dbf53a83db4ee5fbb54992fbc4274b3902f1c5f5' }}
   # The mixed tier's pins (workspace docs/plans/kogany/ci-design.md; bump by PR, never a branch tip).
-  # kogany: vaults/kogany-compat at dd834da8b (the koganyd identity); its koganyd-bin artifact (any
+  # kogany: upgrade/vault at f2387999d (the koganyd identity); its koganyd-bin artifact (any
   # kogany workflow) or, when that has expired or does not exist, a build at this commit (dev
   # profile, --features ycash). The binary is `koganyd` from that commit on (no zakurad-bin).
   KOGANY_REPO: boyfromcave/kogany
-  KOGANY_COMMIT: dd834da8b77e882b9e6a00b3ce70f2b30b930c37
-  # yew: vaults/kogany-compat at S3 (yewd); its yewd-bin artifact (ci.yml), else a build here.
+  KOGANY_COMMIT: f2387999dfc76f193234bdc7d17fe7079fc86938
+  # yew: upgrade/vault at 91cb98f38 (yewd); its yewd-bin artifact (ci.yml), else a build here.
   YEW_REPO: boyfromcave/yew
-  YEW_COMMIT: 85aec6f5812da36e499a18b088e2e6b99f503da8
+  YEW_COMMIT: 91cb98f38c63b7ce3a517e5eb359b0f9bf952804
   # The kogany chunks whose pending koganyd.toml rows the harness writes as keys (test_framework/
   # kogany.py KOGANY_LIVE; W5-f is on by default there). Moves with KOGANY_COMMIT.
   KOGANY_LIVE: W1-Y1,W2-b
