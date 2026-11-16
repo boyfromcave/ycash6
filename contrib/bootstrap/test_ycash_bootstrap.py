@@ -188,7 +188,7 @@ class RefusalTest(Quiet):
         name = [n for n in os.listdir(out) if n.endswith(".gz")][0]
         with open(os.path.join(out, name), "ab") as f:
             f.write(b"x")
-        with self.assertRaisesRegex(yb.BundleError, "bytes sha256"):
+        with self.assertRaisesRegex(yb.BundleError, "is larger than"):     # more than the manifest's gz_bytes
             self.verify(profile, out)
 
     def test_broken_hash_chain_with_consistent_sums(self):
@@ -591,7 +591,7 @@ else: sys.exit("unknown " + cmd)
 """
 
 
-def make_state_bundle(out, height=510500, top=510503, statement_override=None, extra_entry=None, network="testnet-yb-fast"):
+def make_state_bundle(out, height=510500, top=510503, statement_override=None, extra_entry=None, network="testnet-yb-fast", drop=()):
     """A ycash-state/1 bundle (ycash-infra bundles/state/FORMAT.md) of a stand-in datadir."""
     import tarfile
     os.makedirs(out)
@@ -615,6 +615,8 @@ def make_state_bundle(out, height=510500, top=510503, statement_override=None, e
     statement = {"network": network, "height": height, "blockhash": "%064x" % height, "chainwork": "%064x" % (height * 3),
                  "utxo_hash_serialized": "utxo-%d" % height, "vault_statehash": "vault-%d" % height, "yed_statehash": "yed-%d" % height}
     statement.update(statement_override or {})
+    for key in drop:
+        del statement[key]
     manifest = dict(statement, format="ycash-state/1", line="ycash6", profile=network.rsplit("-", 1)[1], version="6.22.0-rc1", flavour="full",
                     tarball=tarball, sha256=yb.sha256_file(tar_path)[0], bytes=yb.sha256_file(tar_path)[1], created="2026-11-01T00:00:00Z",
                     producer="ycash-infra/snapshotter", verifiers=["ycash-dd", "ycash6"])
@@ -706,6 +708,24 @@ class StateTest(Quiet):
         code, err = self.restore(make_state_bundle(os.path.join(self.tmp, "b5"), height=510000))
         self.assertIn("below the fork", err)
         self.assertEqual(code, 2)
+
+    def test_a_v1_statement_must_carry_every_field_of_its_format(self):
+        """Review finding L-1: a statement without utxo_hash_serialized (or any other v1 field) would leave
+        that part of the state unchecked; it is refused before anything is extracted."""
+        for i, key in enumerate(("utxo_hash_serialized", "chainwork", "vault_statehash", "yed_statehash")):
+            with self.subTest(drop=key):
+                code, err = self.restore(make_state_bundle(os.path.join(self.tmp, "m%d" % i), drop=(key,)))
+                self.assertEqual(code, 2, err)
+                self.assertIn("statement-ycash-dd.json lacks %s" % key, err)
+                self.assertIn("every field the format defines", err)
+                self.assertFalse(os.path.exists(os.path.join(self.datadir, "testnet-yb-fast", "chainstate")))
+        code, err = self.restore(make_state_bundle(os.path.join(self.tmp, "m9"), statement_override={"finalsaplingroot": "ab" * 32}))
+        self.assertEqual(code, 2, err)
+        self.assertIn("has finalsaplingroot, which ycash-state/1 does not define", err)
+        code, err = self.restore(make_state_bundle(os.path.join(self.tmp, "ok"), statement_override={"yed_statehash": None}))
+        self.assertEqual(code, 2, err)                                   # null is a value: present, and compared
+        self.assertIn("disagrees with the statements", err)
+        self.assertIn("yed_statehash", err)
 
 
 
@@ -1230,6 +1250,57 @@ class PartsTest(Quiet):
         self.bundle(format="ycash-state/4")
         code, err = self.restore(self.server_url() + "latest/")
         self.assert_refused(code, err, "expected one of ycash-state/1, ycash-state/2, ycash-state/3")
+
+    def test_a_v2_or_v3_statement_must_carry_every_field_of_its_format(self):
+        """Review finding L-1: v2/v3 statements carry v1's fields plus finalsaplingroot and chainsupply_zat;
+        one without any of them is refused before a part is fetched."""
+        self.serve()
+        for fmt in ("ycash-state/3", "ycash-state/2"):
+            for key in ("utxo_hash_serialized", "finalsaplingroot", "chainsupply_zat"):
+                with self.subTest(fmt=fmt, drop=key):
+                    shutil.rmtree(os.path.join(self.tmp, "bucket"), ignore_errors=True)
+                    shutil.rmtree(self.datadir, ignore_errors=True)
+                    out, m = self.bundle(fmt=fmt, statement={k: v for k, v in self.statement.items() if k != key})
+                    code, err = self.restore(self.server_url() + "latest/")
+                    self.assert_refused(code, err, "statement-ycash6.json lacks %s" % key)
+                    first = m["parts"][0]["name"] if fmt == "ycash-state/3" else m["tarball"]
+                    self.assertEqual(self.requests(first), [])
+        shutil.rmtree(os.path.join(self.tmp, "bucket"))
+        shutil.rmtree(self.datadir)
+        self.bundle(statement=dict(self.statement, chainsupply_zat=None))   # null where FORMAT.md allows it: compared
+        code, err = self.restore(self.server_url() + "latest/")
+        self.assert_refused(code, err, "disagrees with the statements")
+        self.assertIn("chainsupply_zat", err)
+
+    def test_metadata_larger_than_the_cap_is_refused_before_it_is_verified(self):
+        """Review finding L-2: SHA256SUMS, manifest.json and latest/manifest.json arrive before any
+        signature is checked; a mirror sending more than METADATA_MAX_BYTES of one is refused, and no
+        more than that reaches the disk."""
+        self.serve()
+        big = b"x" * (yb.METADATA_MAX_BYTES + 1)
+        for where in (os.path.join("latest", "manifest.json"), os.path.join(str(MAIN_H), "SHA256SUMS"),
+                      os.path.join(str(MAIN_H), "manifest.json")):
+            with self.subTest(where=where):
+                shutil.rmtree(os.path.join(self.tmp, "bucket"), ignore_errors=True)
+                shutil.rmtree(self.datadir, ignore_errors=True)
+                out, m = self.bundle()
+                with open(os.path.join(self.root, where), "wb") as f:
+                    f.write(big)
+                code, err = self.restore(self.server_url() + "latest/")
+                self.assert_refused(code, err, "is larger than %d bytes" % yb.METADATA_MAX_BYTES)
+                self.assertEqual(self.requests(m["parts"][0]["name"]), [])
+        shutil.rmtree(self.datadir)
+        os.makedirs(self.datadir)
+        for source in (yb.Source(os.path.join(self.root, str(MAIN_H))), yb.Source(self.server_url() + "%d/" % MAIN_H)):
+            with self.subTest(source=str(source)):
+                dest = os.path.join(self.datadir, "m")
+                with self.assertRaisesRegex(yb.BundleError, "manifest.json is larger than"):
+                    source.fetch("manifest.json", dest)
+                self.assertLessEqual(os.path.getsize(dest + ".part"), yb.METADATA_MAX_BYTES)
+                self.assertFalse(os.path.exists(dest))
+                self.assertTrue(source.fetch("manifest.json", dest, limit=len(big)))   # a larger cap takes it
+                self.assertEqual(os.path.getsize(dest), len(big))
+                os.remove(dest)
 
     def test_latest_must_name_the_height_it_points_to(self):
         self.bundle()
