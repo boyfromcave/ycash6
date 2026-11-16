@@ -399,7 +399,7 @@ TEST(ValuePools, RecordReadRefusesUnknownVersionAndCorruptTotals)
 
     // Undo data whose spent value is out of range: refused before it is subtracted.
     Record parent;
-    parent.transparent = MAX_MONEY;
+    parent.transparent = MAX_MONEY - 10;
     CBlock b;
     b.vtx.push_back(MakeTx({CTxOut(1, CScript() << OP_TRUE)}, 0, true));
     b.vtx.push_back(MakeTx({CTxOut(1, CScript() << OP_TRUE)}, 1, false));

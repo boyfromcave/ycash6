@@ -345,6 +345,7 @@ void Open(const fs::path& path, bool fWipe)
     lastWritten.reset();
     genesisRecord.reset();
     fReportedGap = false;
+    db.reset(); // a store already open on `path` holds its lock: close it first
     try {
         db.reset(new CDBWrapper(path, 1 << 20, false, fWipe));
     } catch (const std::exception& e) {

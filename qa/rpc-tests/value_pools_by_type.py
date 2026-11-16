@@ -12,7 +12,7 @@ Two nodes on regtest with -nuparams=6d5b7a31:200 (test_framework/vault_harness.p
 every class: P2PKH (the wallet), P2SH, TX_PQPKH in both schemes (scheme 1 spent with an SLH-DSA signature, scheme 2
 with a Falcon signature where the framework's optional Falcon signer builds; -pqfalcon=1), a hybrid PQ channel (spent
 by its refund path), a YED-tagged vault (APP into a YED-tagged intent, then RELEASE), a vault under another tag (one
-kept, one APP into an intent under that tag, then RELEASE), and OP_RETURN with value. The YED-tagged templates are made with the primitive's builders, as vault_pq.py
+kept, one UNLOCKed by the set into an intent under that tag, then RELEASE; APP is for registered modules only), and OP_RETURN with value. The YED-tagged templates are made with the primitive's builders, as vault_pq.py
 does, without the Yellowback overlay: the index classifies scripts, so `yed_*` state is not needed to reach these
 classes (the collateralZat relation, note §1.2, is therefore not observed here).
 
@@ -245,7 +245,7 @@ class ValuePoolsByTypeTest(VaultTestBase):
         # A set for the vault templates (as vault_pq.py).
         self.sid, admit = self.create_set('P', seats=1, unlock_threshold=1, cancel_threshold=1, slash_threshold=1,
                                           liveness_window=1000, maturity=2)
-        member = v.fixed_secret('P-member')
+        member = self.member = v.fixed_secret('P-member')
         self.join(self.sid, member, [admit], 'JOIN P')
         self.mine(3)
         self.heartbeat(self.sid, [member], 'HEARTBEAT P')
@@ -271,15 +271,15 @@ class ValuePoolsByTypeTest(VaultTestBase):
         self.vpY = self.vparams(self.sid, owner_height=self.tip() + 400, app_height=self.tip() + 3, tag=b'YED\x00')
         self.vpY2 = self.vparams(self.sid, owner_height=self.tip() + 400, app_height=self.tip() + 3, tag=b'YED\x00', delay=7)
         self.vpT = self.vparams(self.sid, owner_height=self.tip() + 400)
-        self.vpT2 = self.vparams(self.sid, owner_height=self.tip() + 400, app_height=self.tip() + 3)
+        self.vpT2 = self.vparams(self.sid, owner_height=self.tip() + 400)
         self.vY = self.lock(self.vpY, 2 * COIN, 'lock a YED-tagged V')
         self.vY2 = self.lock(self.vpY2, 2 * COIN, 'lock a second YED-tagged V (spent in the reorg section)')
         self.vT = self.lock(self.vpT, 3 * COIN, 'lock a V under the tag TEST')
-        self.vT2 = self.lock(self.vpT2, COIN, 'lock a second V under the tag TEST (APP and RELEASE)')
+        self.vT2 = self.lock(self.vpT2, COIN, 'lock a second V under the tag TEST (UNLOCK and RELEASE)')
         self.mine()
         self.check_chain(self.node, 'every class created')
 
-        self.mine_to(max(self.vpY.app_height, self.vpT2.app_height, self.refund_height))
+        self.mine_to(max(self.vpY.app_height, self.refund_height))
         # APP: the YED V into a YED-tagged intent
         rspk = self.change_spk()
         fee_vin, change = v.node_fee_inputs(self.node)
@@ -287,11 +287,10 @@ class ValuePoolsByTypeTest(VaultTestBase):
         app_txid = self.accept(v.node_sign(self.node, app, app.vin[0].scriptSig), 'APP: the YED V into an intent')
         self.ip = v.intent_for(self.vpY, rspk)
         self.rspk = rspk
-        # APP: the TEST V into an intent under the tag TEST (not the YED module's: vault_intent, no YED row)
+        # UNLOCK: the TEST V into an intent under the tag TEST (not the YED module's: vault_intent, no YED row)
         rspkT = self.change_spk()
-        fee_vin, change = v.node_fee_inputs(self.node)
-        appT = v.build_app_tx(self.vT2, self.vpT2, COIN, [(rspkT, COIN)], fee_vin, change)
-        appT_txid = self.accept(v.node_sign(self.node, appT, appT.vin[0].scriptSig), 'APP: the TEST V into an intent')
+        appT_txid = self.accept(self.unlock_hex(self.vT2, self.vpT2, COIN, [(rspkT, COIN)], [self.member]),
+                                'UNLOCK: the TEST V into an intent')
         ipT = v.intent_for(self.vpT2, rspkT)
         # TX_PQPKH scheme 1, spent with SLH-DSA
         tx = v.make_tx([(fund, 0, v.SEQUENCE_FINAL)], [(COIN - FEE, self.change_spk())])
