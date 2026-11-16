@@ -72,6 +72,7 @@ identical contrib/docker/ycashd/test_entrypoint.py
 identical qa/rpc-tests/wallet_address_matrix.py
 identical qa/rpc-tests/wallet_balance_by_type.py
 identical qa/rpc-tests/wallet_pq_fee_cap.py
+identical qa/rpc-tests/wallet_pq_sendmany_lock.py
 identical qa/rpc-tests/wallet_yed_ecc_token.py
 identical qa/rpc-tests/wallet_getnewaddress_type.py
 identical qa/rpc-tests/vault_lock_from.py
