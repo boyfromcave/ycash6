@@ -482,10 +482,13 @@ public:
 
     /**
      * z_sendmany from a post-quantum address (beta2 D-2, D-4; reverses quantum spec A-15): the fewest of that
-     * address's own TX_PQPKH coins (largest first, never coinbase, minDepth applies) that pay the payments and the
+     * address's own TX_PQPKH coins (largest first, minDepth applies) that pay the payments and the
      * fee of a PQ spend (PQBuilderFee) on the transaction's real size; change back to the same address, change
      * below its PQ dust threshold to the fee. A default fee is raised to the PQ fee; an explicit one below it is
-     * refused. Throws JSONRPCError with the reference's strings (insufficient funds, too many inputs, sigops).
+     * refused. Beta3: the address's mature coinbase joins the candidates only when every payment is shielded and
+     * its other coins fall short, and a selection that holds coinbase makes no change (refused, naming the amount
+     * to send: PQCoinbaseChangeRefusal). Throws JSONRPCError with the reference's strings (insufficient funds, too
+     * many inputs, sigops).
      */
     tl::expected<TransactionEffects, InputSelectionError>
     PreparePQTransaction(

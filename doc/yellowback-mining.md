@@ -351,6 +351,12 @@ getcoinbasetemplatefor "address" {"previousblockhash": "<hex>", "txids": ["<hex>
   invalid (`bad-cb-amount`); adding one leaves its fee unclaimed.
 - The node keeps nothing between calls, and `getblocktemplate` and `submitblock` are unchanged.
   The call needs neither a wallet nor `-mineraddress`.
+- A reward paid to a transparent address (ECC or post-quantum) is spendable after 101 confirmations and, on
+  mainnet and the testnets, can then only be sent to shielded addresses with no change: an ECC
+  miner uses `z_shieldcoinbase`, a post-quantum miner `z_sendmany` from its address to a Sapling
+  address (`doc/yellowback-rpc.md`, "A post-quantum miner shields its coinbase"; for a pool and its
+  miners, "A reward paid to a post-quantum address" below). A reward paid to a Sapling address needs
+  neither.
 - The call checks that each named transaction is in the mempool, not that the set is complete or in
   order: a child named without its parent is answered (with the child's fee), and the block of that
   set is invalid for the missing input. Name `getblocktemplate`'s list verbatim.
@@ -378,3 +384,38 @@ kinds cost a mempool lookup per transaction. Each call occupies one RPC thread w
 the requests a pool has in flight and set `-rpcthreads` to that cap plus two or more, so that
 `submitblock` never waits behind proofs. The quote tag in the answer is the node's current one
 (`flags`), which is the one to mine.
+
+### A reward paid to a post-quantum address
+
+- **Pay it to an address held in a ycashd or yewd wallet.** The YEW phone app and the web wallet cannot
+  tell that a coin is a coinbase (the light-client coin listing, lightwalletd's `GetAddressUtxos`,
+  carries no such flag): they show the reward as spendable, and the node refuses their sends until
+  the coin is 100 blocks deep and the send has only shielded recipients and no change.
+- **Move it with `z_sendmany` from the address to a shielded address**, once it has 101
+  confirmations (`listunspent` and `balance_pq` show it from then on). The wallet takes the
+  address's largest coins first, and a selection that holds a coinbase allows no change, so name an
+  amount, read the exact amount in the refusal, and send that. An amount within the largest reward
+  selects that one coin, so a call moves one reward unless the amount named is more than it: then
+  the next coin joins, and the refusal names the amount for every coin selected. With two rewards of
+  6.25 at an FN-DSA address (amounts made up; the fees are this node line's regtest figures for one
+  and two FN-DSA inputs, an SLH-DSA input costs more, 0.00028 for one, and the refusal always names
+  the exact figure):
+
+  ```
+  z_sendmany "<sqf… address>" '[{"address":"<ys1… address>","amount":1}]'
+    -> -4 When shielding coinbase funds, the wallet does not allow any change. The proposed transaction
+          would result in 5.249935 in change. To spend the selected coins, send exactly 6.249935 to shielded
+          recipients (the 6.25 selected less the fee 0.000065).
+  z_sendmany "<sqf… address>" '[{"address":"<ys1… address>","amount":7}]'
+    -> -4 … would result in 5.49988 in change. To spend the selected coins, send exactly 12.49988 to
+          shielded recipients (the 12.50 selected less the fee 0.00012).
+  z_sendmany "<sqf… address>" '[{"address":"<ys1… address>","amount":12.49988}]'
+    -> both rewards in one transaction: no transparent output, Sapling outputs only
+  ```
+
+  Sending 6.249935 instead moves the one reward and leaves the other for the next call.
+- **`z_shieldcoinbase` and `z_mergetoaddress` do not move it**: `z_shieldcoinbase` refuses a
+  post-quantum source and `z_mergetoaddress` leaves its coinbase out. A transparent (ECC or
+  post-quantum) recipient never receives it; the refusal names the coinbase the address holds.
+- **A transparent (ECC) reward and a Sapling reward are unchanged**: an ECC reward is shielded with
+  `z_shieldcoinbase` after 101 confirmations, a Sapling reward is an ordinary note.

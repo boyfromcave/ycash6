@@ -85,8 +85,10 @@ by decision as `3` and `4` were.** No `yed_*` field changes shape: every change 
 call, and the one step tells a client that the node has all of them (check `rpcversion >= 10` rather than probing
 each call). The additions, by beta3 item: `getcoinbasetemplatefor` (3; new call: a coinbase that pays a miner's own
 transparent, Sapling or post-quantum address for a named template, with `fund` and `fundrule`; `doc/yellowback-mining.md`
-§13); `getblocktemplate.coinbasetxn.foundersreward` derived from the coinbase's rule, so a Sapling miner address reports
-it too (3; ycash-dd, where it read `vout[1]`); `transparentPools` in `getblockchaininfo` and `getblock` (2; below,
+§13; a post-quantum payout address must be held in a ycashd or yewd wallet, which moves the reward with `z_sendmany`:
+"A post-quantum miner shields its coinbase" below); `getblocktemplate.coinbasetxn.foundersreward` derived from the
+coinbase's rule, so a Sapling miner address reports it too (3; ycash-dd, where it read `vout[1]`);
+`transparentPools` in `getblockchaininfo` and `getblock` (2; below,
 "`getblock` and `getblockchaininfo`"); `vin[].address` of an input spending a post-quantum output in `getrawtransaction`,
 `getblock` verbosity 2, `getblockdeltas` and REST `/rest/tx` (6; "Plain-YEC PQ addresses"); `gettransaction.fee` for
 every funding shape, left out when an input's funding transaction is not held (1); `-ydf` default 0, with
@@ -252,7 +254,40 @@ YED form): what node operators and clients should know.**
 - **`z_mergetoaddress` follows (D-6):** a named `sq…` source merges its coins (at most 100 per call, and
   only as many inputs as keep the policy sigops, P2SH redeem scripts included, within the standard limit; the
   rest are reported as remaining), an `sq…` destination receives the merge, with the same fee rule. PQ coins
-  are never merged with Sprout notes or into a Sprout address. `z_shieldcoinbase` still refuses a PQ source (D-7).
+  are never merged with Sprout notes or into a Sprout address. `z_shieldcoinbase` still refuses a PQ source (D-7),
+  and `z_mergetoaddress` leaves coinbase out, as it does for an ECC address.
+- **A post-quantum miner shields its coinbase with `z_sendmany` (beta3).** A pool may pay a block reward to an `sq…`
+  address (`getcoinbasetemplatefor`); where coinbase must be shielded (mainnet, the testnets, regtest with
+  `-regtestshieldcoinbase`) a transaction that spends it has no transparent output. The wallet's rule, the same on
+  every line, and applied on every network (as the wallet's coinbase rule for an ECC address is):
+  1. the address's ordinary coins are used first, exactly as above (change returns to the address);
+  2. its *mature* coinbase (101 confirmations, when `listunspent` and `balance_pq` first show it) joins the candidates
+     only when every recipient is shielded and the ordinary coins do not cover the amounts and the fee; all candidates
+     are then taken largest first;
+  3. a selection that holds a coinbase coin makes no change output: the amounts must add up to the selected coins
+     less the fee (what is left below the PQ dust threshold goes to the fee, as above). A send that would leave
+     change is refused, -4, `When shielding coinbase funds, the wallet does not allow any change. The proposed
+     transaction would result in <c> in change. To spend the selected coins, send exactly <a> to shielded recipients
+     (the <s> selected less the fee <f>).`: send `<a>` (with the same `fee` argument, if one was given) and the
+     transaction is `vin` = the selected coins, `vout` empty, Sapling outputs only;
+  4. with a transparent (ECC or post-quantum) recipient the coinbase is never selected, and the -6 refusal
+     (`Insufficient transparent funds, no UTXOs found for taddr from address.` or `Insufficient transparent funds, have
+     <x>, need <y>.`) is followed by ` The address holds <v> of coinbase funds, which can only be sent to shielded
+     recipients, with no change.`; immature coinbase at the address is named the same way in every such refusal:
+     ` The address holds <v> of immature coinbase funds, which can be sent to shielded recipients only, with no change,
+     after 101 confirmations.`
+  So a miner names a shielded amount, reads the exact amount in the refusal and sends that. Coins are taken largest
+  first, so an amount within the largest reward moves that one reward; an amount above it brings in the next coin
+  (and so on, up to the input limit above), and the refusal then names the amount for all of them (a worked example:
+  `doc/yellowback-mining.md` §13, "A reward paid to a post-quantum address"). Every refusal is the wallet's: nothing
+  reaches the mempool. `z_shieldcoinbase` and `z_mergetoaddress` do not move such a reward (the first refuses a
+  post-quantum source, the second leaves coinbase out); there is no one-call sweep. **The payout address must be held
+  in a ycashd or yewd wallet:** the YEW app and the web wallet cannot tell that a coin is a coinbase (lightwalletd's
+  `GetAddressUtxos` carries no such flag), so they show the reward as spendable and the node refuses their sends
+  until the coin is 100 blocks deep and the send has only shielded recipients and no change. A transparent (ECC) or
+  Sapling reward is unchanged.
+  Such a send has no transparent output, so `AllowRevealedSenders` is the privacy policy it needs.
+  Pinned by `wallet_pq_coinbase_spend.py`, with and without `-regtestshieldcoinbase`, both schemes.
 - The error strings of these paths (the same on every line):
   `post-quantum addresses can be spent from only once the vault upgrade is active at the next block`;
   `an FN-DSA-512 (scheme 2) post-quantum address can be spent from only once Falcon is active at the next block`;
@@ -465,8 +500,8 @@ YED form): what node operators and clients should know.**
     output counts. Hence `z_gettotalbalance(0).transparent = balance + unconfirmed_balance − locked`, and the same
     for the ECC part, the post-quantum part and each scheme, where the identity's exceptions are by design:
     *locked* (`lockunspent`) coins count in `getwalletinfo` and not in the by-depth calls (nor in `z_getbalance`);
-    *immature* coinbase counts in neither (it is `immature_balance`, then `balance_ecc`/`transparent_ecc` once
-    mature); *watch-only* coins count only in `z_gettotalbalance` with `includeWatchonly` and in `z_getbalance` of
+    *immature* coinbase counts in neither (it is `immature_balance`, then `balance_ecc`/`transparent_ecc`, or
+    `balance_pq`/`transparent_pq` for the coinbase of a post-quantum address, once mature); *watch-only* coins count only in `z_gettotalbalance` with `includeWatchonly` and in `z_getbalance` of
     the address, never in `getwalletinfo`. All pinned by the test.
   - `-allowdeprecated=none` turns off `z_getbalance`, `z_gettotalbalance`, `getnewaddress` and `z_listaddresses`
     (they are in `DEFAULT_ALLOW_DEPRECATED`), and with them the new `z_gettotalbalance` fields; `getwalletinfo`,
