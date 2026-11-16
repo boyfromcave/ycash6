@@ -374,6 +374,16 @@ def initialize_chain(test_dir, num_nodes, cachedir, cache_behavior='current'):
     """
     assert num_nodes <= MAX_NODES
 
+    # A koganyd run mines the cache with the Ycash upgrades (kogany.follower_ycash_args), in a
+    # directory of its own: the two chains never share a cache, and cache_config.json records the
+    # arguments a cache was mined with, so a mismatch rebuilds it.
+    upgrade_args = []
+    if os.getenv("KOGANY_BIN") and cache_behavior in ('current', 'fresh'):
+        from . import kogany
+        upgrade_args = kogany.follower_ycash_args(['-nuparams=5ba81b19:1', '-nuparams=76b809bb:1'])
+        if upgrade_args:
+            cachedir = os.path.join(cachedir, 'ycash-upgrades')
+
     def rebuild_cache():
         #find and delete old cache directories if any exist
         for i in range(MAX_NODES):
@@ -389,6 +399,7 @@ def initialize_chain(test_dir, num_nodes, cachedir, cache_behavior='current'):
                 '-i-am-aware-zcashd-will-be-replaced-by-zebrad-and-zallet-in-2025',
                 '-nuparams=5ba81b19:1', # Overwinter
                 '-nuparams=76b809bb:1', # Sapling
+            ] + upgrade_args + [
                 '-mocktime=%d' % block_time
             ])
             if i > 0:
@@ -433,7 +444,7 @@ def initialize_chain(test_dir, num_nodes, cachedir, cache_behavior='current'):
         for i in range(MAX_NODES):
             # record the system time at which the cache was regenerated
             with open(node_file(cachedir, i, 'cache_config.json'), "w", encoding="utf8") as cache_conf_file:
-                cache_config = { "cache_time": time.time() }
+                cache_config = { "cache_time": time.time(), "upgrade_args": upgrade_args }
                 cache_conf_json = json.dumps(cache_config, indent=4)
                 cache_conf_file.write(cache_conf_json)
 
@@ -494,8 +505,12 @@ def initialize_chain(test_dir, num_nodes, cachedir, cache_behavior='current'):
         for i in range(MAX_NODES):
             node_path = os.path.join(cachedir, 'node'+str(i))
             if os.path.isdir(node_path):
-                if not os.path.isfile(node_file(cachedir, i, 'cache_config.json')):
+                conf = node_file(cachedir, i, 'cache_config.json')
+                if not os.path.isfile(conf):
                     return True
+                with open(conf, "r", encoding="utf8") as cache_conf_file:
+                    if json.load(cache_conf_file).get("upgrade_args", []) != upgrade_args:
+                        return True
             else:
                 return True
         return False
@@ -622,6 +637,12 @@ def start_node(i, dirname, extra_args=None, rpchost=None, timewait=None, binary=
         '-nuparams=76b809bb:1', # Sapling
     ])
     if extra_args is not None: args.extend(extra_args)
+    if os.getenv("KOGANY_BIN"):
+        # a koganyd run: the Ycash upgrades kogany's regtest runs from block 1, unless the script
+        # names its own schedule (kogany.follower_ycash_args)
+        from . import kogany
+        k = args.index('-nuparams=76b809bb:1') + 1     # after the framework's Sapling
+        args[k:k] = kogany.follower_ycash_args(args)
     if os.getenv("KOGANY_SIDECAR", "0") == "1" and os.getenv("KOGANY_BIN"):
         # the ycash6 test rig (kogany plan W9-a): kogany i on p2p_port(i), ycashd i -connect'ed to it
         from . import kogany

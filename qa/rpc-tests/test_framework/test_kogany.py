@@ -1197,5 +1197,89 @@ class SidecarRigTest(unittest.TestCase):
             util.MIXED_HOOKS.update(saved)
 
 
+class FollowerYcashArgsTest(unittest.TestCase):
+    """A koganyd run gives ycashd the Ycash upgrades kogany's regtest runs from block 1 (the
+    13 wallet scripts of the mixed vault group whose block 1 koganyd refused with
+    Subsidy(FoundersRewardNotFound)), and mines the framework's cache with them, apart."""
+
+    ENV = {'KOGANY_BIN': '/bin/koganyd'}
+
+    def test_added_only_in_a_koganyd_run(self):
+        self.assertEqual(kg.follower_ycash_args(START + VAULT, self.ENV), YCASH)
+        self.assertEqual(kg.follower_ycash_args(START + VAULT, {}), [])
+        self.assertEqual(kg.follower_ycash_args(START + VAULT, dict(self.ENV, KOGANY_SIDECAR='1')), YCASH)
+        self.assertEqual(kg.follower_ycash_args(START + VAULT, dict(self.ENV, YEWD_BIN='/bin/yewd')), [])
+
+    def test_a_script_schedule_is_kept(self):
+        self.assertEqual(kg.follower_ycash_args(START + YCASH + VAULT, self.ENV), [])
+        self.assertEqual(kg.follower_ycash_args(START + ['-nuparams=374d694f:10'], self.ENV), [])
+        self.assertEqual(kg.follower_ycash_args(START + ['-nuparams=19bd2d2f:3'], self.ENV), [])
+        # vault_activation_restart's side node moves Sapling: its rules stay the script's
+        self.assertEqual(kg.follower_ycash_args(START + ['-nuparams=5ba81b19:1', '-nuparams=76b809bb:104'],
+                                                self.ENV), [])
+
+    def test_start_node_inserts_after_sapling(self):
+        seen = []
+
+        class Stop(Exception):
+            pass
+
+        def popen(args, **_kw):
+            seen.append(list(args))
+            raise Stop()
+        with mock.patch.dict(os.environ, {'KOGANY_BIN': '/bin/koganyd'}) as env, \
+                mock.patch.object(util.subprocess, 'Popen', popen):
+            for k in ('KOGANY_SIDECAR', 'YEWD_BIN'):
+                env.pop(k, None)
+            with self.assertRaises(Stop):
+                util.start_node(0, '/tmp/no-such-run', VAULT)
+            with self.assertRaises(Stop):
+                util.start_node(0, '/tmp/no-such-run', YCASH + VAULT)
+        a = seen[0]
+        i = a.index('-nuparams=76b809bb:1')
+        self.assertEqual(a[i + 1:i + 5], YCASH)
+        self.assertEqual(a[-1], VAULT[0])
+        self.assertEqual(sum(1 for x in seen[1] if x.startswith('-nuparams=')), 7)   # nothing added
+
+    def _fake_cache(self, cachedir, upgrade_args):
+        import json
+        for i in range(util.MAX_NODES):
+            d = os.path.join(cachedir, 'node%d' % i, 'regtest')
+            os.makedirs(d)
+            with open(os.path.join(d, 'cache_config.json'), 'w', encoding='utf8') as f:
+                json.dump({'cache_time': 0, 'upgrade_args': upgrade_args}, f)
+
+    def test_the_cache_is_kept_apart(self):
+        import shutil
+        import tempfile
+        util.PortSeed.n = 4243
+        tmp = tempfile.mkdtemp()
+        try:
+            cache = os.path.join(tmp, 'cache')
+            self._fake_cache(cache, [])                                    # the plain cache
+            self._fake_cache(os.path.join(cache, 'ycash-upgrades'), YCASH)  # the koganyd run's
+            with mock.patch.dict(os.environ, {'KOGANY_BIN': '/bin/koganyd'}) as env:
+                for k in ('KOGANY_SIDECAR', 'YEWD_BIN'):
+                    env.pop(k, None)
+                util.initialize_chain(os.path.join(tmp, 'run'), 1, cache)
+                with open(os.path.join(tmp, 'run', 'node0', 'regtest', 'cache_config.json'), encoding='utf8') as f:
+                    self.assertIn('374d694f', f.read())                    # copied from ycash-upgrades
+                # a cache mined with other arguments is rebuilt, never used
+                shutil.rmtree(os.path.join(cache, 'ycash-upgrades'))
+                self._fake_cache(os.path.join(cache, 'ycash-upgrades'), [])
+
+                class Rebuilt(Exception):
+                    pass
+
+                def popen(args, **_kw):
+                    self.assertIn('-nuparams=374d694f:1', args)
+                    raise Rebuilt()
+                with mock.patch.object(util.subprocess, 'Popen', popen), self.assertRaises(Rebuilt):
+                    util.initialize_chain(os.path.join(tmp, 'run2'), 1, cache)
+            self.assertTrue(os.path.isdir(os.path.join(cache, 'node0')))          # the plain cache untouched
+        finally:
+            shutil.rmtree(tmp)
+
+
 if __name__ == '__main__':
     unittest.main()

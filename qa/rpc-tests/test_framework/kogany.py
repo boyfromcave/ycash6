@@ -1401,6 +1401,41 @@ def kogany_regtest_schedule(args):
     return out
 
 
+# The Ycash upgrade and Ycash's Blossom, Heartwood and Canopy (yellowback_util.YCASH_UPGRADE_ARGS).
+YCASH_FAMILY = (0x374d694f, 0x8e471bd6, 0x66314da3, 0x19bd2d2f)
+
+
+def follower_ycash_args(args, env=None):
+    """The arguments a ycashd node of a koganyd run (``KOGANY_BIN``: followers, or the
+    ``KOGANY_SIDECAR`` rig; not the yewd pairs, which mine their own chain) is given on top of
+    ``args``: ``YCASH_UPGRADE_ARGS`` when ``args`` name none of the Ycash upgrades and leave
+    Overwinter and Sapling at the framework's height 1, else nothing.
+
+    kogany's regtest puts an unset Blossom, Heartwood and Canopy at the Sapling height
+    (``ConfiguredActivationHeights::for_regtest``, zakura-chain parameters/network/testnet.rs), so
+    the Ycash rules hold from block 1 there; a ycashd given Overwinter and Sapling only mines
+    founders'-reward blocks a koganyd refuses at block 1 (``Subsidy(FoundersRewardNotFound)``).
+    The configured rules differ, which is a harness defect, not a disagreement between the lines:
+    the ycashd side is given the schedule every Yellowback test runs (and the framework's cached
+    chain is mined with it, in a cache directory of its own, ``util.initialize_chain``).  A node
+    whose script names a Ycash upgrade, or moves Sapling (vault_activation_restart's side node),
+    keeps its arguments exactly."""
+    env = os.environ if env is None else env
+    if not env.get('KOGANY_BIN') or env.get('YEWD_BIN'):
+        return []
+    named = {}
+    for a in args:
+        if a.startswith('-nuparams='):
+            b, _, h = a.split('=', 1)[1].partition(':')
+            named[int(b, 16)] = h
+    if any(b in named for b in YCASH_FAMILY):
+        return []
+    if named.get(0x5ba81b19, '1') != '1' or named.get(0x76b809bb, '1') != '1':
+        return []
+    from .yellowback_util import YCASH_UPGRADE_ARGS
+    return list(YCASH_UPGRADE_ARGS)
+
+
 class SolvingProxy:
     """A pair node's RPC proxy whose ``generate`` mines solved blocks from kogany's templates
     (the mixed variant: a ycashd peer checks (48,5)).  Everything else is the proxy's."""
