@@ -85,8 +85,10 @@ by decision as `3` and `4` were.** No `yed_*` field changes shape: every change 
 call, and the one step tells a client that the node has all of them (check `rpcversion >= 10` rather than probing
 each call). The additions, by beta3 item: `getcoinbasetemplatefor` (3; new call: a coinbase that pays a miner's own
 transparent, Sapling or post-quantum address for a named template, with `fund` and `fundrule`; `doc/yellowback-mining.md`
-§13); `getblocktemplate.coinbasetxn.foundersreward` derived from the coinbase's rule, so a Sapling miner address reports
-it too (3; ycash-dd, where it read `vout[1]`); `transparentPools` in `getblockchaininfo` and `getblock` (2; below,
+§13; a post-quantum payout address must be held in a ycashd or yewd wallet, which moves the reward with `z_sendmany`:
+"A post-quantum miner shields its coinbase" below); `getblocktemplate.coinbasetxn.foundersreward` derived from the
+coinbase's rule, so a Sapling miner address reports it too (3; ycash-dd, where it read `vout[1]`);
+`transparentPools` in `getblockchaininfo` and `getblock` (2; below,
 "`getblock` and `getblockchaininfo`"); `vin[].address` of an input spending a post-quantum output in `getrawtransaction`,
 `getblock` verbosity 2, `getblockdeltas` and REST `/rest/tx` (6; "Plain-YEC PQ addresses"); `gettransaction.fee` for
 every funding shape, left out when an input's funding transaction is not held (1); `-ydf` default 0, with
@@ -272,9 +274,18 @@ YED form): what node operators and clients should know.**
      (`Insufficient transparent funds, no UTXOs found for taddr from address.` or `Insufficient transparent funds, have
      <x>, need <y>.`) is followed by ` The address holds <v> of coinbase funds, which can only be sent to shielded
      recipients, with no change.`; immature coinbase at the address is named the same way in every such refusal:
-     ` The address holds <v> of immature coinbase funds, which can be spent after 101 confirmations.`
-  So a miner sweeps its rewards by naming any shielded amount and resending the amount the refusal names; several
-  rewards go in one send up to the input limit above. Every refusal is the wallet's: nothing reaches the mempool.
+     ` The address holds <v> of immature coinbase funds, which can be sent to shielded recipients only, with no change,
+     after 101 confirmations.`
+  So a miner names a shielded amount, reads the exact amount in the refusal and sends that. Coins are taken largest
+  first, so an amount within the largest reward moves that one reward; an amount above it brings in the next coin
+  (and so on, up to the input limit above), and the refusal then names the amount for all of them (a worked example:
+  `doc/yellowback-mining.md` §13, "A reward paid to a post-quantum address"). Every refusal is the wallet's: nothing
+  reaches the mempool. `z_shieldcoinbase` and `z_mergetoaddress` do not move such a reward (the first refuses a
+  post-quantum source, the second leaves coinbase out); there is no one-call sweep. **The payout address must be held
+  in a ycashd or yewd wallet:** the YEW app and the web wallet cannot tell that a coin is a coinbase (lightwalletd's
+  `GetAddressUtxos` carries no such flag), so they show the reward as spendable and the node refuses their sends
+  until the coin is 100 blocks deep and the send has only shielded recipients and no change. A transparent (ECC) or
+  Sapling reward is unchanged.
   Such a send has no transparent output, so `AllowRevealedSenders` is the privacy policy it needs.
   Pinned by `wallet_pq_coinbase_spend.py`, with and without `-regtestshieldcoinbase`, both schemes.
 - The error strings of these paths (the same on every line):
