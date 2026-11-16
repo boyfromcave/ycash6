@@ -90,7 +90,8 @@ it too (3; ycash-dd, where it read `vout[1]`); `transparentPools` in `getblockch
 "`getblock` and `getblockchaininfo`"); `vin[].address` of an input spending a post-quantum output in `getrawtransaction`,
 `getblock` verbosity 2, `getblockdeltas` and REST `/rest/tx` (6; "Plain-YEC PQ addresses"); `gettransaction.fee` for
 every funding shape, left out when an input's funding transaction is not held (1); `-ydf` default 0, with
-`getblocksubsidy.founders` and `getblocktemplate.coinbasetxn.ydfpercentage` past the mandate reporting this node's share (4).
+`getblocksubsidy.founders` past the mandate reporting this node's share (4; ycash-dd's `getblocktemplate.coinbasetxn.ydfpercentage`
+too, a key this line's `getblocktemplate` does not have).
 
 **Scheme-visible post-quantum prefixes (`rpcversion` 9; decision D-9, docs/plans/yellowback-quantum-spec.md §4.1).**
 A post-quantum address is Base58Check(3-byte version ‖ 32-byte keyHash), 53 characters, one version per network,
