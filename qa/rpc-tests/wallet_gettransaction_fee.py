@@ -13,15 +13,21 @@ transparent value in + shielded value in - transparent value out - value into a 
 One wallet (node 0, a fresh wallet file so no coinbase of its own) holds ECC, FN-DSA-512 and Sapling addresses and
 sends in each shape: ECC to ECC, ECC to Sapling, Sapling to ECC (a foreign and an own recipient), Sapling to Sapling,
 Sapling to post-quantum outputs of both schemes (the live case: ECC + FN + SLH recipients, one own PQ), ECC to a
-post-quantum address, a post-quantum input to ECC and to Sapling, and a mixed send (an ECC input and Sapling notes in
-one transaction, z_mergetoaddress). For each, unconfirmed and mined:
+post-quantum address, an FN-DSA input to ECC and to Sapling, an SLH-DSA input to ECC, and a mixed send (an ECC input
+and Sapling notes in one transaction, z_mergetoaddress). For each, unconfirmed and mined:
 
 - fee == -(the mempool entry's fee of another node) == -(inputs - outputs decoded from the raw transaction);
 - amount is upstream's figure, unchanged by the fee fix: credit - debit - (GetValueOut() - debit) when the transaction
   is "from me" in CWalletTx::IsFromMe's sense, credit - debit otherwise. That sense differs between the lines for a
   Sapling-only funded send (v4.5.0: a transparent debit only; 6.x: a wallet nullifier too), so those shapes expect a
   different amount per line, as before this change;
+- details[] (CWalletTx::GetAmounts, unchanged) carries a fee only when a transparent input is the wallet's, and then
+  upstream's figure (debit - GetValueOut() + shielded value in), so for a Sapling-funded send the top-level fee can
+  differ from details[].fee; listtransactions shows the same entries as details[];
 - the recipient wallet shows no fee (no input of its own).
+
+And a jointly built raw transaction (one input of node 0's, one of node 1's whose funding transaction node 0 does not
+hold): node 0 cannot know the fee, so gettransaction shows none rather than a wrong one.
 
     BITCOIND=<ycashd> ../.venv/bin/python -u qa/rpc-tests/wallet_gettransaction_fee.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 
@@ -122,11 +128,27 @@ class WalletGetTransactionFeeTest(BitcoinTestFramework):
             assert_equal(zat(t['fee']), -fee)
             assert_equal(t['amount'], Decimal(amount))
             assert_equal(t['amountZat'], zat(amount))
+            self.check_details(label, txid, t, fee if debit > 0 else None)
             try:
                 r = n1.gettransaction(txid)            # the recipient: no input of its own, so no fee
             except JSONRPCException:
                 r = {}
             assert 'fee' not in r, (label, r)
+
+    def check_details(self, label, txid, t, details_fee):
+        """details[] is GetAmounts' (unchanged): a fee only with a transparent debit, then equal to the real fee for these
+        shapes (every input is node 0's), so none for a Sapling-funded send; listtransactions lists the same entries."""
+        keys = ('category', 'amount', 'amountZat', 'vout', 'fee')
+        def strip(e):
+            return {k: e[k] for k in keys if k in e}
+        for d in t['details']:
+            if details_fee is None:
+                assert 'fee' not in d, (label, d)
+            elif 'fee' in d:
+                assert_equal(zat(d['fee']), -details_fee)
+        listed = [strip(e) for e in self.nodes[0].listtransactions('*', 1000) if e.get('txid') == txid]
+        key = lambda e: (e['category'], e.get('vout', -1), str(e['amount']))
+        assert_equal(sorted(listed, key=key), sorted([strip(d) for d in t['details']], key=key))
 
     def run_test(self):
         n0, n1 = self.nodes
@@ -135,17 +157,21 @@ class WalletGetTransactionFeeTest(BitcoinTestFramework):
         # one source address per transparent send: z_sendmany spends every coin of its source address
         ecc = [n0.getnewaddress() for _ in range(4)]
         fn = [n0.getnewaddress('', 'pq') for _ in range(2)]
+        slh = n0.getnewaddress('', 'pqslh')
+        joint = n0.getnewaddress()
+        assert_equal(n0.validateaddress(slh)['pqscheme'], 1)
         z = n0.z_getnewaddress('sapling')
         assert all(n0.validateaddress(a)['pqscheme'] == 2 for a in fn)   # Falcon active: "pq" is FN-DSA-512
         o_t, o_fn, o_slh, o_z = (n1.getnewaddress(), n1.getnewaddress('', 'pq'), n1.getnewaddress('', 'pqslh'),
                                  n1.z_getnewaddress('sapling'))
 
-        print('funding node 0 from node 1: four ECC addresses, two FN-DSA addresses, one Sapling address')
+        print('funding node 0 from node 1: five ECC addresses, two FN-DSA, one SLH-DSA, one Sapling address')
         t1 = n1.getnewaddress()
         n1.sendtoaddress(t1, 12)
         self.mine(1)
         wait_and_assert_operationid_status(n1, z_sendmany_opid(n1, t1, [(z, Decimal('10'))]), timeout=300)
-        for a in ecc + fn:
+        foreign = n1.getnewaddress()
+        for a in ecc + fn + [slh, joint, foreign]:
             n1.sendtoaddress(a, 3)
         self.mine(1)
 
@@ -166,6 +192,7 @@ class WalletGetTransactionFeeTest(BitcoinTestFramework):
         print('post-quantum (FN-DSA) input: amount = minus what left for others')
         self.check('FN-DSA -> ECC (PQ input)', self.send(fn[0], [(o_t, Decimal('1'))]), '-1')
         self.check('FN-DSA -> Sapling (PQ input)', self.send(fn[1], [(o_z, Decimal('1'))]), '-1')
+        self.check('SLH-DSA -> ECC (PQ input)', self.send(slh, [(o_t, Decimal('1'))]), '-1')
 
         print('mixed: an ECC input and every Sapling note of the wallet in one transaction; amount = minus what left')
         self.mine(Z_MERGE_NOTE_DEPTH)              # 6.x merges a note only at nAnchorConfirmations deep
@@ -176,6 +203,32 @@ class WalletGetTransactionFeeTest(BitcoinTestFramework):
         fee, shielded_in, _, _, _ = self.decoded(txid)
         assert shielded_in > 0, shielded_in
         self.check('ECC + Sapling -> ECC (mixed)', txid, str(-(Decimal(3) + notes - Decimal(fee) / COIN)))
+
+        print('jointly built: an input of node 0 and one of node 1 whose funding transaction node 0 does not hold')
+        mine_in = [u for u in n0.listunspent(1, 9999999, [joint])]
+        their_in = [u for u in n1.listunspent(1, 9999999, [foreign])]
+        assert_equal((len(mine_in), len(their_in)), (1, 1))
+        try:
+            n0.gettransaction(their_in[0]['txid'])
+            raise AssertionError('node 0 holds the foreign funding transaction')
+        except JSONRPCException:
+            pass
+        raw = n0.createrawtransaction([{'txid': u['txid'], 'vout': u['vout']} for u in mine_in + their_in],
+                                      {o_t: Decimal('5.9999')})
+        half = n0.signrawtransaction(raw)
+        assert not half['complete']
+        full = n1.signrawtransaction(half['hex'])
+        assert full['complete'], full
+        txid = n1.sendrawtransaction(full['hex'])
+        sync_mempools(self.nodes)
+        assert_equal(zat(n1.getrawmempool(True)[txid]['fee']), zat('0.0001'))
+        for state in ('unconfirmed', 'mined'):
+            if state == 'mined':
+                self.mine(1)
+            t = n0.gettransaction(txid)
+            print('  %-34s %-11s amount %12s fee %12s' % ('ECC (own) + ECC (foreign) -> ECC', state, t['amount'],
+                                                           t.get('fee', 'none')))
+            assert 'fee' not in t, t
 
 
 if __name__ == '__main__':

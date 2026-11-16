@@ -14,7 +14,11 @@ Next release (beta3), changes since 6.22.0-beta2
   each input's funding transaction) plus shielded value in (Sapling `valueBalance`, Sprout
   `vpub_new`) less transparent outputs and value moved into a shielded pool. It is shown whenever
   an input (transparent, post-quantum or shielded) is the wallet's, as before. `amount` is
-  unchanged (upstream's figure), and so are `listtransactions` and `listsinceblock`. ycash-dd now
+  unchanged (upstream's figure), and so are `listtransactions`, `listsinceblock` and `details[]`:
+  for a Sapling-funded send the top-level `fee` can differ from `details[].fee`, which counts the
+  transparent debit only. When the wallet does not hold the funding transaction of every
+  transparent input (a jointly built transaction, or after `-zapwallettxes`), `fee` is left out
+  rather than shown too small (it was shown before, wrong). ycash-dd now
   shows the same fee (it showed none for a Sapling-funded send). Display only: balances, coin
   selection and consensus never read these figures. The defect was inherited from upstream zcashd
   (unchanged through 6.20.0).
