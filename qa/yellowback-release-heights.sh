@@ -15,6 +15,8 @@
 #                          testnet-legacy never activates Vault; and testnet-yb-slow and
 #                          testnet-legacy have branch IDs of their own (R8's ID half); and,
 #                          from 6.22.0-beta3 on, R9 (a beta1 or beta2 version is exempt).
+#   R10, with --release-version wherever R9 binds: the release notes the tag publishes exist and
+#                          hold no placeholder (qa/yellowback-vault-params.py notes).
 #   rc     (6.22.N-rcM)    the above, R3-R6 (the protocol-version bump, taken with rc1; the Falcon
 #                          height), R7 for the testnet (testnet-yb-fast's height and set both set;
 #                          testnet-yb-slow's set only with its height), mainnet's height and set
@@ -93,13 +95,13 @@ if [ -n "$other" ] && [ ! -f "$other" ]; then
 fi
 
 set +e
-python3 - "$json" "$other" "$warn" "$where" "$script_dir" "$stage" "$relver" <<'PY'
+python3 - "$json" "$other" "$warn" "$where" "$script_dir" "$stage" "$relver" "$root" <<'PY'
 import importlib.util
 import json
 import os
 import sys
 
-mine_path, other_path, warn, where, script_dir, stage, relver = sys.argv[1:8]
+mine_path, other_path, warn, where, script_dir, stage, relver, root = sys.argv[1:9]
 spec = importlib.util.spec_from_file_location(
     "yellowback_vault_params", os.path.join(script_dir, "yellowback-vault-params.py"))
 vp = importlib.util.module_from_spec(spec)
@@ -141,6 +143,17 @@ problems = list(vp.release_problems(mine, stage, relver or None))
 maturity = main.get("vault_min_set_maturity")
 if not isinstance(maturity, int) or isinstance(maturity, bool) or maturity <= 0:
     problems.append("the mainnet nVaultMinSetMaturity is unset")
+
+# R10: a tag's release notes exist and hold no placeholder (where R9 binds; needs the version).
+if relver and vp.r9_applies(stage, relver):
+    def read_notes(path):
+        with open(os.path.join(root, path), encoding="utf-8") as fh:
+            return fh.read()
+    notes_where = vp.release_notes(read_notes, relver)[0]
+    notes_bad = vp.notes_problems(read_notes, relver)
+    if not notes_bad:
+        print("release notes: %s" % notes_where)
+    problems.extend(notes_bad)
 
 if other_path:
     with open(other_path, encoding="utf-8") as fh:

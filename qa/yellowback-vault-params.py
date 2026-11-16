@@ -8,6 +8,7 @@
   yellowback-vault-params.py extract [--root DIR | --git-ref REF [--git-dir DIR]]
   yellowback-vault-params.py compare A.json B.json [--release main [--release-version VER | --stage beta|rc|final]]
   yellowback-vault-params.py stage VERSION
+  yellowback-vault-params.py notes VERSION [--root DIR]
 
 Both node lines must activate the vault upgrade with the same parameters (upgrade plan P8; audit
 W3-P-1). The extractor reads every parameter from the constructor body of each network class (never
@@ -26,12 +27,16 @@ slow and legacy have branch IDs of their own) and, from 6.22.0-beta3 on, R9; an 
 pending or named, legacy never), R8 (H_S set) and R9 (fast's YDF mandate end set, not provisional), and mainnet's height and set only together if the
 owner sets them; a final release needs R1-R9. Part D, raising PROTOCOL_VERSION, is taken with rc1
 (T-8): UPGRADE_VAULT.nProtocolVersion and PROTOCOL_VERSION move together, MIN_PEER_PROTO_VERSION
-stays at or below the live floor. `stage VERSION` prints the stage of a release version. This file is
+stays at or below the live floor. `stage VERSION` prints the stage of a release version. `notes
+VERSION` applies R10 (qa/yellowback-release-heights.sh does so for every tag R9 binds): the notes the
+tag publishes (doc/release-notes/release-notes-VERSION.md on ycash6, the `Changes in VERSION (ycash-dd
+tag ...)` section of doc/release-notes.md on ycash-dd) exist and hold no placeholder. This file is
 byte-identical on ycash-dd and ycash6. Python 3 standard library only.
 """
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -300,6 +305,63 @@ def fast_ydf_problems(test):
     return []
 
 
+# R10 (the beta3 cut): the release notes a tag publishes exist and carry no placeholder. The release job
+# creates the GitHub release from them as they are, and nothing else reads them before it does. ycash6
+# publishes doc/release-notes/release-notes-<version>.md; ycash-dd (no binary release) keeps the section
+# headed NOTES_SECTION in doc/release-notes.md. Version-gated like R9: the beta1 and beta2 tags predate it.
+NOTES_FILE = "doc/release-notes/release-notes-%s.md"
+NOTES_RUNNING = "doc/release-notes.md"
+NOTES_SECTION = "Changes in %s (ycash-dd tag `vault-params/v%s`)"
+NOTES_PLACEHOLDERS = ("set at the release candidate", "<HEIGHT", "<YEW COMMIT", "<H_END>", "TO CONFIRM",
+                      "placeholder", "TBD")
+
+
+def _underline(line):
+    line = line.strip()
+    return len(line) >= 3 and set(line) == {"-"}
+
+
+def release_notes(read, version):
+    """(where, text, first line number) of the notes a tag of VERSION publishes: NOTES_FILE when it
+    exists, else NOTES_SECTION of NOTES_RUNNING up to the next `Changes in …` heading; (None, None, 0)
+    when neither exists. READ(path) returns a file's text or raises OSError (or CalledProcessError)."""
+    path = NOTES_FILE % version
+    try:
+        return path, read(path), 1
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    try:
+        running = read(NOTES_RUNNING)
+    except (OSError, subprocess.CalledProcessError):
+        return None, None, 0
+    lines = running.splitlines(True)
+    heading = NOTES_SECTION % (version, version)
+    for i, line in enumerate(lines):
+        if line.rstrip("\n") == heading and i + 1 < len(lines) and _underline(lines[i + 1]):
+            j = i + 2
+            while j < len(lines) and not (lines[j].startswith("Changes in ") and j + 1 < len(lines)
+                                          and _underline(lines[j + 1])):
+                j += 1
+            return "%s (section %r)" % (NOTES_RUNNING, heading), "".join(lines[i:j]), i + 1
+    return None, None, 0
+
+
+def notes_problems(read, version):
+    """R10 for a tag of VERSION (only where r9_applies: from 6.22.0-beta3 on, every rc and final)."""
+    where, text, first = release_notes(read, version)
+    if text is None:
+        return ["R10: no release notes for %s: neither %s nor a section %r in %s"
+                % (version, NOTES_FILE % version, NOTES_SECTION % (version, version), NOTES_RUNNING)]
+    if not text.strip():
+        return ["R10: the release notes %s are empty" % where]
+    problems = []
+    for n, line in enumerate(text.splitlines(), first):
+        for marker in NOTES_PLACEHOLDERS:
+            if marker in line:
+                problems.append("R10: %s line %d still holds the placeholder %r" % (where, n, marker))
+    return problems
+
+
 def shadow_id_problems(main, test):
     """R8's branch-ID half (docs/plans/yellowback-testnet-shadow-fork-plan.md), an invariant at every
     stage: slow and legacy sign after H_S under branch IDs of their own, distinct from each other and
@@ -423,7 +485,21 @@ def main(argv):
                     help="the release version the tag names: its stage, and whether R9 binds a beta")
     st = sub.add_parser("stage")
     st.add_argument("version")
+    nt = sub.add_parser("notes", help="R10: the release notes of VERSION exist and hold no placeholder")
+    nt.add_argument("version")
+    nt.add_argument("--root", default=".")
     args = ap.parse_args(argv)
+
+    if args.cmd == "notes":
+        def read_notes(path):
+            with open(os.path.join(args.root, path), encoding="utf-8") as f:
+                return f.read()
+        problems = notes_problems(read_notes, args.version)
+        for line in problems:
+            print("problem: " + line)
+        if not problems:
+            print("release notes: ok (%s)" % release_notes(read_notes, args.version)[0])
+        return 1 if problems else 0
 
     if args.cmd == "stage":
         found = stage_of(args.version)
