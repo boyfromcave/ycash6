@@ -14,6 +14,7 @@ are checked against the three testnet profiles' pins. The real import runs in CI
 qa/rpc-tests/ycash_bootstrap.py and qa/rpc-tests/testnet_ceremony.py.
 """
 
+import argparse
 import contextlib
 import gzip
 import copy
@@ -338,7 +339,7 @@ class BucketTest(Quiet):
                 self.serve(absent)
                 _, _, _, record = self.verify()
                 self.assertFalse(record["signed"])
-                with self.assertRaisesRegex(yb.BundleError, "not signed and --require-signature"):
+                with self.assertRaisesRegex(yb.BundleError, r"not signed \(SHA256SUMS.minisig: HTTP %d\) and --require-signature" % absent):
                     self.verify(require_signature=True)
 
     def test_403_on_a_needed_file_or_another_error_on_the_signature_is_a_refusal(self):
@@ -695,6 +696,607 @@ class StateTest(Quiet):
         self.assertIn("below the fork", err)
         self.assertEqual(code, 2)
 
+
+
+# ---------------------------------------------------------------------------------- ycash-state/2 and /3 (beta3 item 9)
+
+FAKE_STATE_YCASHD = r"""#!%(python)s
+# A stand-in ycashd for a restored state bundle: records its arguments, has no peer, runs until stopped.
+import json, os, sys, time
+args = sys.argv[1:]
+datadir = [a.split("=", 1)[1] for a in args if a.startswith("-datadir=")][0]
+profile = [a.split("=", 1)[1] for a in args if a.startswith("-testnetprofile=")]
+net = "regtest" if "-regtest" in args else ("testnet-yb-" + profile[0]) if profile else ""
+netdir = os.path.join(datadir, net) if net else datadir
+with open(os.path.join(datadir, "fake-args.json"), "w") as f: json.dump(args, f)
+conf = [a.split("=", 1)[1] for a in args if a.startswith("-conf=")]
+if conf:
+    with open(os.path.join(datadir, "fake-conf-mode.json"), "w") as f: json.dump(os.stat(conf[-1]).st_mode & 0o777, f)
+with open(os.path.join(netdir, "fake-peers.json"), "w") as f: json.dump(0, f)
+stop = os.path.join(netdir, "fake-stop")
+while not os.path.exists(stop): time.sleep(0.05)
+os.remove(stop)
+"""
+
+FAKE_STATE_CLI = r"""#!%(python)s
+# A stand-in ycash-cli for a restored state bundle: the chain is <netdir>/chainstate/fake-state.json.
+import json, os, sys
+args = [a for a in sys.argv[1:] if not a.startswith("-")]
+flags = [a for a in sys.argv[1:] if a.startswith("-")]
+datadir = [a.split("=", 1)[1] for a in flags if a.startswith("-datadir=")][0]
+profile = [a.split("=", 1)[1] for a in flags if a.startswith("-testnetprofile=")]
+net = "regtest" if "-regtest" in flags else ("testnet-yb-" + profile[0]) if profile else ""
+netdir = os.path.join(datadir, net) if net else datadir
+path = os.path.join(netdir, "chainstate", "fake-state.json")
+st = json.load(open(path))
+tip, H, f = st["tip"], st["H"], st["st"]
+bh = lambda n: st["hashes"].get(str(n), "%%064x" %% n)
+at_h = tip == H
+cmd = args[0]
+if cmd == "getblockcount": print(tip)
+elif cmd == "getblockhash": print(bh(int(args[1])))
+elif cmd == "getblockheader": print(json.dumps({"chainwork": f["chainwork"]}))
+elif cmd == "gettxoutsetinfo": print(json.dumps({"hash_serialized": f["utxo_hash_serialized"] if at_h else "above"}))
+elif cmd == "vault_getinfo": print(json.dumps({"dbtip": {"hash": bh(tip)}, "statehash": f["vault_statehash"] if at_h else "above"}))
+elif cmd == "yed_getstatehash": print(json.dumps({"blockhash": bh(int(args[1])), "statehash": f["yed_statehash"]}))
+elif cmd == "getblock": print(json.dumps({"finalsaplingroot": f["finalsaplingroot"], "chainSupply": {"chainValueZat": f["chainsupply_zat"]}}))
+elif cmd == "invalidateblock": st["tip"] = H; st["calls"].append(cmd); json.dump(st, open(path, "w"))
+elif cmd == "reconsiderblock": st["tip"] = st["top"]; st["calls"].append(cmd); json.dump(st, open(path, "w"))
+elif cmd == "getconnectioncount": print(json.load(open(os.path.join(netdir, "fake-peers.json"))))
+elif cmd == "stop": open(os.path.join(netdir, "fake-stop"), "w").close()
+else: sys.exit("unknown " + cmd)
+"""
+
+
+def noise(n, seed=b"n"):
+    """n bytes gzip cannot shrink (a hash chain), so a small datadir packs to several parts."""
+    out, h = [], seed
+    while sum(map(len, out)) < n:
+        h = hashlib.sha256(h).digest()
+        out.append(h)
+    return b"".join(out)[:n]
+
+
+def state_files(network, height, top=None, hashes=None, statement=None):
+    """A stand-in datadir under <network>/ (FORMAT.md entries) whose chainstate the fake cli reads."""
+    fake = {"tip": top or height, "top": top or height, "H": height, "calls": [], "hashes": hashes or {}, "st": statement}
+    return {"%s/blocks/blk00000.dat" % network: noise(40000), "%s/blocks/rev00000.dat" % network: b"undo",
+            "%s/blocks/index/000003.ldb" % network: b"index",
+            "%s/chainstate/000005.ldb" % network: noise(9000, b"c"),
+            "%s/chainstate/fake-state.json" % network: json.dumps(fake, sort_keys=True).encode(),
+            "%s/vaults/CURRENT" % network: b"MANIFEST-000001\n"}
+
+
+def tar_gz(files):
+    """The tar.gz stream of FORMAT.md's encoding (GNU tar, bytewise order, fixed headers, gzip without a name or time)."""
+    import tarfile
+    dirs = set()
+    for name in files:
+        parts = name.split("/")
+        for i in range(2, len(parts)):
+            dirs.add("/".join(parts[:i]))
+    raw = io.BytesIO()
+    with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0, compresslevel=6) as gz, \
+            tarfile.open(fileobj=gz, mode="w", format=tarfile.GNU_FORMAT) as t:
+        for name in sorted(list(dirs) + list(files), key=str.encode):
+            info = tarfile.TarInfo(name)
+            info.mtime, info.uid, info.gid, info.uname, info.gname = 0, 0, 0, "", ""
+            if name in files:
+                info.size, info.mode = len(files[name]), 0o644
+                t.addfile(info, io.BytesIO(files[name]))
+            else:
+                info.type, info.mode = tarfile.DIRTYPE, 0o755
+                t.addfile(info)
+    return raw.getvalue()
+
+
+def tree_hash(files):
+    h = hashlib.sha256()
+    for name in sorted(files, key=str.encode):
+        h.update(("%s  %s\n" % (hashlib.sha256(files[name]).hexdigest(), name)).encode())
+    return h.hexdigest()
+
+
+def write_state_bundle(out, files, network, height, blockhash, pins, fmt="ycash-state/3", parts=3, statement=None, signed=True, **override):
+    """A ycash-state/2 (one tarball) or /3 bundle (the same stream in `parts` parts) of `files`."""
+    os.makedirs(out)
+    stream = tar_gz(files)
+    tarball = "ycash6-%s-%d-full.tar.gz" % (network, height)
+    manifest = dict(statement, format=fmt, line="ycash6", profile="", version="6.22.0-beta3", commit="0123456", flavour="full",
+                    tarball=tarball, sha256=hashlib.sha256(stream).hexdigest(), bytes=len(stream), created="2026-11-15T00:00:00Z",
+                    producer="ycash-infra/mainnet-snapshot", verifiers=["ycash6"], tree_sha256=tree_hash(files), pins=pins,
+                    treestate="treestate.json")
+    if fmt == "ycash-state/3":
+        pb = -(-len(stream) // parts)
+        chunks = [stream[i:i + pb] for i in range(0, len(stream), pb)]
+        manifest.update(part_bytes=pb, unpacked_bytes=sum(len(v) for v in files.values()),
+                        parts=[{"name": "%s.%03d" % (tarball, i), "bytes": len(c), "sha256": hashlib.sha256(c).hexdigest()}
+                               for i, c in enumerate(chunks)])
+        for i, c in enumerate(chunks):
+            with open(os.path.join(out, "%s.%03d" % (tarball, i)), "wb") as f:
+                f.write(c)
+    else:
+        with open(os.path.join(out, tarball), "wb") as f:
+            f.write(stream)
+    manifest.update(override)
+    for name, value in (("manifest.json", manifest), ("statement-ycash6.json", statement), ("treestate.json", {"height": height})):
+        with open(os.path.join(out, name), "w") as f:
+            f.write(yb.canonical(value))
+    names = sorted(os.listdir(out), key=str.encode)
+    with open(os.path.join(out, "SHA256SUMS"), "w") as f:
+        for n in names:
+            f.write("%s  %s\n" % (yb.sha256_file(os.path.join(out, n))[0], n))
+    if signed:
+        with open(os.path.join(out, "SHA256SUMS.minisig"), "w") as f:
+            f.write("untrusted comment: signature\nRW...\n")
+    return manifest
+
+
+class Ranged(http.server.BaseHTTPRequestHandler):
+    """A static bucket that honours `Range: bytes=N-` (206), answers 416 past the end, can drop a file's
+    first response halfway (`drop`), and records each request with the bytes of parts then in `watch`."""
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        srv = self.server
+        name = os.path.basename(urllib.parse.urlparse(self.path).path)
+        rel = urllib.parse.unquote(urllib.parse.urlparse(self.path).path).lstrip("/")
+        held = 0
+        if srv.watch and os.path.isdir(srv.watch):
+            held = sum(os.path.getsize(os.path.join(srv.watch, n)) for n in os.listdir(srv.watch) if re.search(r"\.tar\.gz\.\d{3}", n))
+        srv.log.append((rel, self.headers.get("Range"), held))
+        path = os.path.join(srv.root, *rel.split("/"))
+        if ".." in rel.split("/") or not os.path.isfile(path):
+            self.send_error(404)
+            return
+        with open(path, "rb") as f:
+            data = f.read()
+        start, rng = 0, self.headers.get("Range")
+        if rng:
+            start = int(re.fullmatch(r"bytes=(\d+)-", rng).group(1))
+            if start >= len(data):
+                self.send_error(416)
+                return
+            self.send_response(206)
+            self.send_header("Content-Range", "bytes %d-%d/%d" % (start, len(data) - 1, len(data)))
+        else:
+            self.send_response(200)
+        body = data[start:]
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if name in srv.drop:
+            srv.drop.discard(name)
+            self.wfile.write(body[:len(body) // 2])
+            self.wfile.flush()
+            self.close_connection = True
+            return
+        self.wfile.write(body)
+
+
+import re  # noqa: E402
+import urllib.parse  # noqa: E402
+
+MAIN_H = 570000
+MAIN_PINS = {str(h): x for h, x in yb.MAINNET_PINS.items() if h <= MAIN_H}
+
+
+class PartsTest(Quiet):
+    """A bundle in three parts restores to the same state as the one-file bundle; a corrupted, missing,
+    truncated or over-long part is refused before it reaches the extractor; a broken download resumes."""
+
+    def setUp(self):
+        super().setUp()
+        self.bin = os.path.join(self.tmp, "bin")
+        os.makedirs(self.bin)
+        for name, text in (("ycashd", FAKE_STATE_YCASHD), ("ycash-cli", FAKE_STATE_CLI)):
+            with open(os.path.join(self.bin, name), "w") as f:
+                f.write(text % {"python": sys.executable})
+            os.chmod(os.path.join(self.bin, name), 0o700)
+        self.minisign = os.path.join(self.bin, "minisign")
+        with open(self.minisign, "w") as f:
+            f.write("#!/bin/sh\necho \"$@\" > %s.args\nexit 0\n" % self.minisign)
+        os.chmod(self.minisign, 0o700)
+        self.datadir = os.path.join(self.tmp, "data")
+        self.root = os.path.join(self.tmp, "bucket", "main")         # <base>/main/{latest,<H>}/
+        self.statement = {"network": "main", "height": MAIN_H, "blockhash": yb.MAINNET_PINS[MAIN_H], "chainwork": "%064x" % 7,
+                          "utxo_hash_serialized": "aa" * 32, "vault_statehash": "bb" * 32, "yed_statehash": None,
+                          "finalsaplingroot": "cc" * 32, "chainsupply_zat": 123456789}
+        self.hashes = dict(MAIN_PINS, **{str(MAIN_H + 1): "dd" * 32})
+        self.files = state_files("main", MAIN_H, hashes=self.hashes, statement=self.statement)
+        self.server = None
+
+    def bundle(self, fmt="ycash-state/3", top=None, statement=None, files=None, **kw):
+        statement = statement or self.statement
+        files = files or (state_files("main", MAIN_H, top=top, hashes=self.hashes, statement=self.statement) if top else self.files)
+        out = os.path.join(self.root, str(MAIN_H))
+        pins = kw.pop("pins", MAIN_PINS)
+        m = write_state_bundle(out, files, "main", MAIN_H, yb.MAINNET_PINS[MAIN_H], pins, fmt=fmt, statement=statement, **kw)
+        os.makedirs(os.path.join(self.root, "latest"), exist_ok=True)
+        shutil.copyfile(os.path.join(out, "manifest.json"), os.path.join(self.root, "latest", "manifest.json"))
+        return out, m
+
+    def serve(self, drop=()):
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Ranged)
+        server.root, server.drop, server.log = os.path.join(self.tmp, "bucket"), set(drop), []
+        server.watch = os.path.join(self.datadir, "bootstrap-work", "download")
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        saved = {k: os.environ.pop(k) for k in list(os.environ) if k.lower() in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")}
+        self.addCleanup(os.environ.update, saved)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.server = server
+        return "http://127.0.0.1:%d/main/" % server.server_address[1]
+
+    def restore(self, source, *extra, network="main"):
+        argv = ["--network", network, "--datadir", self.datadir] + ([] if network == "main" else ["--state"]) + ["--source", source, "--ycashd", os.path.join(self.bin, "ycashd"),
+                "--cli", os.path.join(self.bin, "ycash-cli"), "--minisign", self.minisign, "--poll", "0.05", "--retry-wait", "0"] + list(extra)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            code = yb.main(argv)
+        return code, err.getvalue()
+
+    def requests(self, suffix):
+        return [(rng, held) for rel, rng, held in self.server.log if rel.endswith(suffix)]
+
+    def assert_restored(self, files, netdir=None):
+        netdir = netdir or self.datadir
+        got = {}
+        for top in yb.STATE_TOP_DIRS:
+            for dirpath, _, names in os.walk(os.path.join(netdir, top)):
+                for n in names:
+                    full = os.path.join(dirpath, n)
+                    with open(full, "rb") as f:
+                        got["main/" + os.path.relpath(full, netdir).replace(os.sep, "/")] = f.read()
+        self.assertEqual(sorted(got), sorted(files))
+        for name in files:
+            self.assertEqual(got[name], files[name], name)
+        self.assertEqual(tree_hash(got), tree_hash(files))
+        self.assertFalse(os.path.exists(os.path.join(self.datadir, "bootstrap-work")))
+        self.assertFalse(os.path.exists(os.path.join(self.datadir, yb.STAGING)))
+        self.assertFalse(os.path.exists(os.path.join(self.datadir, "main.bootstrap-incomplete")))
+
+    def marker(self):
+        return read_text(os.path.join(self.datadir, "main.bootstrap-incomplete"))
+
+    def assert_refused(self, code, err, text):
+        self.assertEqual(code, 2, err)
+        self.assertIn(text, err)
+        self.assertIn(text, self.marker())                                 # chunk 8's marker, with the reason
+        for top in yb.STATE_TOP_DIRS + (yb.STAGING,):
+            self.assertFalse(os.path.exists(os.path.join(self.datadir, top)), top)
+        self.assertFalse(os.path.exists(os.path.join(self.datadir, "bootstrap-work", "import.conf")))
+
+    def test_three_parts_from_latest_restore_the_same_state_with_one_part_of_disk(self):
+        out, m = self.bundle()
+        self.assertEqual(len(m["parts"]), 3)
+        base = self.serve(drop={m["parts"][1]["name"]})                   # the first answer for part 1 breaks off halfway
+        code, err = self.restore(base + "latest/")
+        self.assertEqual(code, 0, err)
+        self.assert_restored(self.files)
+        record = load_json(os.path.join(self.datadir, "bootstrap.json"))
+        self.assertEqual((record["format"], record["parts"], record["signed"], record["height"]), ("ycash-state/3", 3, True, MAIN_H))
+        self.assertTrue(record["source"].endswith("/main/%d/" % MAIN_H))     # latest/ named the height only
+        self.assertEqual([r for r, _ in self.requests("latest/manifest.json")], [None])
+        part1 = self.requests(m["parts"][1]["name"])
+        self.assertEqual(len(part1), 2)
+        self.assertEqual(part1[1][0], "bytes=%d-" % (m["parts"][1]["bytes"] // 2))   # resumed, not fetched again
+        held = [h for rel, _, h in self.server.log]
+        self.assertLessEqual(max(held), m["part_bytes"])                # never more than one part on disk
+        args = load_json(os.path.join(self.datadir, "fake-args.json"))
+        for flag in ("-connect=0", "-listen=0", "-dnsseed=0"):
+            self.assertIn(flag, args)
+        self.assertFalse(any(a in ("-regtest", "-testnet") for a in args))   # mainnet: no network flag
+        self.assertEqual(load_json(os.path.join(self.datadir, "fake-conf-mode.json")), 0o600)
+        self.assertIn("-P", read_text(self.minisign + ".args"))
+
+    def test_the_one_file_v2_bundle_restores_the_same_state(self):
+        out, m = self.bundle(fmt="ycash-state/2")
+        self.assertNotIn("parts", m)
+        code, err = self.restore(out)                                      # a local directory
+        self.assertEqual(code, 0, err)
+        self.assert_restored(self.files)
+        self.assertEqual(load_json(os.path.join(self.datadir, "bootstrap.json"))["parts"], 1)
+
+    def test_a_local_latest_directory_is_rebased(self):
+        self.bundle()
+        code, err = self.restore(os.path.join(self.root, "latest"))
+        self.assertEqual(code, 0, err)
+        self.assert_restored(self.files)
+
+    def test_rollback_and_the_v2_fields_are_compared(self):
+        self.bundle(top=MAIN_H + 1)
+        code, err = self.restore(self.serve() + "latest/")
+        self.assertEqual(code, 0, err)
+        state = load_json(os.path.join(self.datadir, "chainstate", "fake-state.json"))
+        self.assertEqual(state["calls"], ["invalidateblock", "reconsiderblock"])
+        shutil.rmtree(os.path.join(self.tmp, "bucket"))
+        shutil.rmtree(self.datadir)
+        self.bundle(statement=dict(self.statement, finalsaplingroot="ee" * 32))
+        code, err = self.restore(self.serve() + "latest/")
+        self.assert_refused(code, err, "disagrees with the statements")
+        self.assertIn("finalsaplingroot", err)
+
+    def capture_staging(self):
+        """Record what the staging directory holds when a part is refused."""
+        seen, real = {}, yb.fetch_part
+
+        def fetch(*a, **kw):
+            try:
+                return real(*a, **kw)
+            except yb.BundleError:
+                staging = os.path.join(self.datadir, yb.STAGING)
+                for dirpath, _, names in os.walk(staging):
+                    for n in names:
+                        with open(os.path.join(dirpath, n), "rb") as f:
+                            seen["main/" + os.path.relpath(os.path.join(dirpath, n), staging).replace(os.sep, "/")] = f.read()
+                raise
+        yb.fetch_part = fetch
+        self.addCleanup(setattr, yb, "fetch_part", real)
+        return seen
+
+    def test_a_corrupted_part_is_refused_before_it_is_extracted(self):
+        out, m = self.bundle()
+        with open(os.path.join(out, m["parts"][1]["name"]), "r+b") as f:
+            f.seek(100)
+            b = f.read(1)
+            f.seek(100)
+            f.write(bytes([b[0] ^ 1]))
+        seen = self.capture_staging()
+        code, err = self.restore(self.serve() + "latest/")
+        self.assert_refused(code, err, "(twice)")
+        self.assertEqual([r for r, _ in self.requests(m["parts"][1]["name"])], [None, None])   # fetched again from 0, once
+        self.assertEqual(self.requests(m["parts"][2]["name"]), [])
+        self.assertTrue(seen)                                              # part 0's entries were extracted ...
+        for name, data in seen.items():                                    # ... and nothing but verified bytes
+            self.assertTrue(self.files[name].startswith(data), name)
+        self.assertLess(len(seen), len(self.files))
+
+    def test_a_missing_part(self):
+        out, m = self.bundle()
+        os.remove(os.path.join(out, m["parts"][2]["name"]))
+        code, err = self.restore(self.serve() + "latest/")
+        self.assert_refused(code, err, "%s: HTTP 404" % m["parts"][2]["name"])
+
+    def test_a_truncated_last_part(self):
+        out, m = self.bundle()
+        with open(os.path.join(out, m["parts"][2]["name"]), "r+b") as f:
+            f.truncate(m["parts"][2]["bytes"] - 10)
+        code, err = self.restore(self.serve() + "latest/")
+        self.assert_refused(code, err, "shorter than the %d bytes" % m["parts"][2]["bytes"])
+
+    def test_a_server_sending_more_than_a_part(self):
+        out, m = self.bundle()
+        with open(os.path.join(out, m["parts"][0]["name"]), "ab") as f:
+            f.write(b"more")
+        code, err = self.restore(self.serve() + "latest/")
+        self.assert_refused(code, err, "sends more than")
+
+    def test_keep_parts_lets_a_rerun_read_them_locally(self):
+        out, m = self.bundle()
+        last = os.path.join(out, m["parts"][2]["name"])
+        os.rename(last, last + ".away")
+        base = self.serve()
+        code, err = self.restore(base + "latest/", "--keep-parts")
+        self.assertEqual(code, 2, err)
+        os.rename(last + ".away", last)
+        code, err = self.restore(base + "latest/", "--keep-parts")
+        self.assertEqual(code, 0, err)
+        self.assert_restored(self.files)
+        for p in m["parts"][:2]:
+            self.assertEqual(len(self.requests(p["name"])), 1, p["name"])  # read from work/ on the re-run
+
+    def test_a_signature_is_required_on_mainnet(self):
+        out, m = self.bundle(signed=False)
+        code, err = self.restore(self.serve() + "latest/")
+        self.assert_refused(code, err, "not signed (SHA256SUMS.minisig: HTTP 404)")
+        self.assertIn("a mainnet restore needs one", err)
+        self.assertNotIn("--allow-unsigned accepts", err)                  # no way round it is offered
+        self.assertEqual(self.requests(m["parts"][0]["name"]), [])
+
+    def test_allow_unsigned_is_refused_on_mainnet(self):
+        """The coordinator's ruling on review finding M-3: a mainnet restore is always signed."""
+        out, m = self.bundle(signed=False)
+        base = self.serve()
+        with self.assertRaises(SystemExit) as cm:
+            self.restore(base + "latest/", "--allow-unsigned")
+        self.assertIn("--allow-unsigned is refused on mainnet", str(cm.exception))
+        self.assertEqual(self.server.log, [])                              # refused before any request
+        self.assertFalse(os.path.exists(os.path.join(self.datadir, "main.bootstrap-incomplete")))
+        args = argparse.Namespace(require_signature=False, allow_unsigned=True, key=yb.DEFAULT_KEY, minisign=self.minisign)
+        source = yb.Source(base + "%d/" % MAIN_H)                          # and check_signature never takes it there
+        os.makedirs(self.datadir)
+        sums = os.path.join(self.datadir, "SHA256SUMS")
+        source.fetch("SHA256SUMS", sums)
+        with self.assertRaises(yb.BundleError) as cm:
+            yb.check_signature(source, sums, args, yb.main_profile(), True, False, "")
+        self.assertIn("a mainnet restore needs one", str(cm.exception))
+
+    def test_a_v2_bundle_restores_over_http(self):
+        out, m = self.bundle(fmt="ycash-state/2")
+        code, err = self.restore(self.serve() + "latest/")
+        self.assertEqual(code, 0, err)
+        self.assert_restored(self.files)
+        self.assertEqual([r for r, _ in self.requests(m["tarball"])], [None])   # one part: the tarball, fetched once
+        record = load_json(os.path.join(self.datadir, "bootstrap.json"))
+        self.assertEqual((record["format"], record["parts"], record["signed"]), ("ycash-state/2", 1, True))
+        self.assertTrue(record["source"].endswith("/main/%d/" % MAIN_H))
+
+    def test_without_a_node_the_last_line_says_the_check_was_skipped(self):
+        self.bundle()
+        argv = ["--network", "main", "--datadir", self.datadir, "--source", self.serve() + "latest/", "--ycashd", "", "--cli", "",
+                "--minisign", self.minisign, "--retry-wait", "0"]
+        with contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()) as out:
+            code = yb.main(argv)
+        self.assertEqual(code, 0, err.getvalue())
+        self.assert_restored(self.files)
+        last = out.getvalue().strip().splitlines()[-1]
+        self.assertIn("the node check was SKIPPED (no --ycashd/--cli)", last)
+        self.assertEqual(load_json(os.path.join(self.datadir, "bootstrap.json"))["check"], "skipped: no --ycashd/--cli")
+
+    def test_the_disk_check_estimates_a_v2_datadir_at_one_and_a_half_times_the_tarball(self):
+        """The published 3,100,949 bundle unpacks to 56.1 GB from 41.8 GB: the tarball's size is not an estimate."""
+        os.makedirs(self.datadir)
+        args = argparse.Namespace(datadir=self.datadir, keep_parts=False)
+        work = os.path.join(self.datadir, "bootstrap-work")
+        real = yb.shutil.disk_usage
+        self.addCleanup(setattr, yb.shutil, "disk_usage", real)
+        size, part = 41_800_000_000, 41_800_000_000
+        v2 = {"format": "ycash-state/2", "bytes": size}
+        for free, ok in ((size + part + yb.GIB, False), (size * 3 // 2 + part + yb.GIB - 1, False), (size * 3 // 2 + part + yb.GIB, True)):
+            yb.shutil.disk_usage = lambda path, free=free: real(path)._replace(free=free)
+            with self.subTest(free=free):
+                if ok:
+                    yb.check_disk(args, v2, part, work)
+                else:
+                    with self.assertRaises(yb.BundleError) as cm:
+                        yb.check_disk(args, v2, part, work)
+                    self.assertIn("the datadir 62.7 GB", str(cm.exception))
+        v3 = {"format": "ycash-state/3", "bytes": size, "unpacked_bytes": 56_100_000_000}  # unpacked_bytes when it is there
+        yb.shutil.disk_usage = lambda path: real(path)._replace(free=56_100_000_000 + yb.GIB + yb.GIB - 1)
+        with self.assertRaises(yb.BundleError) as cm:
+            yb.check_disk(args, v3, yb.GIB, work)
+        self.assertIn("the datadir 56.1 GB", str(cm.exception))
+        yb.shutil.disk_usage = lambda path: real(path)._replace(free=56_100_000_000 + yb.GIB + yb.GIB)
+        yb.check_disk(args, v3, yb.GIB, work)
+
+    def test_the_marker_and_its_directory_are_fsynced(self):
+        os.makedirs(self.datadir)
+        synced, real = [], yb.os.fsync
+
+        def fsync(fd):
+            st = os.fstat(fd)
+            synced.append((st.st_dev, st.st_ino))
+            return real(fd)
+        yb.os.fsync = fsync
+        self.addCleanup(setattr, yb.os, "fsync", real)
+        args = argparse.Namespace(datadir=self.datadir, network="main")
+        yb.write_marker(args, self.datadir, "started")
+        marker = os.stat(os.path.join(self.datadir, "main.bootstrap-incomplete"))
+        directory = os.stat(self.datadir)
+        self.assertEqual(synced, [(marker.st_dev, marker.st_ino), (directory.st_dev, directory.st_ino)])
+        self.assertFalse(os.path.exists(os.path.join(self.datadir, "main.bootstrap-incomplete.part")))
+
+    def server_url(self):
+        return "http://127.0.0.1:%d/main/" % self.server.server_address[1]
+
+    def test_not_enough_disk_is_refused_before_a_part_is_fetched(self):
+        out, m = self.bundle()
+        real = yb.shutil.disk_usage
+        yb.shutil.disk_usage = lambda path: real(path)._replace(free=m["unpacked_bytes"])
+        self.addCleanup(setattr, yb.shutil, "disk_usage", real)
+        code, err = self.restore(self.serve() + "latest/")
+        self.assert_refused(code, err, "not enough disk")
+        self.assertEqual(self.requests(".000"), [])
+
+    def test_pins_and_formats_are_this_releases(self):
+        pins = dict(MAIN_PINS, **{"570000": "ff" * 32})
+        self.bundle(pins=pins)
+        code, err = self.restore(self.serve() + "latest/")
+        self.assert_refused(code, err, "manifest pin 570000")
+        shutil.rmtree(os.path.join(self.tmp, "bucket"))
+        self.bundle(format="ycash-state/4")
+        code, err = self.restore(self.server_url() + "latest/")
+        self.assert_refused(code, err, "expected one of ycash-state/1, ycash-state/2, ycash-state/3")
+
+    def test_latest_must_name_the_height_it_points_to(self):
+        self.bundle()
+        with open(os.path.join(self.root, "latest", "manifest.json"), "w") as f:
+            f.write(yb.canonical({"height": MAIN_H}))
+        os.rename(os.path.join(self.root, str(MAIN_H)), os.path.join(self.root, "580000"))
+        with open(os.path.join(self.root, "latest", "manifest.json"), "w") as f:
+            f.write(yb.canonical({"height": 580000}))
+        code, err = self.restore(self.serve() + "latest/")
+        self.assert_refused(code, err, "latest/ names height 580000")
+
+    def test_regtest_in_parts_restores_into_its_subdirectory(self):
+        statement = dict(self.statement, network="regtest", height=200, blockhash="%064x" % 200)
+        files = state_files("regtest", 200, statement=statement)
+        out = os.path.join(self.tmp, "rt")
+        write_state_bundle(out, files, "regtest", 200, "%064x" % 200, {}, statement=statement, signed=False)
+        code, err = self.restore(out, network="regtest")                  # a local directory: no signature needed
+        self.assertEqual(code, 0, err)
+        for name, data in files.items():
+            with open(os.path.join(self.datadir, *name.split("/")), "rb") as f:
+                self.assertEqual(f.read(), data)
+        self.assertTrue(os.path.isfile(os.path.join(self.datadir, "regtest", "bootstrap.json")))
+
+    def test_mainnet_takes_a_state_bundle_only(self):
+        for extra in (("--prefix",), ("--reset",)):
+            argv = ["--network", "main", "--datadir", self.datadir, "--source", "https://example.invalid/main/latest/"] + list(extra)
+            with self.subTest(extra=extra), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                yb.main(argv)
+        self.assertFalse(os.path.exists(os.path.join(self.datadir, "main.bootstrap-incomplete")))
+
+
+class MainnetPinsTest(unittest.TestCase):
+    """The tool's MAINNET_PINS against this tree's src/chainparams.cpp (CMainParams): every compiled
+    checkpoint, the genesis block, the Ycash fork block and, where this line compiles it, the
+    chain-supply checkpoint block."""
+
+    def test_the_pins_are_this_trees_compiled_ones(self):
+        path = os.path.join(HERE, "..", "..", "src", "chainparams.cpp")
+        if not os.path.isfile(path):
+            self.skipTest("no src/chainparams.cpp beside contrib/")
+        text = read_text(path)
+        body = text[text.index("class CMainParams"):text.index("class CTestNetParams")]
+        compiled = {int(h): x for h, x in re.findall(r'\(\s*(\d+),\s*uint256S\("0x([0-9a-f]{64})"\)\)', body)}
+        self.assertGreaterEqual(len(compiled), 10)
+        for height, value in compiled.items():
+            self.assertEqual(yb.MAINNET_PINS.get(height), value, height)
+        self.assertIn('hashGenesisBlock == uint256S("0x%s")' % yb.MAINNET_PINS[0], body)
+        self.assertIn('uint256S("%s")' % yb.MAINNET_PINS[570000], body)          # UPGRADE_YCASH.hashActivationBlock
+        supply = re.search(r'hashChainSupplyCheckpointBlock = uint256S\("([0-9a-f]{64})"\)', body)
+        if supply:
+            self.assertEqual(supply.group(1), yb.MAINNET_PINS[2800000])
+        self.assertEqual(set(yb.MAINNET_PINS) - set(compiled), {0, 570000, 2800000})
+
+class HardeningTest(RestoreTest):
+    """The item 8 review's LOW findings."""
+
+    def test_conf_and_datadir_in_node_arg_are_refused(self):
+        for flag in ("-conf=/etc/ycash.conf", "--conf=/x", "-datadir=/tmp/elsewhere"):
+            with self.subTest(flag=flag), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
+                self.run_restore("--node-arg=%s" % flag)
+            self.assertIn("--conf", str(cm.exception))
+        self.assertFalse(os.path.exists(self.marker()))
+
+    def test_import_conf_is_a_new_0600_file_and_is_removed(self):
+        work = os.path.join(self.datadir, "bootstrap-work")
+        os.makedirs(work)
+        old = os.path.join(work, "import.conf")
+        with open(old, "w") as f:
+            f.write("left behind\n")
+        os.chmod(old, 0o644)
+        with open(os.path.join(self.datadir, "ycash.conf"), "w") as f:
+            f.write("rpcpassword=secret\n")
+        path = yb.import_conf(type("A", (), {"conf": None, "datadir": self.datadir})(), work)
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        self.assertIn("rpcpassword=secret", read_text(path))
+        os.environ["FAKE_REFUSE_HEIGHT"] = "5"                             # a failed import ...
+        try:
+            code, err = self.run_restore()
+        finally:
+            del os.environ["FAKE_REFUSE_HEIGHT"]
+        self.assertEqual(code, 2)
+        self.assertTrue(os.path.isdir(work))
+        self.assertFalse(os.path.exists(old))                             # ... leaves no copy of the password
+        code, err = self.run_restore("--keep")                             # nor does a kept work directory
+        self.assertEqual(code, 0, err)
+        self.assertFalse(os.path.exists(old))
+
+    def test_an_unpinned_public_prefix_needs_a_signature(self):
+        self.profile["node"]["private"] = False
+        code, err = self.run_restore("--allow-unpinned")
+        self.assertEqual(code, 2)
+        self.assertIn("an unpinned prefix needs one", err)
+        code, err = self.run_restore("--allow-unpinned", "--allow-unsigned")
+        self.assertEqual(code, 0, err)
+
+    def test_a_state_bundle_over_http_needs_a_signature(self):
+        why = yb.signature_required(args_for(), ybprofile.load("testnet-yb-fast"), yb.Source("https://example.invalid/b/"), True, False)
+        self.assertEqual(why, ["a state bundle over http(s) needs one"])
+        self.assertEqual(yb.signature_required(args_for(), ybprofile.load("testnet-yb-fast"), yb.Source(self.tmp), True, False), [])
 
 if __name__ == "__main__":
     unittest.main()
