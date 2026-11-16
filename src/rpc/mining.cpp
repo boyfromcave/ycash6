@@ -23,6 +23,7 @@
 #include "net.h"
 #include "pow.h"
 #include "rpc/server.h"
+#include "script/standard.h"
 #include "txmempool.h"
 #include "util/match.h"
 #include "util/system.h"
@@ -31,8 +32,11 @@
 #include "wallet/wallet.h"
 #endif
 #include "yellowback/index.h"
+#include "yellowback/policy.h"
 
 #include <stdint.h>
+#include <optional>
+#include <set>
 #include <variant>
 
 #include <boost/assign/list_of.hpp>
@@ -988,6 +992,243 @@ UniValue getblocksubsidy(const UniValue& params, bool fHelp)
     return result;
 }
 
+/** The serialized size of a block header of this network at nHeight: 140 bytes and the Equihash solution with its length prefix. */
+static uint64_t BlockHeaderSizeAtHeight(const CChainParams& chainparams, int nHeight)
+{
+    const uint64_t n = chainparams.EquihashN(nHeight);
+    const uint64_t k = chainparams.EquihashK(nHeight);
+    const uint64_t nSolutionSize = (uint64_t(1) << k) * (n / (k + 1) + 1) / 8;
+    return 140 + GetSizeOfCompactSize(nSolutionSize) + nSolutionSize;
+}
+
+static bool IsHash64(const UniValue& v)
+{
+    return v.isStr() && v.get_str().size() == 64 && IsHex(v.get_str());
+}
+
+UniValue getcoinbasetemplatefor(const UniValue& params, bool fHelp)
+{
+    if (fHelp || params.size() != 2)
+        throw runtime_error(
+            "getcoinbasetemplatefor \"address\" {\"previousblockhash\":\"hex\",\"txids\":[\"hex\",...]}\n"
+            "\nReturns a complete coinbase transaction that pays \"address\" for the block template the caller names.\n"
+            "A pool calls it once per miner and template and pairs the answer with the header fields and the\n"
+            "transactions of the getblocktemplate reply it holds; getblocktemplate and submitblock are unchanged.\n"
+            "The node keeps nothing between calls. There is no amount argument: the node derives the amount itself, the\n"
+            "block subsidy plus the fee of every named transaction (from its own mempool), less the development-fund\n"
+            "output this node's own coinbase carries at that height (required during the mandate; afterwards the -ydf\n"
+            "share, 0 by default).\n"
+            "Needs neither a wallet nor -mineraddress.\n"
+
+            "\nArguments:\n"
+            "1. \"address\"      (string, required) The payout address: transparent (P2PKH or P2SH), Sapling, or a\n"
+            "                    post-quantum YEC address. A Sapling address needs Heartwood active at the next height,\n"
+            "                    a post-quantum one the Vault upgrade.\n"
+            "2. template        (json object, required) Exactly these two keys; any other key is refused.\n"
+            "     {\n"
+            "       \"previousblockhash\" : \"hex\",   (string, required) previousblockhash of the getblocktemplate reply\n"
+            "       \"txids\" : [\"hex\", ...]         (array, required) the hash of every entry of that reply's transactions, in order (at most 50000)\n"
+            "     }\n"
+
+            "\nResult:\n"
+            "{\n"
+            "  \"data\" : \"hex\",               (string) the serialized coinbase transaction, complete and valid as returned\n"
+            "  \"hash\" : \"hex\",               (string) its transaction id\n"
+            "  \"height\" : n,                 (numeric) the height the coinbase is for: the tip's height plus one\n"
+            "  \"previousblockhash\" : \"hex\",  (string) echo of the request\n"
+            "  \"addresstype\" : \"type\",       (string) \"p2pkh\", \"p2sh\", \"sapling\" or \"pq\"\n"
+            "  \"subsidy\" : n,                (numeric) the block subsidy at height, in " + MINOR_CURRENCY_UNIT + "\n"
+            "  \"fund\" : n,                   (numeric) the value of the coinbase's development-fund output, whichever rule put it there;\n"
+            "                                0 exactly when the coinbase has no such output\n"
+            "  \"fundrule\" : \"rule\",          (string) \"mandated\" (consensus requires the output at height: subsidy / 20), \"optional\" (the mandate\n"
+            "                                has ended and this node's -ydf is above 0: that share of the subsidy) or \"none\"\n"
+            "  \"fees\" : n,                   (numeric) the sum of the fees of the named transactions\n"
+            "  \"amount\" : n,                 (numeric) what the address receives: subsidy - fund + fees, under every fundrule\n"
+            "  \"txcount\" : n,                (numeric) the number of transaction ids the amount was derived from\n"
+            "  \"flags\" : \"hex\",              (string) the scriptSig bytes after <height> OP_0 (the Yellowback quote tag, or empty), as getblocktemplate's coinbaseaux.flags\n"
+            "  \"sigops\" : n                  (numeric) the coinbase's legacy signature-operation count\n"
+            "}\n"
+            "\nA reference that no longer holds is refused with \"template-stale: ...\" (the tip moved, or a named\n"
+            "transaction left the mempool): fetch getblocktemplate again. \"coinbase-does-not-fit: ...\" means the block\n"
+            "of the named transactions has no room for this coinbase.\n"
+
+            "\nExamples:\n"
+            + HelpExampleCli("getcoinbasetemplatefor", "\"address\" '{\"previousblockhash\":\"hash\",\"txids\":[\"txid\"]}'")
+            + HelpExampleRpc("getcoinbasetemplatefor", "\"address\", {\"previousblockhash\":\"hash\",\"txids\":[\"txid\"]}")
+        );
+
+    // ---- 1. Parse (no lock). Shape errors first, then the address. ----
+    const UniValue& tmpl = params[1];
+    if (!tmpl.isObject() || tmpl.size() != 2 || !tmpl.exists("previousblockhash") || !tmpl.exists("txids"))
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "template must be an object with exactly the keys previousblockhash and txids");
+    const UniValue& prevValue = find_value(tmpl, "previousblockhash");
+    if (!IsHash64(prevValue))
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "previousblockhash must be 64 hex characters");
+    const uint256 hashPrevBlock = uint256S(prevValue.get_str());
+    const UniValue& txidsValue = find_value(tmpl, "txids");
+    if (!txidsValue.isArray())
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "txids must be an array of strings of 64 hex characters");
+    for (size_t i = 0; i < txidsValue.size(); i++) {
+        if (!IsHash64(txidsValue[i]))
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "txids must be an array of strings of 64 hex characters");
+    }
+    if (txidsValue.size() > 50000)
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "txids has more than 50000 entries");
+    std::vector<uint256> vTxids;
+    vTxids.reserve(txidsValue.size());
+    for (size_t i = 0; i < txidsValue.size(); i++)
+        vTxids.push_back(uint256S(txidsValue[i].get_str()));
+
+    // The payout address: what the coinbase builder is given (a script or a Sapling address) and the kind's name.
+    const CChainParams& chainparams = Params();
+    const Consensus::Params& consensus = chainparams.GetConsensus();
+    std::optional<MinerAddress> minerAddress;
+    std::string strAddressType;
+    {
+        if (!params[0].isStr())
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
+        KeyIO keyIO(chainparams);
+        const CTxDestination dest = keyIO.DecodeDestination(params[0].get_str());
+        if (IsValidDestination(dest)) {
+            strAddressType = std::holds_alternative<CKeyID>(dest) ? "p2pkh" : std::holds_alternative<CScriptID>(dest) ? "p2sh" : "pq";
+            boost::shared_ptr<CReserveScript> payoutScript(new CReserveScript());
+            payoutScript->reserveScript = GetScriptForDestination(dest);
+            minerAddress = MinerAddress(payoutScript);
+        } else {
+            const std::optional<libzcash::PaymentAddress> zaddr = keyIO.DecodePaymentAddress(params[0].get_str());
+            if (!zaddr.has_value()) {
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
+            } else if (const libzcash::SaplingPaymentAddress* sapling = std::get_if<libzcash::SaplingPaymentAddress>(&zaddr.value())) {
+                strAddressType = "sapling";
+                minerAddress = MinerAddress(*sapling);
+            } else if (std::holds_alternative<libzcash::SproutPaymentAddress>(zaddr.value())) {
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Address type cannot receive a coinbase: sprout");
+            } else if (std::holds_alternative<libzcash::UnifiedAddress>(zaddr.value())) {
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Address type cannot receive a coinbase: unified");
+            } else {
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid address");
+            }
+        }
+    }
+
+    // ---- 2. Refuse as getblocktemplate does. ----
+    if (chainparams.NetworkIDString() != "regtest" && vNodes.empty())
+        throw JSONRPCError(RPC_CLIENT_NOT_CONNECTED, "Ycash is not connected!");
+
+    if (IsInitialBlockDownload(consensus))
+        throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD, "Ycash is downloading blocks...");
+
+    // ---- 3. Under cs_main and mempool.cs, read only. Nothing of getblocktemplate's is read or written. ----
+    int nHeight;
+    CAmount nFees = 0;
+    uint64_t nTxsSize = 0;
+    uint64_t nTxsSigOps = 0;
+    CScript coinbaseFlags;
+    {
+        LOCK2(cs_main, mempool.cs);
+
+        if (yellowback::g_yellowback && !yellowback::g_yellowback->IsHealthy())
+            throw JSONRPCError(RPC_VERIFY_REJECTED, "yellowback-unhealthy: " + yellowback::g_yellowback->UnhealthyReason() + "; restart with -reindex-yellowback");
+
+        const CBlockIndex* pindexPrev = chainActive.Tip();
+        if (pindexPrev == nullptr || pindexPrev->GetBlockHash() != hashPrevBlock)
+            throw JSONRPCError(RPC_MISC_ERROR, "template-stale: previousblockhash is not the tip");
+        nHeight = pindexPrev->nHeight + 1;
+
+        if ((strAddressType == "pq" && !consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_VAULT)) ||
+            (strAddressType == "sapling" && !consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_HEARTWOOD)))
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("Address type cannot receive a coinbase at height %d: %s", nHeight, strAddressType));
+
+        // From NU5 the header commits to the coinbase (hashBlockCommitments), so a coinbase cannot be paired
+        // with another template's header fields. No Ycash network activates NU5.
+        if (consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_NU5))
+            throw JSONRPCError(RPC_MISC_ERROR, strprintf("unsupported: the header commits to the coinbase at height %d", nHeight));
+
+        // The fee of every named transaction, from this node's mempool: the number getblocktemplate prints per
+        // transaction and consensus sums into the coinbase limit. Signature operations as ConnectBlock counts them:
+        // legacy plus P2SH, over the chain and the mempool. Not the mempool entry's count, which adds the policy's
+        // 20 per OP_CHECKPQSIG (AcceptToMemoryPool); consensus does not count those.
+        CCoinsViewMemPool viewMemPool(pcoinsTip, mempool);
+        CCoinsViewCache view(&viewMemPool);
+        std::set<uint256> setSeen;
+        for (const uint256& txid : vTxids) {
+            CTxMemPool::indexed_transaction_set::const_iterator it = mempool.mapTx.find(txid);
+            if (it == mempool.mapTx.end() || !view.HaveInputs(it->GetTx()))
+                throw JSONRPCError(RPC_MISC_ERROR, "template-stale: transaction is not in the mempool: " + txid.GetHex());
+            if (!setSeen.insert(txid).second)
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "txids names a transaction twice: " + txid.GetHex());
+            nFees += it->GetFee();
+            nTxsSize += it->GetTxSize();
+            nTxsSigOps += GetLegacySigOpCount(it->GetTx()) + GetP2SHSigOpCount(it->GetTx(), view);
+        }
+
+        // The tag a coinbase built now carries: what CreateNewBlock would write, read into a local.
+        if (yellowback::g_yellowback)
+            coinbaseFlags = yellowback::policy::TagScript(*yellowback::g_yellowback);
+    }
+
+    // ---- 4. No lock held: build the coinbase with the node's own builder (for a Sapling address, the proof). ----
+    CMutableTransaction mtx;
+    try {
+        mtx = CreateCoinbaseTransaction(chainparams, nFees, minerAddress.value(), nHeight, coinbaseFlags);
+    } catch (const std::exception& e) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, std::string("coinbase construction failed: ") + e.what());
+    }
+    const CTransaction txCoinbase(mtx);
+
+    // What the address receives, read back from the built transaction, and the development-fund output beside
+    // it. The two must add up to the subsidy plus the fees: the builder is never trusted to have paid less.
+    const CAmount nSubsidy = consensus.GetBlockSubsidy(nHeight);
+    const bool fSapling = strAddressType == "sapling";
+    if (fSapling ? (txCoinbase.GetSaplingOutputsCount() != 1) : (txCoinbase.vout.empty() || txCoinbase.GetSaplingOutputsCount() != 0))
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "coinbase construction failed: unexpected outputs");
+    const CAmount nAmount = fSapling ? -txCoinbase.GetValueBalanceSapling() : txCoinbase.vout[0].nValue;
+    CAmount nFund = 0;
+    for (size_t i = fSapling ? 0 : 1; i < txCoinbase.vout.size(); i++)
+        nFund += txCoinbase.vout[i].nValue;
+    if (nAmount != nSubsidy - nFund + nFees || nFund < 0 || nFund > nSubsidy)
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "coinbase construction failed: outputs do not add up to subsidy plus fees");
+
+    // Why the fund output is there: consensus requires it at this height (the founders' reward before the Ycash
+    // upgrade, the development fund's mandate after it), or the node's own -ydf added it, as in its stock coinbase.
+    const bool fFundMandated = consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_YCASH)
+        ? nHeight < chainparams.GetYdfMandateEndHeight()
+        : nHeight <= consensus.GetLastFoundersRewardBlockHeight(nHeight);
+    const std::string strFundRule = nFund == 0 ? "none" : fFundMandated ? "mandated" : "optional";
+
+    // ---- 5. The block of a header, this coinbase and the named transactions must respect the limits. ----
+    const unsigned int nCoinbaseSigOps = GetLegacySigOpCount(txCoinbase);
+    const uint64_t nBlockSize = BlockHeaderSizeAtHeight(chainparams, nHeight) + GetSizeOfCompactSize(vTxids.size() + 1) +
+                                ::GetSerializeSize(txCoinbase, SER_NETWORK, PROTOCOL_VERSION) + nTxsSize;
+    if (nBlockSize > MAX_BLOCK_SIZE)
+        throw JSONRPCError(RPC_MISC_ERROR, strprintf("coinbase-does-not-fit: block size %u exceeds %u", nBlockSize, MAX_BLOCK_SIZE));
+    if (nTxsSigOps + nCoinbaseSigOps > MAX_BLOCK_SIGOPS)
+        throw JSONRPCError(RPC_MISC_ERROR, strprintf("coinbase-does-not-fit: sigops %u exceed %u", nTxsSigOps + nCoinbaseSigOps, MAX_BLOCK_SIGOPS));
+
+    // ---- 6. The tip must still be the one the coinbase was built for. ----
+    {
+        LOCK(cs_main);
+        if (chainActive.Tip() == nullptr || chainActive.Tip()->GetBlockHash() != hashPrevBlock)
+            throw JSONRPCError(RPC_MISC_ERROR, "template-stale: previousblockhash is not the tip");
+    }
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("data", EncodeHexTx(txCoinbase));
+    result.pushKV("hash", txCoinbase.GetHash().GetHex());
+    result.pushKV("height", nHeight);
+    result.pushKV("previousblockhash", hashPrevBlock.GetHex());
+    result.pushKV("addresstype", strAddressType);
+    result.pushKV("subsidy", (int64_t)nSubsidy);
+    result.pushKV("fund", (int64_t)nFund);
+    result.pushKV("fundrule", strFundRule);
+    result.pushKV("fees", (int64_t)nFees);
+    result.pushKV("amount", (int64_t)nAmount);
+    result.pushKV("txcount", (int64_t)vTxids.size());
+    result.pushKV("flags", HexStr(coinbaseFlags.begin(), coinbaseFlags.end()));
+    result.pushKV("sigops", (int64_t)nCoinbaseSigOps);
+    return result;
+}
+
 static const CRPCCommand commands[] =
 { //  category              name                      actor (function)         okSafeMode
   //  --------------------- ------------------------  -----------------------  ----------
@@ -999,6 +1240,7 @@ static const CRPCCommand commands[] =
     { "mining",             "getblocktemplate",       &getblocktemplate,       true  },
     { "mining",             "submitblock",            &submitblock,            true  },
     { "mining",             "getblocksubsidy",        &getblocksubsidy,        true  },
+    { "mining",             "getcoinbasetemplatefor", &getcoinbasetemplatefor, true  },
 
 #ifdef ENABLE_MINING
     { "generating",         "getgenerate",            &getgenerate,            true  },

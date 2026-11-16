@@ -94,3 +94,20 @@ Chain value pools by address type (`transparentPools`)
   off until the next restart, which resumes the fill. The one case in which the node refuses to start is a fill from
   genesis (`-valuepoolsseed=0` on an empty index) whose totals contradict the compiled seed: the message says to
   delete `blocks/valuepools`, which rebuilds the index from the seed (`-reindex` would repeat the check).
+
+Mining: a coinbase for each miner's own address (`getcoinbasetemplatefor`)
+--------------------------------------------------------------------------
+
+- **New RPC** `getcoinbasetemplatefor "address" {"previousblockhash": …, "txids": […]}`: a complete
+  coinbase that pays `address` (transparent, Sapling or post-quantum) for the block template the
+  caller names by its previous block hash and transaction ids. A pool pairs it with the header
+  fields and transactions of the `getblocktemplate` reply it holds, so each miner is paid in the
+  block it finds, at its own address, shielded addresses included
+  (`doc/yellowback-mining.md` §13).
+- **The node derives the amount; there is no amount argument.** The address receives the block
+  subsidy plus the fee of every named transaction, less the development-fund output this node's own
+  coinbase carries at that height (required during the mandate; afterwards the `-ydf` share, 0 by
+  default). A reference that no longer holds is refused (`template-stale: …`), and so is a coinbase
+  the block has no room for (`coinbase-does-not-fit: …`).
+- **Not a consensus change**, and `getblocktemplate` and `submitblock` are untouched: the node
+  keeps nothing between calls. The same call, answers and error strings as on ycash-dd.
