@@ -649,6 +649,57 @@ TEST(ValuePools, ResumeAfterAnUncleanStop)
     EXPECT_EQ(reads, 6);
     for (int h = 0; h <= 6; h++) EXPECT_TRUE(*valuepools::GetRecord(chain.at(h)) == chain.expected[h]) << h;
 
+    // The walk checks the interrupt at every block it passes (6 here, none with a record), then the fill at every
+    // block it reads (6); an interrupt during the walk returns at once, nothing read.
+    valuepools::Open(dir, true);
+    lostBlock(0, iLost, hLost);
+    valuepools::Open(dir, false);
+    int checks = 0;
+    reads = 0;
+    {
+        LOCK(cs_main);
+        ASSERT_TRUE(valuepools::Fill(Params(), [&checks]() { checks++; return false; }, err)) << err;
+    }
+    EXPECT_EQ(checks, 12);
+    EXPECT_EQ(reads, 6);
+    valuepools::Open(dir, true);
+    lostBlock(0, iLost, hLost);
+    valuepools::Open(dir, false);
+    reads = 0;
+    {
+        LOCK(cs_main);
+        ASSERT_TRUE(valuepools::Fill(Params(), []() { return true; }, err)) << err;
+    }
+    EXPECT_EQ(reads, 0);
+
+    // A seeded store whose seed-block record differs from the seed now in effect is not resumed from: with
+    // -valuepoolsseed=0 the fill reads from genesis and stops at the seed check; by default it restarts from the
+    // seed, whose record replaces the stored one.
+    const valuepools::Seed good{3, chain.hashes[3], chain.expected[3]};
+    Record wrong = chain.expected[3];
+    wrong.transparent += 1;
+    auto seededStore = [&]() {
+        valuepools::test::SetSeed(good);
+        setTip(3);
+        valuepools::Open(dir, true);
+        ASSERT_TRUE(FillNow(err)) << err;
+        lostBlock(3, iLost, hLost);
+        valuepools::test::SetSeed(valuepools::Seed{3, chain.hashes[3], wrong});
+        setTip(6);
+        valuepools::Open(dir, false);
+    };
+    seededStore();
+    mapArgs["-valuepoolsseed"] = "0";
+    err.clear();
+    EXPECT_FALSE(FillNow(err));
+    EXPECT_NE(err.find("delete the directory blocks/valuepools"), std::string::npos) << err;
+    mapArgs.erase("-valuepoolsseed");
+    seededStore();
+    reads = 0;
+    ASSERT_TRUE(FillNow(err)) << err;
+    EXPECT_EQ(reads, 3);
+    EXPECT_TRUE(*valuepools::GetRecord(chain.at(3)) == wrong);
+
     valuepools::Close();
     fs::remove_all(dir);
 }

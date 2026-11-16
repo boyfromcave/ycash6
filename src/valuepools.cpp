@@ -437,13 +437,19 @@ bool Fill(const CChainParams& chainparams, const std::function<bool()>& interrup
                 // An unclean stop: the last block written is newer than the block index's last write to disk
                 // (DATABASE_WRITE_INTERVAL), so it is unknown now, while the records of the restored tip's ancestors
                 // are still here. Resume from the highest ancestor of the tip (genesis excluded) whose record and whose
-                // parent's record are both present (the seed block needs no parent's record); none: as before.
+                // parent's record are both present (the seed block needs no parent's record, but its record must
+                // equal the seed's); none: as before.
                 LogPrintf("valuepools: the last block written (%s) is not in the block index or has no record on the "
                           "active chain\n", best.ToString());
                 for (const CBlockIndex* p = tip; p && p->pprev; p = p->pprev) {
-                    if (!ReadRecordLocked(p)) continue;
+                    if (interrupted()) {
+                        LogPrintf("valuepools: fill interrupted at height %d\n", p->nHeight);
+                        return true;
+                    }
+                    const std::optional<Record> r = ReadRecordLocked(p);
+                    if (!r) continue;
                     const bool fSeedBlock = seed && p->nHeight == seed->height && p->GetBlockHash() == seed->hash;
-                    if (fSeedBlock || ReadRecordLocked(p->pprev)) start = p;
+                    if (ReadRecordLocked(p->pprev) || (fSeedBlock && *r == seed->record)) start = p;
                     break;
                 }
                 if (start) {
@@ -451,6 +457,8 @@ bool Fill(const CChainParams& chainparams, const std::function<bool()>& interrup
                     batch.Write(KEY_BEST, start->GetBlockHash());
                     CommitLocked(batch, true);
                     LogPrintf("valuepools: resuming from the highest ancestor of the tip with a record, height %d\n", start->nHeight);
+                } else {
+                    LogPrintf("valuepools: no ancestor of the tip has a record to resume from; filling as on a new index\n");
                 }
             }
         }
