@@ -1907,6 +1907,13 @@ read it by position keep working. **Find pools by `id`, never by position.** The
   the shadow testnets it starts from a compiled seed at the chain-supply checkpoint (height 2,800,000), so on
   such a node blocks below it say `"monitored": false` (a node that syncs or reindexes with this build covers them). Until a block is covered its entries say `"monitored": false` and carry no values. A pruned node that lacks the old undo data
   cannot fill: its entries stay `"monitored": false` and the log says `reindex to enable`. `-reindex` rebuilds it.
+- Startup waits for the fill: until it ends the RPC server answers every call with -28 (warming up) and the message
+  `Filling the transparent pools index (height h of n)...`, so `"monitored": false` is not seen while it runs. A
+  failed write of the index (a full disk) turns it off until the node restarts: one log line, and every entry says
+  `"monitored": false`; the next start resumes the fill from the last block written.
+- On mainnet a seeded fill takes about 30 seconds (28.5 s measured at height 3,100,949), a fill from genesis about
+  12 minutes. A fill from genesis checks the seed at its block: an empty index started with `-valuepoolsseed=0`
+  refuses to start on a mismatch and says to delete `blocks/valuepools` (the next start rebuilds it from the seed).
 
 ---
 

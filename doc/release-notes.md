@@ -32,9 +32,16 @@ Chain value pools by address type (`transparentPools`)
   build a node fills it once from the block and undo files it has (a read, no validation; progress in the log
   every 10,000 blocks). On mainnet and the shadow testnets the fill starts from a compiled seed at the chain-supply
   checkpoint (height 2,800,000; no output below it is a post-quantum, channel or vault template), so it reads
-  about 300,000 blocks; on such a node blocks below the seed report `"monitored": false` (a node that syncs or
+  about 300,000 blocks: **startup waits about 30 seconds on a mainnet node** (28.5 s measured on 2026-11-15 on a
+  copy of a mainnet data directory at height 3,100,949, on a loaded Apple M-series laptop; a fill from genesis took
+  726 s). Until the fill ends the RPC server answers -28 (warming up) with the fill's progress. The seed was checked
+  once against a fill from genesis on that copy (`valuepools: the compiled seed at height 2800000 matches the
+  totals computed from genesis`). On such a node blocks below the seed report `"monitored": false` (a node that syncs or
   reindexes with this build covers them all). A pruned node that lacks old undo data
   reports `"monitored": false` until it is reindexed. `-reindex` and `-reindex-chainstate` rebuild the index from
   genesis and check the seed on the way. Downgrading ignores the directory.
-- **Not a consensus change.** The index is written after a block has passed every check, never rejects a block and
-  never stops the node; a failure is logged and the index stops covering the blocks after it.
+- **Not a consensus change.** The index is written after a block has passed every check and never rejects a block; a
+  failure is logged and the index stops covering the blocks after it. A failed write (a full disk) turns the index
+  off until the next restart, which resumes the fill. The one case in which the node refuses to start is a fill from
+  genesis (`-valuepoolsseed=0` on an empty index) whose totals contradict the compiled seed: the message says to
+  delete `blocks/valuepools`, which rebuilds the index from the seed (`-reindex` would repeat the check).
