@@ -24,7 +24,7 @@ Changes since beta 2
    mandate, which consensus still enforces. A pool needs no other change: `getblocktemplate` and
    `submitblock` are unchanged, and `getcoinbasetemplatefor` (below) is optional.
 3. **Fast testnet (testnet-yb-fast): every node must run this build before the chain reaches the
-   fund mandate's end there**, at height **(set at the release candidate)**. This is one-way: a node
+   fund mandate's end there**, at height **512,417**. This is one-way: a node
    on an earlier build stops following the chain at that height and bans the peer that sent the
    block, so a node upgraded late needs `clearbanned` afterwards. Until every node has upgraded, a
    fast-testnet pool keeps `-ydf=5`, whose blocks every build accepts. Mainnet, the slow and legacy
@@ -50,7 +50,7 @@ covers; then the known limitations.
 ### Fast testnet: the development-fund mandate ends (consensus, testnet-yb-fast only)
 
 - **A scheduled rule change on the fast testnet.** The fast profile gets its own mandate end,
-  `TESTNET_FAST_YDF_MANDATE_END_HEIGHT`, at height **(set at the release candidate)**: the
+  `TESTNET_FAST_YDF_MANDATE_END_HEIGHT`, at height **512,417**: the
   fast-testnet tip when the release candidate is cut, plus 400 blocks. From that height a fast-testnet block is valid with
   or without the 5 % fund output, as on mainnet since 2,275,000; below it the output stays required.
   Until now the fast profile inherited the 900,000 of the original Ycash testnet, about 389,000 blocks
