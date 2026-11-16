@@ -68,6 +68,7 @@ present); run it with `python3 -I`.
 """
 
 import argparse
+import errno
 import gzip
 import hashlib
 import http.client
@@ -892,8 +893,8 @@ def http_get_part(url, path, size, timeout):
             have = 0
         else:
             raise BundleError("%s: HTTP %d" % (url, reply.status))
-        with open(path, mode) as out:
-            try:
+        try:
+            with open(path, mode) as out:
                 while True:
                     b = reply.read(min(READ_SIZE, size - have + 1))
                     if not b:
@@ -902,8 +903,13 @@ def http_get_part(url, path, size, timeout):
                         raise BundleError("%s: the server sends more than the %d bytes the manifest names" % (url, size))
                     out.write(b)
                     have += len(b)
-            except (OSError, http.client.HTTPException) as e:
-                raise Transient("broke off at byte %d of %d: %s" % (have, size, str(e) or e.__class__.__name__))
+        except OSError as e:
+            if e.errno in (errno.ENOSPC, errno.EDQUOT):   # a full disk is not a broken connection: retrying cannot help
+                raise BundleError("no space left on the disk of %s (%s) at byte %d of %d of %s: free some space and run again"
+                                  % (os.path.dirname(path), e.strerror, have, size, os.path.basename(path)))
+            raise Transient("broke off at byte %d of %d: %s" % (have, size, str(e) or e.__class__.__name__))
+        except http.client.HTTPException as e:
+            raise Transient("broke off at byte %d of %d: %s" % (have, size, str(e) or e.__class__.__name__))
     if have < size:
         raise Transient("the connection closed at byte %d of %d" % (have, size))
 
@@ -1231,15 +1237,16 @@ def check_state(args, profile, m, statement, conf):
             time.sleep(args.poll)
             if not node.alive():
                 raise BundleError("ycashd exited (status %s): %s" % (node.process.returncode, node.error_text()))
+            if time.time() - t0 > args.stall_timeout:         # also a node that never leaves warm-up
+                raise BundleError("the restored node did not settle within %ds%s"
+                                  % (args.stall_timeout, "" if prev is not None else " (its RPC never answered)"))
             text = node.cli("getblockcount", check=False)
             if text is None:
-                continue
+                continue                                  # the RPC is warming up (loading the block index)
             tip = int(text)
             node.check_offline()
             still = still + 1 if tip == prev else 0
             prev = tip
-            if time.time() - t0 > args.stall_timeout:
-                raise BundleError("the restored node did not settle within %ds" % args.stall_timeout)
         if prev < height:
             raise BundleError("the restored node is at %d, below the bundle's %d" % (prev, height))
         for key, want in sorted((m.get("pins") or {}).items(), key=lambda kv: int(kv[0])):

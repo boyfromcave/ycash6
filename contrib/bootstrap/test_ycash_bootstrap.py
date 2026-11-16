@@ -576,7 +576,8 @@ st = json.load(open(path))
 tip = st["tip"]
 h = lambda n: "%%064x" %% n
 cmd = args[0]
-if cmd == "getblockcount": print(tip)
+if cmd == "getblockcount" and os.environ.get("FAKE_WARMUP"): sys.exit("error code: -28")   # never leaves warm-up
+elif cmd == "getblockcount": print(tip)
 elif cmd == "getblockhash": print(h(int(args[1])))
 elif cmd == "getblockheader": print(json.dumps({"chainwork": "%%064x" %% (int(args[1], 16) * 3)}))
 elif cmd == "gettxoutsetinfo": print(json.dumps({"hash_serialized": "utxo-%%d" %% tip}))
@@ -663,6 +664,16 @@ class StateTest(Quiet):
         code, err = self.restore(make_state_bundle(os.path.join(self.tmp, "b"), top=510500))
         self.assertEqual(code, 0, err)
         self.assertEqual(self.chain_state()["calls"], [])
+
+    def test_a_node_stuck_in_warm_up_times_out(self):
+        os.environ["FAKE_WARMUP"] = "1"                      # alive, but getblockcount never answers
+        try:
+            code, err = self.restore(make_state_bundle(os.path.join(self.tmp, "b")), "--stall-timeout", "1")
+        finally:
+            del os.environ["FAKE_WARMUP"]
+        self.assertEqual(code, 2)
+        self.assertIn("did not settle within 1s (its RPC never answered)", err)
+        self.assertFalse(os.path.exists(os.path.join(self.datadir, "testnet-yb-fast", "chainstate")))
 
     def test_disagreeing_node_removes_the_extracted_state(self):
         code, err = self.restore(make_state_bundle(os.path.join(self.tmp, "b"), statement_override={"utxo_hash_serialized": "other"}))
@@ -1064,6 +1075,27 @@ class PartsTest(Quiet):
             f.truncate(m["parts"][2]["bytes"] - 10)
         code, err = self.restore(self.serve() + "latest/")
         self.assert_refused(code, err, "shorter than the %d bytes" % m["parts"][2]["bytes"])
+
+    def test_a_full_disk_is_refused_at_once_not_retried(self):
+        import builtins, errno
+        from unittest import mock
+        out, m = self.bundle()
+        first = m["parts"][1]["name"]
+
+        class Full:                                                        # the disk fills while part 1 is written
+            def __init__(self, f): self.f = f
+            def __enter__(self): return self
+            def __exit__(self, *a): self.f.close()
+            def write(self, b): raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+        def full_open(path, mode="r", *a, **kw):
+            f = builtins.open(path, mode, *a, **kw)
+            return Full(f) if str(path).endswith(first + ".part") and mode in ("wb", "ab") else f
+        with mock.patch.object(yb, "open", full_open, create=True):
+            code, err = self.restore(self.serve() + "latest/")
+        self.assert_refused(code, err, "no space left on the disk")
+        self.assertNotIn("broke off", err)
+        self.assertEqual(len(self.requests(first)), 1)                    # not retried as a broken connection
 
     def test_a_server_sending_more_than_a_part(self):
         out, m = self.bundle()
