@@ -9,8 +9,8 @@ blocks the block index had not yet written): the node must not stop at the asser
 ThreadStartWalletNotifier (`pindexFork != nullptr`: the chainstate is emptied, so the active chain is empty while the
 notifier first looks), and the wallet must end up synced: the same balances as before (transparent and Sapling), a
 payment received after the reindex counted too, and a Sapling spend from a note held before the reindexes confirms
-(its witness is intact). The notifier logs when it starts waiting for the chain and when it resumes. Last,
--reindex-chainstate with -rescan (or -zapwallettxes, which implies it) is refused at startup: -rescan would clear the
+(its witness is intact). The notifier logs when it starts waiting for the chain and when it resumes (both lines or
+neither: neither when the import is already close enough at its first look). Last, -reindex-chainstate with -rescan (or -zapwallettxes, which implies it) is refused at startup: -rescan would clear the
 note witness cache with no scan to rebuild it, leaving notes at or below the wallet's last saved block unspendable.
 
     ZCASHD=<ycashd> .venv/bin/python -u qa/rpc-tests/wallet_reindex_chainstate.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
@@ -78,12 +78,20 @@ class WalletReindexChainstateTest(BitcoinTestFramework):
         while self.nodes[1].getbestblockhash() != self.nodes[0].getbestblockhash():
             assert time.time() < deadline, 'node 1 did not catch up after -reindex-chainstate'
             time.sleep(0.25)
-        # the notifier says when it starts waiting for the chain and when it resumes
-        deadline = time.time() + 60
-        while 'Wallet notifier: the active chain is within 100 blocks' not in self.debug_log(1)[logged:]:
-            assert time.time() < deadline, 'no "notifying the wallet" log line'
-            time.sleep(0.5)
-        assert 'Wallet notifier: waiting for the active chain' in self.debug_log(1)[logged:], 'no "waiting" log line'
+        # The notifier logs when it starts waiting for the chain and when it resumes: both lines or neither. Neither is
+        # logged when the import was already within 100 blocks of the wallet's block at the notifier's first look (a
+        # race with ThreadImport, decided by the runner's speed). The chain has caught up by now, so a first look that
+        # waited has already logged its line. The outcome (no assert, balances, the spend) is checked either way.
+        if 'Wallet notifier: waiting for the active chain' in self.debug_log(1)[logged:]:
+            self.waited += 1
+            deadline = time.time() + 60
+            while 'Wallet notifier: the active chain is within 100 blocks' not in self.debug_log(1)[logged:]:
+                assert time.time() < deadline, 'a "waiting" log line without the "notifying the wallet" one'
+                time.sleep(0.5)
+        else:
+            assert 'Wallet notifier: the active chain is within 100 blocks' not in self.debug_log(1)[logged:], \
+                'a "notifying the wallet" log line without the "waiting" one'
+        self.restarts += 1
 
     def check(self, label, expected):
         # the wallet notifier catches up after the chain does
@@ -111,6 +119,7 @@ class WalletReindexChainstateTest(BitcoinTestFramework):
 
     def run_test(self):
         n0, n1 = self.nodes
+        self.waited = self.restarts = 0
         self.addr1 = n1.getnewaddress()
         # a Sapling note for node 1, held before any reindex
         self.z1 = n1.z_getnewaddress('sapling')
@@ -160,6 +169,7 @@ class WalletReindexChainstateTest(BitcoinTestFramework):
         connect_nodes_bi(self.nodes, 0, 1)
         self.sync_all()
         self.sapling_spend('after the refused starts and a -rescan start')
+        print('    the notifier waited (both log lines) at %d of %d -reindex-chainstate starts' % (self.waited, self.restarts))
         print('wallet_reindex_chainstate OK')
 
 
