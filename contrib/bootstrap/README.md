@@ -4,10 +4,10 @@
 
 ## In plain words
 
-A new node on one of the Ycash testnets has to load more than half a million old blocks before it
-is useful. Downloading them from peers takes hours. This tool loads them from one published copy
+A new node has to load more than half a million old blocks on a testnet, more than three million on
+mainnet, before it is useful. Downloading them from peers takes hours. This tool loads them from one published copy
 instead (a "bundle"), but it does not trust that copy: it compares the copy's fingerprint with
-the one written into this release, checks the owner's signature when there is one, re-checks
+the one written into this release, checks the release key's signature when there is one, re-checks
 every block's link to the one before it, and lets the node itself validate every block while it
 loads them, cut off from the network. If any check fails, nothing is started. When it finishes,
 you start the node as usual and it carries on from there.
@@ -101,7 +101,7 @@ set, unless `YCASHD_BOOTSTRAP_ACCEPT_DATADIR=1` says to use it as it is.
 1. The network's subdirectory holds no `blocks/` or `chainstate/` data (unless `--reset`).
 2. `SHA256SUMS`: its sha256 equals the profile's `prefix.sha256sums_sha256`; every line is
    `<sha256>  <name>` with a name of the format, sorted. A `SHA256SUMS.minisig` beside it must
-   verify with the owner's key, `keys/ycash-release.pub` (`RWQYr5PF…dveOGQ`, key id
+   verify with the release key, `keys/ycash-release.pub` (`RWQYr5PF…dveOGQ`, key id
    `02C923A6C593AF18`, decision T-6), using `minisign`; without a signature the tool says so and
    relies on the pin (optional until the bundle is signed), and `--require-signature` refuses.
    "Without a signature" is an HTTP 404 or 403 for `SHA256SUMS.minisig`: a bucket that is not
