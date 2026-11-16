@@ -17,6 +17,8 @@ nYdfMandateEndHeight). Node 0 runs with the default, node 1 with -ydf=5.
 - Past the mandate, node 1 (-ydf=5) pays the fund subsidy * 5 / 100 and itself the rest of the subsidy plus every
   fee; getblocksubsidy reports 5 % on it.
 - Each node accepts the other's blocks (sync_blocks): validity does not depend on -ydf.
+- getblocktemplate's coinbasetxn.foundersreward is the fund output's value for a Sapling -mineraddress too (node 2):
+  such a coinbase has no transparent output of the miner's, so the fund output is vout[0], not vout[1].
 
     BITCOIND=<ycashd> ../.venv/bin/python -u qa/rpc-tests/ycash_ydf_default.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 
@@ -29,6 +31,7 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
     connect_nodes_bi,
+    start_node,
     start_nodes,
     sync_blocks,
     sync_mempools,
@@ -53,22 +56,27 @@ def addresses(vout):
 class YdfDefaultTest(BitcoinTestFramework):
     def __init__(self):
         super().__init__()
-        self.num_nodes = 2
+        self.num_nodes = 3
         self.setup_clean_chain = True   # v4.5.0 harness
         self.cache_behavior = 'clean'   # 6.20.0 harness (each harness ignores the other's)
 
     def setup_network(self, split=False):
-        self.nodes = start_nodes(self.num_nodes, self.options.tmpdir, extra_args=[
+        self.nodes = start_nodes(2, self.options.tmpdir, extra_args=[
             list(YCASH_UPGRADE_ARGS),
             list(YCASH_UPGRADE_ARGS) + ['-ydf=5'],
         ])
+        # node 2 never mines: it serves templates for a Sapling miner address (of node 0's wallet)
+        zaddr = self.nodes[0].z_getnewaddress('sapling')
+        self.nodes.append(start_node(2, self.options.tmpdir, extra_args=list(YCASH_UPGRADE_ARGS) + [
+            '-mineraddress=%s' % zaddr, '-minetolocalwallet=0']))
         connect_nodes_bi(self.nodes, 0, 1)
+        connect_nodes_bi(self.nodes, 0, 2)
         self.is_network_split = False
         self.sync_all()
 
     def subsidy(self, height):
         """The block subsidy in zat (miner + founders, which does not depend on -ydf), and each node's founders."""
-        rs = [n.getblocksubsidy(height) for n in self.nodes]
+        rs = [n.getblocksubsidy(height) for n in self.nodes[:2]]   # the two mining nodes
         for r in rs:
             assert not r.get('fundingstreams'), r   # Ycash has no funding streams
         totals = set(zat(r['miner']) + zat(r['founders']) for r in rs)
@@ -83,7 +91,7 @@ class YdfDefaultTest(BitcoinTestFramework):
         for h in hashes:
             for node in self.nodes:
                 assert_equal(node.getbestblockhash(), hashes[-1])
-            blk = self.nodes[(i + 1) % 2].getblock(h, 2)   # read back on the other node
+            blk = self.nodes[(i + 1) % 2].getblock(h, 2)   # read back on the other mining node
             out.append((blk['height'], blk['tx'][0]))
         return out
 
@@ -112,6 +120,17 @@ class YdfDefaultTest(BitcoinTestFramework):
             assert_equal(fund, total // 20)
             assert_equal(rest, [total - total // 20])
             print('mandate: block %d by node %d pays the fund %d of %d' % (height, i, fund, total))
+
+            # the template for the next block, of a transparent miner (node i) and of a Sapling miner (node 2)
+            if height + 1 < REGTEST_YDF_MANDATE_END:
+                total, _ = self.subsidy(height + 1)
+                for node in (self.nodes[i], self.nodes[2]):
+                    cbtxn = node.getblocktemplate()['coinbasetxn']
+                    vout = node.decoderawtransaction(cbtxn['data'])['vout']
+                    fund_out = vout[0] if node is self.nodes[2] else vout[1]   # Sapling miner: the only transparent output
+                    assert_equal(len(vout), 1 if node is self.nodes[2] else 2)
+                    assert_equal(zat(fund_out['value']), total // 20)
+                    assert_equal(cbtxn['foundersreward'], total // 20)
 
         # ---- past the mandate: getblocksubsidy follows each node's -ydf -----------------------------------------
         h = REGTEST_YDF_MANDATE_END
