@@ -110,6 +110,9 @@ post-quantum input, snapshot restores, and what `rpcversion` 10 covers; then the
   off until the next restart, which resumes the fill. The one case in which the node refuses to start is a fill from
   genesis (`-valuepoolsseed=0` on an empty index) whose totals contradict the compiled seed: the message says to
   delete `blocks/valuepools`, which rebuilds the index from the seed (`-reindex` would repeat the check).
+- **An unclean stop does not restart the fill.** After a kill, an out-of-memory kill or a power loss the block index
+  can come back older than the index's last block; the fill now resumes from the highest block of the restored chain
+  that has a record (one log line says so), in seconds, instead of refilling from the compiled seed.
 
 ### `gettransaction` shows the real fee for every funding shape
 
