@@ -169,6 +169,13 @@ post-quantum input, snapshot restores, and what `rpcversion` 10 covers; then the
   `YCASHD_BOOTSTRAP_ACCEPT_DATADIR=1`.
 - Tooling only: no node, RPC or consensus change.
 
+### `-reindex-chainstate` with a wallet no longer stops the node
+
+- A node with a wallet (the default) started with `-reindex-chainstate` stopped at an assert in the wallet
+  notifier (`pindexFork != nullptr`, `init.cpp`, inherited from Zcash): the chainstate is emptied, so the active
+  chain is empty when the notifier first looks. The notifier now waits for the chain to be reconnected, as it
+  already did for a block missing after an unclean stop, and the wallet follows from where it was.
+
 ### `rpcversion` 10: what changed
 
 `yed_getinfo.rpcversion` is 10 (was 9), one step for every change of this release. No `yed_*` field

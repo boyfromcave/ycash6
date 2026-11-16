@@ -821,10 +821,11 @@ void ThreadStartWalletNotifier()
                 {
                     LOCK(cs_main);
                     const CBlockIndex *pindexFork = chainActive.FindFork(pindexLastTip);
-                    // We know we have the genesis block.
-                    assert(pindexFork != nullptr);
-
-                    if ((pindexLastTip->nHeight < pindexFork->nHeight || pindexLastTip->nHeight - pindexFork->nHeight < 100) &&
+                    // The active chain is empty while -reindex-chainstate reconnects it from genesis (the
+                    // chainstate was wiped, the block index kept): wait for it like any other missing block.
+                    // IsInitialBlockDownload holds meanwhile, so timedOut() does not count that time.
+                    if (pindexFork != nullptr &&
+                        (pindexLastTip->nHeight < pindexFork->nHeight || pindexLastTip->nHeight - pindexFork->nHeight < 100) &&
                         !pindexLastTip->GetBlockPos().IsNull())
                     {
                         break;
