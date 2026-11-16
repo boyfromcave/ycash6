@@ -60,6 +60,8 @@ std::pair<char, uint256> RecordKey(const uint256& hash) { return std::make_pair(
  * -valuepoolsseed=0), which logs a match or refuses to start on a mismatch; a sync or -reindex checks it as it
  * passes the seed block and logs either way (a mismatch there leaves the index unmonitored). A checkpoint moved above this height disables the seed
  * (the fill then reads from genesis) until the claim is checked at the new height and this constant raised.
+ * Checked at 2,800,000 on 2026-11-15: a fill from genesis on a copy of a mainnet data directory (tip 3,100,949)
+ * logged the match.
  */
 const int SEED_CHECKED_MAX_HEIGHT = 2800000;
 
