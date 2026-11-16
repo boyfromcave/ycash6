@@ -158,6 +158,19 @@ class GetCoinbaseTemplateForTest(BitcoinTestFramework):
         pool = self.nodes[i].getrawmempool(True)
         return sum(zat(pool[txid]['fee']) for txid in txids)
 
+    def fee_from_amounts(self, i, txid):
+        """The fee of txid in zat, from its own amounts and not the node's fee field: the values of the outputs it
+        spends (each read from its parent transaction) less the values it creates, plus its Sapling value balance.
+        The parents are node 0's wallet transactions (node 0 pays every fee in this test)."""
+        tx = self.nodes[i].getrawtransaction(txid, 1)
+        value_in = 0
+        for vin in tx['vin']:
+            parent = self.nodes[i].decoderawtransaction(self.nodes[0].gettransaction(vin['txid'])['hex'])
+            assert_equal(parent['txid'], vin['txid'])
+            value_in += parent['vout'][vin['vout']]['valueZat']
+        assert_equal(tx.get('vjoinsplit', []), [])
+        return value_in - sum(v['valueZat'] for v in tx['vout']) + tx.get('valueBalanceZat', 0)
+
     def script_of(self, address):
         return self.nodes[2].validateaddress(address)['scriptPubKey']
 
@@ -329,6 +342,9 @@ class GetCoinbaseTemplateForTest(BitcoinTestFramework):
                 timings.setdefault(kind, []).append(time.time() - t0)
                 amount = self.assert_paid_exactly(i, kind, addr[kind], gbt, res)
                 fees = sum(t['fee'] for t in gbt['transactions'])
+                # the fees once more, from the transactions' own amounts (one case per address kind)
+                if i == 0:
+                    assert_equal(res['fees'], sum(self.fee_from_amounts(i, t) for t in txids))
                 if i == 0:
                     # default -ydf: the miner is paid in full, and the coinbase has no fund output
                     assert_equal((res['fund'], res['fundrule'], amount), (0, 'none', self.subsidy(height) + fees))
@@ -362,6 +378,8 @@ class GetCoinbaseTemplateForTest(BitcoinTestFramework):
 
         self.stock_template_is_untouched()
         self.refusals(addr)
+        self.prioritised(addr)
+        self.child_without_parent(addr)
         self.parallel_calls(addr)
         self.block_limits(addr)
 
@@ -416,6 +434,9 @@ class GetCoinbaseTemplateForTest(BitcoinTestFramework):
         for bad in ('x', {}, ['00'], [txid, 1], [txid[:-1] + 'z']):
             assert_rpc_error(-8, 'txids must be an array of strings of 64 hex characters', f, a, dict(ref, txids=bad))
         assert_rpc_error(-8, 'txids has more than 50000 entries', f, a, dict(ref, txids=['%064x' % k for k in range(50001)]))
+        # every element is checked before the length: a bad element of an over-long list answers the element's error
+        assert_rpc_error(-8, 'txids must be an array of strings of 64 hex characters', f, a,
+                         dict(ref, txids=['%064x' % k for k in range(50000)] + ['x']))
         assert_rpc_error(-8, 'txids names a transaction twice: ' + txid, f, a, dict(ref, txids=ref['txids'] + [txid]))
         # upper-case hex is the same reference
         up = f(a, {'previousblockhash': ref['previousblockhash'].upper(), 'txids': [t.upper() for t in ref['txids']]})
@@ -456,14 +477,62 @@ class GetCoinbaseTemplateForTest(BitcoinTestFramework):
                      'inconclusive-not-best-prevblk')
         print('refusals: as the contract')
 
+    def prioritised(self, addr):
+        """prioritisetransaction changes what a transaction is worth to the node's selection, not what it pays: the
+        call sums the real fees, as consensus does, so its amount does not move."""
+        n0 = self.nodes[0]
+        txids = self.pay_fees(2)
+        gbt = n0.getblocktemplate()
+        ref = reference(gbt)
+        assert_equal(sorted(ref['txids']), sorted(txids))
+        before = n0.getcoinbasetemplatefor(addr[P2PKH], ref)
+        real = sum(self.fee_from_amounts(0, t) for t in txids)
+        assert_equal(before['fees'], real)
+        n0.prioritisetransaction(txids[0], 0, COIN)            # one YEC more, to the node's selection only
+        n0.prioritisetransaction(txids[1], 0, -1000)           # and a little less
+        after = n0.getcoinbasetemplatefor(addr[P2PKH], ref)
+        assert_equal((after['fees'], after['amount'], after['data']), (real, before['amount'], before['data']))
+        assert_equal(after['amount'], self.subsidy(gbt['height']) + real)
+        self.proposal_ok(0, gbt, after)
+        self.submit(0, P2PKH, addr[P2PKH], gbt, after, after['amount'])
+        print('prioritisetransaction: the amount stays subsidy + the real fees (%d)' % real)
+
+    def child_without_parent(self, addr):
+        """A child named without its parent (both in the mempool). The call does not check the order or the
+        completeness of the named set, only that each named transaction is in the mempool: it answers, with the
+        child's fee alone. The block of that set would be invalid for a reason other than the coinbase (the child's
+        input is missing), and the node's proposal mode says so; a pool names getblocktemplate's own list."""
+        n0 = self.nodes[0]
+        assert_equal(n0.getrawmempool(), [])
+        mine = n0.getnewaddress()
+        parent = n0.sendtoaddress(mine, Decimal('1'))
+        vout = [v['n'] for v in n0.getrawtransaction(parent, 1)['vout'] if v['valueZat'] == COIN][0]
+        raw = n0.createrawtransaction([{'txid': parent, 'vout': vout}], {n0.getnewaddress(): Decimal('0.9999')})
+        signed = n0.signrawtransaction(raw)
+        assert signed['complete']
+        child = n0.sendrawtransaction(signed['hex'])
+        gbt = n0.getblocktemplate()
+        assert_equal([t['hash'] for t in gbt['transactions']], [parent, child])
+        res = n0.getcoinbasetemplatefor(addr[P2PKH], {'previousblockhash': gbt['previousblockhash'], 'txids': [child]})
+        assert_equal((res['txcount'], res['fees']), (1, 10000))
+        assert_equal(res['fees'], self.fee_from_amounts(0, child))
+        assert_equal(res['amount'], self.subsidy(gbt['height']) + 10000)
+        block = block_from(gbt, res['data'], txs=[gbt['transactions'][1]['data']], solve=False)
+        reason = n0.getblocktemplate({'mode': 'proposal', 'data': bytes_to_hex_str(block.serialize())})
+        assert reason is not None
+        print('a child named without its parent: the call answers (fees %d); the block is refused: %s' % (res['fees'], reason))
+        # with the parent named too, the block is valid
+        res = n0.getcoinbasetemplatefor(addr[P2PKH], reference(gbt))
+        self.proposal_ok(0, gbt, res)
+        self.submit(0, P2PKH, addr[P2PKH], gbt, res, res['amount'])
+
     def parallel_calls(self, addr):
-        """Several Sapling calls at once while the node answers getblockcount (three calls, so that one of the node's
-        four RPC threads stays free and the printed latency is that of cs_main, not of the thread pool): all succeed
-        and all are valid."""
+        """Eight Sapling calls at once while the node answers getblockcount: all succeed and all are valid. The node
+        has four RPC threads, so the calls queue; the printed latency of getblockcount includes that queue."""
         n0, n2 = self.nodes[0], self.nodes[2]
         self.pay_fees(2)
         gbt = n0.getblocktemplate()
-        zaddrs = [n2.z_getnewaddress('sapling') for _ in range(3)]
+        zaddrs = [n2.z_getnewaddress('sapling') for _ in range(8)]
         results, errors = {}, []
 
         def worker(z):
@@ -508,13 +577,29 @@ class GetCoinbaseTemplateForTest(BitcoinTestFramework):
         assert signed['complete']
         return signed['hex']
 
+    def pq_spend(self, funding_txid, funding_hex, vouts, fee):
+        """A signed transaction of node 0 spending the post-quantum outputs `vouts` of its transaction funding_txid
+        (whose hex is funding_hex) into one P2PKH output."""
+        n0 = self.nodes[0]
+        funding = CTransaction()
+        funding.deserialize(BytesIO(hex_str_to_bytes(funding_hex)))
+        value = sum(funding.vout[n].nValue for n in vouts) - fee
+        raw = n0.createrawtransaction([{'txid': funding_txid, 'vout': n} for n in vouts],
+                                      {n0.getnewaddress(): Decimal(value) / COIN})
+        signed = n0.signrawtransaction(raw)
+        assert signed['complete'], signed
+        return signed['hex']
+
     def block_limits(self, addr):
         """A set of transactions that leaves room for a transparent coinbase but not for a Sapling one is refused for
-        the Sapling address (coinbase-does-not-fit), and so is a set over the signature-operation limit."""
+        the Sapling address (coinbase-does-not-fit), and so is a set over the signature-operation limit. The
+        signature operations are counted as the block-validity rule counts them (legacy plus P2SH, ConnectBlock),
+        not with the mempool policy's 20 per OP_CHECKPQSIG: post-quantum spends that would cross the limit under
+        the policy count are accepted, and the block they make is valid, on both lines."""
         n0 = self.nodes[0]
         f = n0.getcoinbasetemplatefor
         assert_equal(n0.getrawmempool(), [])
-        n_utxos, fee = 29, 20000000                       # 0.2 per transaction: above the conventional fee of 3,000 outputs
+        n_utxos, fee = 30, 20000000                       # 0.2 per transaction: above the conventional fee of 3,000 outputs
         n0.sendmany('', {n0.getnewaddress(): Decimal('0.6') for _ in range(n_utxos)})
         n0.generate(1)
         sync_blocks(self.nodes)
@@ -522,6 +607,15 @@ class GetCoinbaseTemplateForTest(BitcoinTestFramework):
         assert_equal(len(utxos), n_utxos)
         p2sh = bytes([0xa9, 0x14]) + bytes(20) + bytes([0x87])                       # no legacy signature operation
         p2pkh = bytes([0x76, 0xa9, 0x14]) + bytes(20) + bytes([0x88, 0xac])          # one each
+
+        # 150 post-quantum outputs of node 0's wallet, to be spent below: 20 policy signature operations per spend
+        n_pq, pq_per_tx, pq_fee = 150, 50, 5000000
+        pq_script = hex_str_to_bytes(self.script_of(n0.getnewaddress('', 'pq')))
+        pq_funding_hex = self.big_transaction(utxos.pop(), pq_script, n_pq, fee)
+        pq_funding = n0.sendrawtransaction(pq_funding_hex, True)
+        n0.generate(1)
+        sync_blocks(self.nodes)
+        assert_equal(n0.getrawmempool(), [])
 
         gbt = n0.getblocktemplate()
         assert_equal(gbt['transactions'], [])
@@ -537,6 +631,23 @@ class GetCoinbaseTemplateForTest(BitcoinTestFramework):
         assert_rpc_error(-1, 'coinbase-does-not-fit: sigops %d exceed %d' % (7 * 2900, MAX_BLOCK_SIGOPS), f, addr[SAPLING], ref_sigops)
         ok = f(addr[P2PKH], dict(ref, txids=sigop_ids[:6]))            # 17,401 fit
         assert_equal(ok['txcount'], 6)
+
+        # --- post-quantum spends: three transactions of 50 FN-DSA-512 inputs each. Consensus counts one signature
+        #     operation each (its P2PKH output): 17,404 with the six above. The mempool's policy count adds 20 per
+        #     OP_CHECKPQSIG, 3,000 more (20,404), which is not the block's limit and must not refuse them ---
+        pq_txs = [self.pq_spend(pq_funding, pq_funding_hex, range(k, k + pq_per_tx), pq_fee) for k in range(0, n_pq, pq_per_tx)]
+        pq_ids = [n0.sendrawtransaction(h, True) for h in pq_txs]
+        ref_pq = dict(ref, txids=sigop_ids[:6] + pq_ids)
+        res = f(addr[P2PKH], ref_pq)
+        assert_equal((res['txcount'], res['fees']), (9, 6 * fee + 3 * pq_fee))
+        assert_equal(res['fees'], sum(self.fee_from_amounts(0, t) for t in sigop_ids[:6] + pq_ids))
+        assert_equal(res['amount'], self.subsidy(gbt['height']) + 6 * fee + 3 * pq_fee)
+        block = block_from(gbt, res['data'], txs=sigop_txs[:6] + pq_txs, solve=False)
+        assert_equal(n0.getblocktemplate({'mode': 'proposal', 'data': bytes_to_hex_str(block.serialize())}), None)
+        # and with the seventh 2,900-output transaction the block is over the limit by the consensus count alone
+        assert_rpc_error(-1, 'coinbase-does-not-fit: sigops %d exceed %d' % (7 * 2900 + 1 + 3, MAX_BLOCK_SIGOPS),
+                         f, addr[P2PKH], dict(ref, txids=sigop_ids + pq_ids))
+        print('signature operations: %d post-quantum spends beside 17,400 legacy operations fit (consensus count 17,404)' % n_pq)
 
         # --- size: 22 transactions of P2SH outputs, the last one cut so that the block has room for the P2PKH
         #     coinbase and not for the Sapling one ---

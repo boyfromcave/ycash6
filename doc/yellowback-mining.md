@@ -351,6 +351,12 @@ getcoinbasetemplatefor "address" {"previousblockhash": "<hex>", "txids": ["<hex>
   invalid (`bad-cb-amount`); adding one leaves its fee unclaimed.
 - The node keeps nothing between calls, and `getblocktemplate` and `submitblock` are unchanged.
   The call needs neither a wallet nor `-mineraddress`.
+- The call checks that each named transaction is in the mempool, not that the set is complete or in
+  order: a child named without its parent is answered (with the child's fee), and the block of that
+  set is invalid for the missing input. Name `getblocktemplate`'s list verbatim.
+- The `sigops <n>` of `coinbase-does-not-fit` is what the block-validity rule counts (legacy plus
+  P2SH signature operations, as `ConnectBlock`), not the mempool policy's 20 per `OP_CHECKPQSIG`
+  that `getblocktemplate`'s per-transaction `sigops` includes.
 
 Errors a pool handles:
 

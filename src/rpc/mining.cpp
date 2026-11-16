@@ -1145,18 +1145,21 @@ UniValue getcoinbasetemplatefor(const UniValue& params, bool fHelp)
             throw JSONRPCError(RPC_MISC_ERROR, strprintf("unsupported: the header commits to the coinbase at height %d", nHeight));
 
         // The fee of every named transaction, from this node's mempool: the number getblocktemplate prints per
-        // transaction and consensus sums into the coinbase limit. Signature operations as ConnectBlock counts them
-        // (the mempool entry holds the legacy and P2SH count).
+        // transaction and consensus sums into the coinbase limit. Signature operations as ConnectBlock counts them:
+        // legacy plus P2SH, over the chain and the mempool. Not the mempool entry's count, which adds the policy's
+        // 20 per OP_CHECKPQSIG (AcceptToMemoryPool); consensus does not count those.
+        CCoinsViewMemPool viewMemPool(pcoinsTip, mempool);
+        CCoinsViewCache view(&viewMemPool);
         std::set<uint256> setSeen;
         for (const uint256& txid : vTxids) {
             CTxMemPool::indexed_transaction_set::const_iterator it = mempool.mapTx.find(txid);
-            if (it == mempool.mapTx.end())
+            if (it == mempool.mapTx.end() || !view.HaveInputs(it->GetTx()))
                 throw JSONRPCError(RPC_MISC_ERROR, "template-stale: transaction is not in the mempool: " + txid.GetHex());
             if (!setSeen.insert(txid).second)
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "txids names a transaction twice: " + txid.GetHex());
             nFees += it->GetFee();
             nTxsSize += it->GetTxSize();
-            nTxsSigOps += it->GetSigOpCount();
+            nTxsSigOps += GetLegacySigOpCount(it->GetTx()) + GetP2SHSigOpCount(it->GetTx(), view);
         }
 
         // The tag a coinbase built now carries: what CreateNewBlock would write, read into a local.
