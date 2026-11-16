@@ -158,8 +158,13 @@ slot frees (keeping the cap), or accept the window as a recorded relay differenc
 
 ## Devnet: three-way rounds (`qa/yellowback-rc-crossline.py --kogany-zakurad`)
 
+The driver moved to the workspace with the qualification harness in beta3 (P-1): it is
+`qualify/rc-crossline.py` in `boyfromcave/yellowback`, which reads this tree's `qa/rpc-tests`
+through `--framework`. The run below used it from here, before the move.
+
     contrib/yellowback/devnet/yellowback-devnet up --dir D --portseed 777 --no-heartbeat --no-walk --no-sim --no-viz
     qa/yellowback-rc-crossline.py --devnet-dir D --kogany-zakurad <zakurad> --rounds 5 --out D/crossline.json
+    # now: <workspace>/qualify/rc-crossline.py --framework qa/rpc-tests --devnet-dir D --kogany-zakurad <zakurad> ...
 
 The devnet: 8 ycash6 nodes, ARMED at 200 (3 attestors), Falcon active from the vault activation
 (103). One kogany node takes node 0's chain arguments through the harness map (no argument left
