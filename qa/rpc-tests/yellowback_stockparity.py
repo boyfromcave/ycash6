@@ -62,6 +62,10 @@ GETINFO_VOLATILE = {'connections', 'timeoffset', 'errors', 'errorstimestamp', 'b
                     # Every other getinfo field, the key set included, must agree.
                     'build', 'subversion', 'version', 'protocolversion'}
 
+# getblock keys the fork adds on purpose and a stock 6.20.0 node lacks: compared fork-vs-stock as
+# "the fork has them, the stock node has not", never left out silently.
+FORK_ONLY_GETBLOCK = {'transparentPools'}
+
 LEGACY, FORK = 0, 1
 
 
@@ -141,6 +145,12 @@ class YellowbackStockParityTest(BitcoinTestFramework):
         # one block, read back in full, field for field
         h = a.getbestblockhash()
         ba, bb = a.getblock(h), b.getblock(h)
+        if self.legacy_running:
+            # beta3 (ycash6 2b0fa5bd9): getblock carries the fork-only transparentPools (chain value
+            # pools by address type); the stock 6.20.0 node has none. Every other key must agree.
+            assert_equal((label, 'fork-only getblock keys', FORK_ONLY_GETBLOCK & set(ba)), (label, 'fork-only getblock keys', set()))
+            assert_equal((label, 'fork-only getblock keys', FORK_ONLY_GETBLOCK & set(bb)), (label, 'fork-only getblock keys', FORK_ONLY_GETBLOCK))
+            bb = {k: v for k, v in bb.items() if k not in FORK_ONLY_GETBLOCK}
         assert_equal((label, sorted(ba.keys())), (label, sorted(bb.keys())))
         for k in sorted(ba):
             if k == 'confirmations':
