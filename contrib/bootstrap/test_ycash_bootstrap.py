@@ -581,6 +581,8 @@ elif cmd == "getblockcount": print(tip)
 elif cmd == "getblockhash": print(h(int(args[1])))
 elif cmd == "getblockheader": print(json.dumps({"chainwork": "%%064x" %% (int(args[1], 16) * 3)}))
 elif cmd == "gettxoutsetinfo": print(json.dumps({"hash_serialized": "utxo-%%d" %% tip}))
+elif cmd == "vault_getinfo" and os.environ.get("FAKE_VAULT_INACTIVE"):   # Vault not active (mainnet): no dbtip, the empty state's hash
+    print(json.dumps({"dbtip": None, "statehash": os.environ["FAKE_VAULT_INACTIVE"]}))
 elif cmd == "vault_getinfo": print(json.dumps({"dbtip": {"hash": h(tip), "height": tip}, "statehash": "vault-%%d" %% tip}))
 elif cmd == "yed_getstatehash": print(json.dumps({"blockhash": h(int(args[1])), "statehash": "yed-%%s" %% args[1]}))
 elif cmd == "invalidateblock": st["tip"] = int(args[1], 16) - 1; st["calls"].append(cmd); json.dump(st, open(path, "w"))
@@ -682,6 +684,22 @@ class StateTest(Quiet):
         self.assertEqual(code, 2)
         self.assertIn("disagrees with the statements", err)
         self.assertFalse(os.path.exists(os.path.join(self.datadir, "testnet-yb-fast", "chainstate")))
+
+    def test_an_inactive_vault_compares_the_empty_state_hash(self):
+        # Mainnet before Vault: vault_getinfo has "dbtip": null and the empty state's statehash, which every
+        # published mainnet statement carries (ycash-infra snapshot.py). A null or another hash is refused.
+        empty = "56944c5d3f98413ef45cf54545538103cc9f298e0575820ad3591376e2e0f65d"
+        os.environ["FAKE_VAULT_INACTIVE"] = empty
+        try:
+            code, err = self.restore(make_state_bundle(os.path.join(self.tmp, "b1"), statement_override={"vault_statehash": empty}))
+            self.assertEqual(code, 0, err)
+            for i, other in enumerate((None, "ab" * 32)):
+                shutil.rmtree(os.path.join(self.datadir, "testnet-yb-fast"), ignore_errors=True)
+                code, err = self.restore(make_state_bundle(os.path.join(self.tmp, "b%d" % (i + 2)), statement_override={"vault_statehash": other}))
+                self.assertEqual(code, 2)
+                self.assertIn('"vault_statehash": [%s, "%s"]' % (json.dumps(other), empty), err)
+        finally:
+            del os.environ["FAKE_VAULT_INACTIVE"]
 
     def test_a_failed_state_restore_leaves_a_marker(self):
         marker = os.path.join(self.datadir, "testnet-yb-fast.bootstrap-incomplete")

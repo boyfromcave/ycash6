@@ -63,7 +63,9 @@ contrib/bootstrap/ycash-bootstrap --network main --datadir ~/.ycash \
 | `--keep-parts` | a state bundle: keep each checked part in the work directory after it is extracted, so a re-run after a failure reads it locally (costs the bundle's size in disk; without it the restore needs one part) |
 | `--timeout`, `--part-attempts` | seconds without data before a download attempt fails (120); attempts per part (5, with backoff; each resumes where the last broke off) |
 
-Exit status: 0 restored; 2 refused (the message says which check) or a usage error.
+Exit status: 0 restored; 2 refused (the message says which check) or a usage error; 1 an option
+refused before the restore starts (`--allow-unsigned` or `--reset` on mainnet, a peer setting in
+`--node-arg`, a missing `--source`).
 
 ## The marker: `DATADIR/<network>.bootstrap-incomplete`
 
@@ -71,8 +73,10 @@ A restore that changes the datadir writes `DATADIR/<network>.bootstrap-incomplet
 `/var/lib/ycash/testnet-yb-fast.bootstrap-incomplete`) before it touches anything, and removes it
 only when the restore has succeeded. A refused, failed or killed restore leaves it behind, saying
 why. It sits beside the network's subdirectory, not inside it, so a failure that removes the
-subdirectory keeps it. A refusal that changed nothing (a datadir that already holds a chain, a
-usage error, `--frame-only`) writes none.
+subdirectory keeps it. Every refusal once the restore has started leaves it, even one that changed
+nothing yet (a missing signature, a wrong checksum); only a refusal before the start writes none (a
+datadir that already holds a chain, a usage error or an option refused with exit status 1,
+`--frame-only`).
 
 The image entrypoint (`contrib/docker/ycashd/README.md`) does not start `ycashd` while the marker is
 there, so a half-restored datadir never starts quietly and syncs the rest from peers. Started by
@@ -184,7 +188,8 @@ of one part, so every format takes the same path.
    block files may hold blocks above H_B (`-stopatheight` stops the chain state, not the
    download), so when the tip is above H_B the tool runs `invalidateblock` on H_B + 1, computes
    every statement field itself (`getblockhash`, `getblockheader`.chainwork,
-   `gettxoutsetinfo`.hash_serialized, `vault_getinfo`.statehash at `dbtip` = H_B,
+   `gettxoutsetinfo`.hash_serialized, `vault_getinfo`.statehash at `dbtip` = H_B
+   (before Vault is active, as on mainnet, `dbtip` is null and the statehash is the empty state's),
    `yed_getstatehash H_B`; v2/v3 also `getblock`'s `finalsaplingroot` and chain supply, and
    `getblockhash` at every pin of the manifest), compares, and `reconsiderblock`s the same block so
    the datadir keeps no failed-block mark. Any failure removes the staging directory and what was

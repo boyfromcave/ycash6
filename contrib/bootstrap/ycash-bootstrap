@@ -60,7 +60,8 @@ yed_getstatehash; v2: getblock's finalsaplingroot and chain supply) and every pi
 A restore that changes the datadir first writes DATADIR/<network>.bootstrap-incomplete and removes it
 only when it has succeeded: a refused, failed or killed restore leaves it behind, with the reason,
 and the image entrypoint (contrib/docker/ycashd) does not start ycashd while it is there. Exit
-status: 0 restored, 2 refused (the message and the marker say why).
+status: 0 restored, 2 refused (the message and the marker say why), 1 an option refused before the
+restore starts (for example --allow-unsigned on mainnet; no marker).
 
 Nothing in a bundle is executed; file names are checked against the format before they become a
 path or a URL. Python standard library only (plus the `minisign` binary when a signature is
@@ -1084,12 +1085,12 @@ def state_statement(node, height, fields):
            "chainwork": json.loads(node.cli("getblockheader", blockhash))["chainwork"],
            "utxo_hash_serialized": json.loads(node.cli("gettxoutsetinfo"))["hash_serialized"]}
     vault = json.loads(node.cli("vault_getinfo"))
-    if vault.get("dbtip") is None:
-        out["vault_statehash"] = None
-    elif vault["dbtip"].get("hash") != blockhash:
-        raise BundleError("vault_getinfo is at %s, not %s" % (vault["dbtip"].get("hash"), blockhash))
-    else:
-        out["vault_statehash"] = vault.get("statehash")
+    dbtip = (vault.get("dbtip") or {}).get("hash")
+    if dbtip is not None and dbtip != blockhash:
+        raise BundleError("vault_getinfo is at %s, not %s" % (dbtip, blockhash))
+    # FORMAT.md: vault_getinfo's statehash, null only when the node has no vault database. Before Vault
+    # is active (mainnet) dbtip is null and statehash is the empty state's, as the publisher records it.
+    out["vault_statehash"] = vault.get("statehash")
     yed = node.cli("yed_getstatehash", height, check=False)
     if yed is None:
         out["yed_statehash"] = None
