@@ -7,15 +7,11 @@
 yellowback-quote: the Yellowback quote agent (plan §5, M9, L5).
 
 One process beside a pool's ycashd. Every `poll_seconds` (75, one block) it
-fetches the configured price sources and computes the aggregate (per-source
-15-minute VWAP/TWAP, outlier filter, median over min_sources / min_venues). It
-pushes it into the node with `yed_setquote <priceMicroUsd> <sourceMask>` only
-when the price moved more than `min_move_bps` (10, 0.1 %) from the last quote
-the node took, when `heartbeat_seconds` (600) have passed since then, or when
-the node no longer holds a quote (restarted). The node puts the quote into its
-coinbase tag while it is younger than -yellowbackquotemaxage (1,800 s), and
-every `yed_setquote` rebuilds the node's block template, so pushing an
-unchanged price every poll only churned templates (beta4 item 3b).
+fetches the configured price sources, computes the aggregate (per-source 15-minute
+VWAP/TWAP, outlier filter, median over min_sources / min_venues) and pushes it
+into the node with `yed_setquote <priceMicroUsd> <sourceMask>` on every poll,
+so the pool's tag price is never older than one poll. The node puts the quote
+into its coinbase tag while it is younger than -yellowbackquotemaxage.
 
   * After `fail_polls` (default 2) consecutive failed aggregates the agent calls
     `yed_setquote 0`, so the pool's templates carry no tag at once (L5); the node's
@@ -40,9 +36,8 @@ Configuration (TOML, Python >= 3.11):
   [node]   rpc_url = "http://127.0.0.1:8832"; rpc_cookie = "~/.ycash/.cookie" | rpc_user, rpc_password
            (a file holding rpc_password must be mode 0600, or pass --insecure-config-permissions; plain http://
            with credentials to a host other than loopback needs allow_insecure_rpc = true)
-  [quote]  poll_seconds (75), min_move_bps (10), heartbeat_seconds (600, below 1800), fail_polls (2),
-           twap_seconds (900), min_sources (3), min_venues (2), min_btc_sources (2), outlier_bps (1000),
-           silence_seconds (180), fetch_timeout (15)
+  [quote]  poll_seconds (75), fail_polls (2), twap_seconds (900), min_sources (3), min_venues (2),
+           min_btc_sources (2), outlier_bps (1000), silence_seconds (180), fetch_timeout (15)
   [[sources]]          preset rows: name, kind, url, path, max_age, max_spread_bps, reject_paths, mask_bit, ...
   [[btc_usd_sources]]  USD references for BTC-quoted pairs (same fields)
 """
@@ -64,11 +59,9 @@ LOG = logging.getLogger("yellowback-quote")
 EXIT_OK, EXIT_NOT_PUBLISHED, EXIT_BAD_CONFIG = 0, 1, 2
 RPC_METHOD_NOT_FOUND = -32601
 # The agent's own defaults. poll_seconds and silence_seconds override the feed's 30 and 120 (beta4 item
-# 3b): one fetch per 75 s block, and a source that misses one fetch (its last sample 150 s old) stays live.
-QUOTE_DEFAULTS = {"fail_polls": 2, "poll_seconds": 75, "silence_seconds": 180, "min_move_bps": 10, "heartbeat_seconds": 600}
-# -yellowbackquotemaxage's default: a heartbeat must stay well inside it, or the tag lapses between pushes.
-NODE_QUOTE_MAX_AGE = 1800
-QUOTE_KEYS = ("fail_polls", "min_move_bps", "heartbeat_seconds") + yp.FEED_KEYS
+# 3b): one fetch and one yed_setquote per 75 s block, and a source that misses one fetch stays live.
+QUOTE_DEFAULTS = {"fail_polls": 2, "poll_seconds": 75, "silence_seconds": 180}
+QUOTE_KEYS = ("fail_polls",) + yp.FEED_KEYS
 NODE_KEYS = {"rpc_url", "rpc_cookie", "rpc_user", "rpc_password", "rpc_timeout", "allow_insecure_rpc"}
 
 
@@ -130,24 +123,16 @@ def validate_config(raw):
         raise ConfigError("[quote]: unknown key(s) %s" % ", ".join(sorted(bad)))
     try:
         settings = yp.feed_settings(dict({k: QUOTE_DEFAULTS[k] for k in ("poll_seconds", "silence_seconds")}, **quote))
+        if settings["poll_seconds"] < 1:
+            raise ValueError("poll_seconds must be >= 1")
         fail_polls = int(quote.get("fail_polls", QUOTE_DEFAULTS["fail_polls"]))
         if fail_polls < 1:
             raise ValueError("fail_polls must be >= 1")
-        min_move_bps = int(quote.get("min_move_bps", QUOTE_DEFAULTS["min_move_bps"]))
-        heartbeat = int(quote.get("heartbeat_seconds", QUOTE_DEFAULTS["heartbeat_seconds"]))
-        if settings["poll_seconds"] < 1:
-            raise ValueError("poll_seconds must be >= 1")
-        if min_move_bps < 0:
-            raise ValueError("min_move_bps must be >= 0 (0 pushes every poll)")
-        if not settings["poll_seconds"] <= heartbeat < NODE_QUOTE_MAX_AGE:
-            raise ValueError("heartbeat_seconds must be at least poll_seconds (%d) and below the node's "
-                             "-yellowbackquotemaxage default (%d s); keep it well inside the node's setting"
-                             % (settings["poll_seconds"], NODE_QUOTE_MAX_AGE))
         sources = yp.normalize_sources(raw.get("sources", []))
         btc = yp.normalize_btc_sources(raw.get("btc_usd_sources", []))
     except (ValueError, TypeError) as e:
         raise ConfigError(str(e))
-    settings.update(fail_polls=fail_polls, min_move_bps=min_move_bps, heartbeat_seconds=heartbeat)
+    settings["fail_polls"] = fail_polls
     return {"node": node, "quote": settings, "sources": sources, "btc_usd_sources": btc}
 
 
@@ -182,19 +167,14 @@ def make_feed(cfg, mock_price=None):
 class QuoteAgent:
     """One poll = fetch, aggregate, push. `node` is anything with call(method, *params) (injectable)."""
 
-    def __init__(self, feed, node=None, fail_polls=2, dry_run=False, min_move_bps=0, heartbeat_seconds=None,
-                 clock=time.monotonic):
+    def __init__(self, feed, node=None, fail_polls=2, dry_run=False):
         self.feed = feed
         self.node = node
         self.fail_polls = fail_polls
         self.dry_run = dry_run
-        self.min_move_bps = min_move_bps          # 0: push every good poll (the pre-beta4 behaviour)
-        self.heartbeat_seconds = heartbeat_seconds  # None: no heartbeat needed (min_move_bps 0)
-        self.clock = clock
         self.failures = 0            # consecutive failed aggregates
         self.pending_clear = False   # `yed_setquote 0` owed to the node (L5) and not yet acknowledged
         self.published = None        # (micro, mask) last acknowledged by the node, None after a clear
-        self.published_at = None     # self.clock() when the node acknowledged self.published
         self.inactive = False        # the node answered "Method not found": Yellowback is not active there yet
         self.polls = 0
 
@@ -219,32 +199,8 @@ class QuoteAgent:
             self.inactive = False
         return reply if reply is not None else {}
 
-    def _node_holds_quote(self):
-        """Whether the node still holds a quote (`yed_getinfo` miner.quoteKind "quote"); a restarted
-        node holds none. An unreadable answer counts as "no", so the quote is pushed again."""
-        try:
-            miner = (self.node.call("yed_getinfo") or {}).get("miner") or {}
-        except Exception as e:
-            LOG.debug("yed_getinfo failed: %s: %s", e.__class__.__name__, e)
-            return False
-        return miner.get("quoteKind") == "quote"
-
-    def _due(self, micro):
-        """Why the aggregate `micro` must be pushed now, or None to keep the node's quote."""
-        if self.published is None or self.min_move_bps <= 0:
-            return "new"
-        last = self.published[0]
-        if abs(micro - last) * 10000 > self.min_move_bps * last:
-            return "moved %+.3f %%" % ((micro - last) * 100.0 / last)
-        if self.heartbeat_seconds is not None and self.clock() - self.published_at >= self.heartbeat_seconds:
-            return "heartbeat"
-        if not self._node_holds_quote():
-            return "node holds no quote"
-        return None
-
     def poll(self):
-        """Returns one of: 'published', 'unchanged' (the node keeps its quote: no move above
-        min_move_bps, no heartbeat due), 'cleared', 'failed' (no aggregate, nothing owed yet),
+        """Returns one of: 'published', 'cleared', 'failed' (no aggregate, nothing owed yet),
         'rpc-error', 'dry-run'."""
         self.polls += 1
         self.feed.poll(force=True)
@@ -266,7 +222,6 @@ class QuoteAgent:
                     return "rpc-error"
                 self.pending_clear = False
                 self.published = None
-                self.published_at = None
                 LOG.warning("quote cleared: the node's templates carry no tag until the next good aggregate (L5)")
                 return "cleared"
             return "failed"
@@ -277,20 +232,12 @@ class QuoteAgent:
             print(json.dumps({"priceMicroUsd": micro, "priceUsd": micro / yp.MICRO, "sourceMask": mask,
                               "sources": names}))
             return "dry-run"
-        why = self._due(micro)
-        if why is None:
-            LOG.debug("unchanged: %d µUSD is within %d bps of the node's %d µUSD; no yed_setquote",
-                      micro, self.min_move_bps, self.published[0])
-            return "unchanged"
         reply = self._setquote(micro, mask)
         if reply is None:
-            self.published = None            # unknown what the node holds: push on the next good poll
-            self.published_at = None
             return "rpc-error"
         self.published = (micro, mask)
-        self.published_at = self.clock()
         nxt = reply.get("nextTag") if isinstance(reply, dict) else None
-        LOG.info("published %d µUSD ($%.6f) mask 0x%04x from %s (%s)%s", micro, micro / yp.MICRO, mask, ",".join(names), why,
+        LOG.info("published %d µUSD ($%.6f) mask 0x%04x from %s%s", micro, micro / yp.MICRO, mask, ",".join(names),
                  "" if not nxt else " -> next tag %s" % nxt.get("kind"))
         return "published"
 
@@ -309,9 +256,8 @@ def run_loop(agent, poll_seconds, sleep=time.sleep):
         raise _Stop()
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
-    LOG.info("yellowback-quote running: poll every %d s, push on a move above %d bps or every %s s, clear after %d failed polls%s",
-             poll_seconds, agent.min_move_bps, agent.heartbeat_seconds, agent.fail_polls,
-             " (mock price %s)" % agent.feed.mock_file if agent.feed.mock_file else "")
+    LOG.info("yellowback-quote running: poll every %d s, clear after %d failed polls%s",
+             poll_seconds, agent.fail_polls, " (mock price %s)" % agent.feed.mock_file if agent.feed.mock_file else "")
     try:
         while not stopping:
             started = time.time()
@@ -416,9 +362,7 @@ def main(argv=None, node_factory=make_node, feed_factory=make_feed, sleep=time.s
                 return EXIT_NOT_PUBLISHED
             LOG.error("cannot tell the node's network; retrying in %d s", cfg["quote"]["poll_seconds"])
             sleep(cfg["quote"]["poll_seconds"])
-    q = cfg["quote"]
-    agent = QuoteAgent(feed, node, fail_polls=q["fail_polls"], dry_run=args.dry_run,
-                       min_move_bps=q["min_move_bps"], heartbeat_seconds=q["heartbeat_seconds"])
+    agent = QuoteAgent(feed, node, fail_polls=cfg["quote"]["fail_polls"], dry_run=args.dry_run)
     if args.dry_run:
         agent.poll()
         return EXIT_OK if agent.feed.aggregate() is not None else EXIT_NOT_PUBLISHED

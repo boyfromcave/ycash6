@@ -222,10 +222,6 @@ rpc_password = "%(password)s"
 [quote]
 poll_seconds = 5
 fail_polls = 2
-# every poll pushes (the pre-beta4 cadence): the price walk's small steps must reach the tags as they
-# reach the attestors, and -yellowbackquotemaxage is 120 s here
-min_move_bps = 0
-heartbeat_seconds = 60
 min_sources = 1
 min_venues = 1
 

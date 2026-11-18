@@ -203,25 +203,13 @@ overrides) — and the agent refuses to send those credentials as cleartext Basi
 `https://`; `allow_insecure_rpc = true` insists). `--mock-price` is for regtest: on any other
 network the agent exits 2 unless `--i-know-this-is-not-regtest` is given.
 
-Every `poll_seconds` (75, one block) it fetches the configured sources, takes each source's
-15-minute volume-weighted (or time-weighted) average, drops outliers, and requires `min_sources`
-live sources from `min_venues` venues (a source that misses one fetch stays live:
-`silence_seconds` 180). It calls `yed_setquote <priceMicroUsd> <sourceMask>` on your node only
-when that is worth a new template:
-
-- the aggregate moved more than `min_move_bps` (10, that is 0.1 %) from the quote the node holds;
-- `heartbeat_seconds` (600) have passed since the last push, which keeps the quote well inside
-  `-yellowbackquotemaxage` (1,800 s; the agent refuses a heartbeat of 1,800 or more);
-- or the node holds no quote any more (`yed_getinfo` `miner.quoteKind` is not `quote`: a
-  restarted node, or a quote older than a lower `-yellowbackquotemaxage`), checked on every poll
-  that pushes nothing.
-
-Why not every poll: every `yed_setquote` rebuilds the node's cached template, and a new price
-changes the coinbase tag, so a pool sends every miner a new job (yolo: one `mining.notify` with
-`clean_jobs`, and one new `getcoinbasetemplatefor` per Sapling or post-quantum miner). The same
-price pushed again changes no tag bytes and costs yolo nothing, but a push every 30 s was
-2–3 rebuilds per 75 s block for a price averaged over 15 minutes. `min_move_bps = 0` pushes every
-poll, as before beta4 (the devnet does this, its price walk moves in small steps).
+Every `poll_seconds` (75, one block; 60-75 s suits the 75 s block) it fetches the configured
+sources, takes each source's 15-minute volume-weighted (or time-weighted) average, drops outliers,
+requires `min_sources` live sources from `min_venues` venues (a source that misses one fetch stays
+live: `silence_seconds` 180), and calls `yed_setquote <priceMicroUsd> <sourceMask>` on your node on
+every poll, so your tag's price is never older than one poll. Each call rebuilds the node's cached
+template; a pool such as yolo sends its miners a new job only when the tag's bytes change (a new
+price), not for the same price again.
 **After two consecutive failed aggregates it calls `yed_setquote 0`** so your templates carry no
 tag at once (L5) rather than a stale price; it resumes on the next good aggregate. The node's
 own `-yellowbackquotemaxage` clock (30 minutes) is the backstop for a dead agent. An RPC failure
@@ -244,9 +232,7 @@ window, every pool key whose tags in the window all carry **one constant price**
 height. A hard-coded or long-stale quote therefore stops counting exactly when the market moves —
 the moment it matters — and a pinned pool's tags contribute no price until its quotes move again.
 This is a property of the quote, not of the agent: `yellowback-quote` publishes the live aggregate
-and stops tagging on failure precisely so its quotes never look constant. Its 0.1 % push threshold
-does not change that: a window whose attested prices moved by 5 % moved the agent's aggregate far
-past 0.1 %, so its tags in that window carry more than one price.
+and stops tagging on failure precisely so its quotes never look constant.
 
 ## 5. Monitoring
 

@@ -23,11 +23,7 @@ rpc_cookie = "~/.ycash/.cookie"
 # allow_insecure_rpc = true
 
 [quote]
-poll_seconds = 75        # fetch and aggregate once a block (75 s)
-min_move_bps = 10        # push (`yed_setquote`) only when the aggregate moved more than 0.1 % from the node's quote ...
-heartbeat_seconds = 600  # ... or every 10 minutes, well inside the node's -yellowbackquotemaxage (1,800 s)
-                         # (and at once if the node no longer holds a quote, e.g. after a restart).
-                         # Every yed_setquote rebuilds the node's template; a new price is one new pool job.
+poll_seconds = 75        # fetch, aggregate and push (`yed_setquote`) once a block (75 s; 60-75 s suits a 75 s block)
 fail_polls = 2           # after this many consecutive failed aggregates: `yed_setquote 0` (no tag until the next good aggregate, L5)
 twap_seconds = 900       # per-source 15-minute window (VWAP where the venue reports volume, TWAP otherwise)
 min_sources = 2          # live sources needed after the outlier filter (fail closed below; see below)
