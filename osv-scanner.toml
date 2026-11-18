@@ -56,6 +56,11 @@ ignoreUntil = 2027-01-21T00:00:00Z
 reason = "paste is unmaintained (no vulnerability): a compile-time macro crate in the agent's graph; the agent's own cargo audit / cargo deny (yellowback-tests.yml `agent`) report it as a warning. Informational."
 
 [[IgnoredVulns]]
+id = "RUSTSEC-2026-0543"
+ignoreUntil = 2027-02-15T00:00:00Z
+reason = "Triaged 2026-11-17; accepted by the Yellowback lead architect 2026-11-18. chrono 0.4.45 is unmaintained (informational: unmaintained, no vulnerability, no fixed version), contrib/yellowback/attest/Cargo.lock only. It is reached only through wmi <- netwatch <- iroh, and wmi is a Windows-only dependency of netwatch, so chrono is compiled on Windows only; the attestor agent is not built for Windows, and its cargo deny (targets in its deny.toml) does not see it. Leaves when netwatch drops wmi or wmi drops chrono, at an iroh bump."
+
+[[IgnoredVulns]]
 id = "GHSA-wj6h-64fc-37mp"
 ignoreUntil = 2027-01-21T00:00:00Z
 reason = "python-ecdsa Minerva timing side channel (no fixed release): a Checkov dependency that signs nothing in this job; a timing attack needs a signer to observe."
