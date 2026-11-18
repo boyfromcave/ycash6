@@ -6,11 +6,12 @@
 """
 yellowback-quote: the Yellowback quote agent (plan §5, M9, L5).
 
-One process beside a pool's ycashd. Every `poll_seconds` it fetches the
-configured price sources, computes the aggregate (per-source 15-minute
+One process beside a pool's ycashd. Every `poll_seconds` (75, one block) it
+fetches the configured price sources, computes the aggregate (per-source 15-minute
 VWAP/TWAP, outlier filter, median over min_sources / min_venues) and pushes it
-into the node with `yed_setquote <priceMicroUsd> <sourceMask>`. The node puts
-the quote into its coinbase tag while it is younger than -yellowbackquotemaxage.
+into the node with `yed_setquote <priceMicroUsd> <sourceMask>` on every poll,
+so the pool's tag price is never older than one poll. The node puts the quote
+into its coinbase tag while it is younger than -yellowbackquotemaxage.
 
   * After `fail_polls` (default 2) consecutive failed aggregates the agent calls
     `yed_setquote 0`, so the pool's templates carry no tag at once (L5); the node's
@@ -18,7 +19,9 @@ the quote into its coinbase tag while it is younger than -yellowbackquotemaxage.
     the next good aggregate.
   * An RPC failure (connection refused, auth, `yellowback-unhealthy`, ...) is
     logged at error and retried on the next poll, with no backoff; it never
-    exits the daemon. The exit code is non-zero only for a bad configuration
+    exits the daemon. A node where Yellowback is not active yet (`yed_*` answer
+    "Method not found") is logged once and asked again every poll, so the
+    agent can be started before the network's attestor set exists. The exit code is non-zero only for a bad configuration
     (2) or, with --once / --dry-run, for a poll that published nothing (1).
   * Nothing inbound: no listening socket, no TLS server.
 
@@ -33,8 +36,8 @@ Configuration (TOML, Python >= 3.11):
   [node]   rpc_url = "http://127.0.0.1:8832"; rpc_cookie = "~/.ycash/.cookie" | rpc_user, rpc_password
            (a file holding rpc_password must be mode 0600, or pass --insecure-config-permissions; plain http://
            with credentials to a host other than loopback needs allow_insecure_rpc = true)
-  [quote]  poll_seconds (30), fail_polls (2), twap_seconds (900), min_sources (3), min_venues (2),
-           min_btc_sources (2), outlier_bps (1000), silence_seconds (120), fetch_timeout (15)
+  [quote]  poll_seconds (75), fail_polls (2), twap_seconds (900), min_sources (3), min_venues (2),
+           min_btc_sources (2), outlier_bps (1000), silence_seconds (180), fetch_timeout (15)
   [[sources]]          preset rows: name, kind, url, path, max_age, max_spread_bps, reject_paths, mask_bit, ...
   [[btc_usd_sources]]  USD references for BTC-quoted pairs (same fields)
 """
@@ -54,7 +57,10 @@ import yellowback_price as yp  # noqa: E402
 LOG = logging.getLogger("yellowback-quote")
 
 EXIT_OK, EXIT_NOT_PUBLISHED, EXIT_BAD_CONFIG = 0, 1, 2
-QUOTE_DEFAULTS = {"fail_polls": 2}
+RPC_METHOD_NOT_FOUND = -32601
+# The agent's own defaults. poll_seconds and silence_seconds override the feed's 30 and 120 (beta4 item
+# 3b): one fetch and one yed_setquote per 75 s block, and a source that misses one fetch stays live.
+QUOTE_DEFAULTS = {"fail_polls": 2, "poll_seconds": 75, "silence_seconds": 180}
 QUOTE_KEYS = ("fail_polls",) + yp.FEED_KEYS
 NODE_KEYS = {"rpc_url", "rpc_cookie", "rpc_user", "rpc_password", "rpc_timeout", "allow_insecure_rpc"}
 
@@ -116,7 +122,9 @@ def validate_config(raw):
     if bad:
         raise ConfigError("[quote]: unknown key(s) %s" % ", ".join(sorted(bad)))
     try:
-        settings = yp.feed_settings(quote)
+        settings = yp.feed_settings(dict({k: QUOTE_DEFAULTS[k] for k in ("poll_seconds", "silence_seconds")}, **quote))
+        if settings["poll_seconds"] < 1:
+            raise ValueError("poll_seconds must be >= 1")
         fail_polls = int(quote.get("fail_polls", QUOTE_DEFAULTS["fail_polls"]))
         if fail_polls < 1:
             raise ValueError("fail_polls must be >= 1")
@@ -167,17 +175,28 @@ class QuoteAgent:
         self.failures = 0            # consecutive failed aggregates
         self.pending_clear = False   # `yed_setquote 0` owed to the node (L5) and not yet acknowledged
         self.published = None        # (micro, mask) last acknowledged by the node, None after a clear
+        self.inactive = False        # the node answered "Method not found": Yellowback is not active there yet
         self.polls = 0
 
     def _setquote(self, micro, mask):
         try:
             reply = self.node.call("yed_setquote", micro, mask)
         except yp.RpcError as e:
+            if e.code == RPC_METHOD_NOT_FOUND:
+                # Yellowback is not active on this node (no vault upgrade height or no attestor set
+                # yet, e.g. a test network before its set is compiled in): say so once, keep asking.
+                (LOG.debug if self.inactive else LOG.warning)(
+                    "yed_setquote: the node has no yed_* calls (Yellowback is not active there yet): %s; asking again every poll", e)
+                self.inactive = True
+                return None
             LOG.error("yed_setquote %d %d refused by the node: %s", micro, mask, e)
             return None
         except Exception as e:                       # connection refused, timeout, bad reply ...
             LOG.error("yed_setquote %d %d failed: %s: %s", micro, mask, e.__class__.__name__, e)
             return None
+        if self.inactive:
+            LOG.info("yed_setquote accepted: Yellowback is active on the node")
+            self.inactive = False
         return reply if reply is not None else {}
 
     def poll(self):

@@ -203,14 +203,20 @@ overrides) — and the agent refuses to send those credentials as cleartext Basi
 `https://`; `allow_insecure_rpc = true` insists). `--mock-price` is for regtest: on any other
 network the agent exits 2 unless `--i-know-this-is-not-regtest` is given.
 
-Every `poll_seconds` (30) it fetches the configured sources, takes each source's 15-minute
-volume-weighted (or time-weighted) average, drops outliers, requires `min_sources` live sources
-from `min_venues` venues, and calls `yed_setquote <priceMicroUsd> <sourceMask>` on your node.
+Every `poll_seconds` (75, one block; 60-75 s suits the 75 s block) it fetches the configured
+sources, takes each source's 15-minute volume-weighted (or time-weighted) average, drops outliers,
+requires `min_sources` live sources from `min_venues` venues (a source that misses one fetch stays
+live: `silence_seconds` 180), and calls `yed_setquote <priceMicroUsd> <sourceMask>` on your node on
+every poll, so your tag's price is never older than one poll. Each call rebuilds the node's cached
+template; a pool such as yolo sends its miners a new job only when the tag's bytes change (a new
+price), not for the same price again.
 **After two consecutive failed aggregates it calls `yed_setquote 0`** so your templates carry no
 tag at once (L5) rather than a stale price; it resumes on the next good aggregate. The node's
 own `-yellowbackquotemaxage` clock (30 minutes) is the backstop for a dead agent. An RPC failure
 (node down, wrong password, index unhealthy) is logged and retried on the next poll; the daemon
-never exits for it. Exit codes: `0`, `1` nothing published (`--once`, for cron), `2` bad
+never exits for it. A node where Yellowback is not active yet answers every `yed_*` call with
+"Method not found": the agent says so once and keeps asking every poll, so it can be started
+before a network's attestor set exists and begins quoting when the node does. Exit codes: `0`, `1` nothing published (`--once`, for cron), `2` bad
 configuration.
 
 The `sourceMask` bits are informational (bit 0 SafeTrade, 1 CoinGecko, 2 CoinMarketCap, 3 Nonkyc;

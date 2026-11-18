@@ -148,6 +148,29 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(agent.poll(), "published")
         self.assertEqual(len(node.setquotes()), 3)
 
+    def test_yellowback_not_active_is_retried_quietly(self):
+        # a node before its network's attestor set (testnet-yb-fast in beta3): every yed_* is "Method not found"
+        class Inactive(FakeNode):
+            active = False
+
+            def call(self, method, *params):
+                if not self.active:
+                    self.calls.append((method,) + params)
+                    raise yp.RpcError(-32601, "Method not found (Yellowback is not active: ...)")
+                return super().call(method, *params)
+        node = Inactive()
+        agent = yq.QuoteAgent(StubFeed([(500000, 3, ["a"])] * 3), node)
+        logging.disable(logging.NOTSET)
+        with self.assertLogs("yellowback-quote", level="DEBUG") as logs:
+            self.assertEqual(agent.poll(), "rpc-error")
+            self.assertEqual(agent.poll(), "rpc-error")
+            node.active = True
+            self.assertEqual(agent.poll(), "published")
+        levels = [r.levelname for r in logs.records]
+        self.assertEqual(levels.count("WARNING"), 1, logs.output)       # said once, not every poll
+        self.assertNotIn("ERROR", levels)
+        self.assertFalse(agent.inactive)
+
     def test_clear_is_retried_until_acknowledged(self):
         # Rule: L5 (a lost `yed_setquote 0` is owed until the node takes it)
         node = FakeNode()
@@ -254,6 +277,7 @@ class MainTests(unittest.TestCase):
             "[node]\nrpc_url = 1\n[[sources]]\nname='a'\n",                                     # source without url/path
             MINIMAL + "\n[quote]\n",                                                            # duplicate table: TOML error
             MINIMAL.replace("fail_polls = 2", "fail_polls = 0"),
+            MINIMAL.replace("poll_seconds = 1", "poll_seconds = 0"),
             MINIMAL.replace("min_sources = 1", "min_sources = 0"),
             MINIMAL + "\n[extra]\nx = 1\n",
             MINIMAL.replace('rpc_user = "u"', 'rpc_user = "u"\nrpc_cookie = "/x"'),             # both auth forms
@@ -272,6 +296,14 @@ class MainTests(unittest.TestCase):
         cfg = yq.load_config(self.conf)
         self.assertEqual(cfg["node"], {"rpc_url": "http://127.0.0.1:18232", "rpc_user": "u", "rpc_password": "p"})
         self.assertEqual((cfg["quote"]["poll_seconds"], cfg["quote"]["fail_polls"], cfg["quote"]["twap_seconds"]), (1, 2, 900))
+        # the agent's own defaults (beta4 item 3b): one poll and one yed_setquote per 75 s block
+        write(self.conf, MINIMAL.replace("poll_seconds = 1\n", ""))
+        q = yq.load_config(self.conf)["quote"]
+        self.assertEqual((q["poll_seconds"], q["silence_seconds"]), (75, 180))
+        write(self.conf, MINIMAL.replace("poll_seconds = 1\n", "poll_seconds = 60\nsilence_seconds = 200\n"))
+        q = yq.load_config(self.conf)["quote"]
+        self.assertEqual((q["poll_seconds"], q["silence_seconds"]), (60, 200))
+        write(self.conf, MINIMAL)
         self.assertEqual(cfg["sources"][0]["venue"], "nowhere")
         node = yq.make_node(cfg["node"])
         self.assertEqual((node.url, node.auth), ("http://127.0.0.1:18232", yp.base64.b64encode(b"u:p").decode()))

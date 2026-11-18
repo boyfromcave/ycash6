@@ -8,7 +8,7 @@ pushes one number into the pool's node with `yed_setquote`; the node puts it in 
 | File | Role | Status |
 |---|---|---|
 | `yellowback_price.py` | Price-source layer: presets per venue (CoinGecko, Nonkyc, SafeTrade/Peatio, Kraken, Coinbase, generic URL + JSON path), every field overridable, per-source freshness / spread / flag guards, BTC pairs converted with a median of `[[btc_usd_sources]]`, 15-minute per-source VWAP/TWAP, outlier filter, median over `min_sources`/`min_venues` (fail closed); the §5 source-mask bit registry; the §3.2 coinbase-tag codec (TAG-1..5) | done |
-| `yellowback-quote` | The quote agent daemon: `--conf <toml>`, polls every `poll_seconds`, calls `yed_setquote <priceMicroUsd> <sourceMask>`, `yed_setquote 0` after `fail_polls` failed aggregates (L5), RPC failures retried and never fatal; `--once`, `--dry-run`, `--mock-price <file>`, `sources` | done; `qa/rpc-tests/yellowback_quote.py` runs three of them against pool nodes |
+| `yellowback-quote` | The quote agent daemon: `--conf <toml>`, polls every `poll_seconds` (75, one block) and calls `yed_setquote <priceMicroUsd> <sourceMask>` on every poll, `yed_setquote 0` after `fail_polls` failed aggregates (L5), RPC failures retried and never fatal; `--once`, `--dry-run`, `--mock-price <file>`, `sources` | done; `qa/rpc-tests/yellowback_quote.py` runs three of them against pool nodes |
 | `pool/` | Pool-integration kit: `yellowback-quote.toml.sample`, `check-coinbase`, `monitor-quote.sh`, systemd/launchd units, `README.md` with the carriers and per-stack notes | tools done; the per-stack notes stay a skeleton until the operator survey (§12 Q9) |
 | `test_yellowback_price.py`, `test_yellowback_quote.py` | Unit tests, no node, no network: `python3 -m unittest contrib/yellowback/test_yellowback_price.py contrib/yellowback/test_yellowback_quote.py` | done |
 | `attest/` | **v3** attestor agent `yellowback-attest` (Rust; `attest`, `subscribe`, `sources`, `check-config`), its `attest.toml.sample`, fixtures for the Rust/Python aggregator cross-check, systemd/launchd units; see below | crate done; devnet integration and the nightly functional test follow (v3 plan Phase A4) |
@@ -35,8 +35,8 @@ yellowback-quote [run|sources] --conf FILE [--mock-price FILE [--i-know-this-is-
 - Configuration (TOML): `[node] rpc_url` and either `rpc_cookie` or `rpc_user`/`rpc_password`
   (`rpc_timeout` optional; a file holding `rpc_password` must be mode 0600 or the agent exits 2,
   `--insecure-config-permissions` overrides; credentials over plain `http://` to a host other than
-  loopback need `allow_insecure_rpc = true`); `[quote] poll_seconds (30), fail_polls (2), twap_seconds (900),
-  min_sources (2), min_venues (2), min_btc_sources (2), outlier_bps (1000), silence_seconds (120),
+  loopback need `allow_insecure_rpc = true`); `[quote] poll_seconds (75), fail_polls (2), twap_seconds (900),
+  min_sources (2), min_venues (2), min_btc_sources (2), outlier_bps (1000), silence_seconds (180),
   fetch_timeout (15)`; `[[sources]]` and `[[btc_usd_sources]]` rows with `name, kind, url, path,
   quote, scale, timestamp_path, timestamp_unit, max_age, spread_path, spread_unit, bid_path, ask_path,
   max_spread_bps, reject_paths, headers, volume_path, mask_bit` plus the preset parameters

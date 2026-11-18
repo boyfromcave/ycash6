@@ -7,6 +7,12 @@ Notable changes
 Next release (beta4), changes since 6.22.0-beta3
 ------------------------------------------------
 
+- **Pool quote agent: one fetch and one `yed_setquote` per block.** `yellowback-quote` polled every
+  30 s, and every `yed_setquote` rebuilds the node's block template (2-3 rebuilds per 75 s block).
+  `poll_seconds` now defaults to 75 (configurable; 60-75 s suits the 75 s block), still pushing on
+  every poll so the tag's price is never older than one poll; `silence_seconds` is 180 so one missed
+  fetch keeps a source. A node where Yellowback is not active yet is reported once and asked again
+  every poll. Agent only; no node change (beta4 item 3b; `doc/yellowback-mining.md` §4).
 - **Snapshot restores: a mainnet restore with the node check is no longer refused.** In beta3,
   `contrib/bootstrap/ycash-bootstrap` with `--ycashd`/`--cli` refused every mainnet restore: before
   Vault is active `vault_getinfo.dbtip` is null, and the tool recorded no vault state hash where the
