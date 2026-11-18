@@ -287,6 +287,7 @@ leg_attribution() {
 OSV_ONLY=$(sed 's/[[:space:]]*#.*$//' <<'EOF_OSV_ONLY' | grep -v '^$' || true
 RUSTSEC-2024-0436   # contrib/yellowback/attest/Cargo.lock only (the agent's own deny.toml accepts it); not in the root graph
 RUSTSEC-2023-0089   # atomic-polyfill: only for targets without native atomics, outside cargo-deny's target graph ([graph] targets)
+RUSTSEC-2026-0543   # chrono: contrib/yellowback/attest/Cargo.lock only, via wmi (Windows-only), outside the agent's deny.toml targets; not in the root graph
 EOF_OSV_ONLY
 )
 
