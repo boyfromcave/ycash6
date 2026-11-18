@@ -23,7 +23,11 @@ rpc_cookie = "~/.ycash/.cookie"
 # allow_insecure_rpc = true
 
 [quote]
-poll_seconds = 30        # aggregate and push every 30 s
+poll_seconds = 75        # fetch and aggregate once a block (75 s)
+min_move_bps = 10        # push (`yed_setquote`) only when the aggregate moved more than 0.1 % from the node's quote ...
+heartbeat_seconds = 600  # ... or every 10 minutes, well inside the node's -yellowbackquotemaxage (1,800 s)
+                         # (and at once if the node no longer holds a quote, e.g. after a restart).
+                         # Every yed_setquote rebuilds the node's template; a new price is one new pool job.
 fail_polls = 2           # after this many consecutive failed aggregates: `yed_setquote 0` (no tag until the next good aggregate, L5)
 twap_seconds = 900       # per-source 15-minute window (VWAP where the venue reports volume, TWAP otherwise)
 min_sources = 2          # live sources needed after the outlier filter (fail closed below; see below)
@@ -36,7 +40,7 @@ min_venues = 2           # distinct venues among them
 # as a second venue on its own.
 min_btc_sources = 2      # live BTC/USD references before a BTC-quoted pair is converted
 outlier_bps = 1000       # sources more than 10 % from the median are dropped
-# silence_seconds = 120  # a source with no sample this long is dropped from the median
+# silence_seconds = 180  # a source with no sample this long is dropped from the median (one missed fetch is tolerated)
 # fetch_timeout = 15
 
 # Source-mask bits (§5 registry): 0 SafeTrade, 1 CoinGecko, 2 CoinMarketCap, 3 Nonkyc; 4-15 unassigned.

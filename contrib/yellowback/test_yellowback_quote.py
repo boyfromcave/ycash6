@@ -56,6 +56,7 @@ class FakeNode:
         self.calls = []
         self.fail = None          # an exception instance to raise, or None
         self.network = network
+        self.held = None          # the quote the node holds (micro), None after a clear or a restart
 
     def call(self, method, *params):
         self.calls.append((method,) + params)
@@ -63,8 +64,10 @@ class FakeNode:
             e, self.fail = self.fail, None
             raise e
         if method == "yed_getinfo":
-            return {"network": self.network, "height": 100}
+            return {"network": self.network, "height": 100,
+                    "miner": {"quoteKind": "quote" if self.held else "signal", "quoteAgeSeconds": 1 if self.held else None}}
         micro, mask = params
+        self.held = micro or None
         return {"priceMicroUsd": micro, "sourceMask": mask, "receivedAt": 1_788_673_100,
                 "nextTag": {"kind": "quote" if micro else "signal", "signal": True, "payoutAddress": "s1test"}}
 
@@ -105,12 +108,96 @@ class AgentTests(unittest.TestCase):
         logging.disable(logging.NOTSET)
 
     def test_publishes_every_good_poll(self):
+        # min_move_bps 0 (the QuoteAgent default): every good aggregate is pushed, the pre-beta4 behaviour
         node = FakeNode()
-        agent = yq.QuoteAgent(StubFeed([(432007, 0b1011, ["a", "b", "c"]), (432100, 0b0011, ["a", "b"])]), node)
+        agent = yq.QuoteAgent(StubFeed([(432007, 0b1011, ["a", "b", "c"]), (432100, 0b0011, ["a", "b"]), (432100, 0b0011, ["a", "b"])]), node)
         self.assertEqual(agent.poll(), "published")
         self.assertEqual(agent.poll(), "published")
-        self.assertEqual(node.setquotes(), [(432007, 0b1011), (432100, 0b0011)])
+        self.assertEqual(agent.poll(), "published")
+        self.assertEqual(node.setquotes(), [(432007, 0b1011), (432100, 0b0011), (432100, 0b0011)])
         self.assertEqual(agent.published, (432100, 0b0011))
+
+    def threshold_agent(self, script, node, now):
+        return yq.QuoteAgent(StubFeed(script), node, min_move_bps=10, heartbeat_seconds=600, clock=lambda: now[0])
+
+    def test_pushes_only_on_a_move_above_the_threshold(self):
+        # beta4 item 3b: every yed_setquote rebuilds the node's template, so an unchanged price is not pushed
+        node, now = FakeNode(), [1000.0]
+        script = [(500000, 3, ["a"]), (500000, 3, ["a"]), (500500, 1, ["a"]), (500501, 3, ["a"]), (500002, 3, ["a"]), (499499, 3, ["a"])]
+        agent = self.threshold_agent(script, node, now)
+        results = []
+        for _ in script:
+            now[0] += 75
+            results.append(agent.poll())
+        # 0.1 % of 500,000 is 500: a move of exactly 500 is not above it; 501 is (and is measured from the
+        # last pushed price, not from the previous poll)
+        self.assertEqual(results, ["published", "unchanged", "unchanged", "published", "unchanged", "published"])
+        self.assertEqual(node.setquotes(), [(500000, 3), (500501, 3), (499499, 3)])
+        # an unchanged poll asks the node whether it still holds the quote (one cheap read, no rebuild)
+        self.assertEqual([c[0] for c in node.calls].count("yed_getinfo"), 3)
+
+    def test_heartbeat_keeps_the_quote_fresh(self):
+        node, now = FakeNode(), [0.0]
+        agent = self.threshold_agent([(500000, 3, ["a"])] * 10, node, now)
+        results = []
+        for t in (0, 75, 525, 599, 600, 675, 1199, 1200):
+            now[0] = t
+            results.append(agent.poll())
+        self.assertEqual(results, ["published", "unchanged", "unchanged", "unchanged", "published", "unchanged", "unchanged", "published"])
+        self.assertEqual(len(node.setquotes()), 3)
+
+    def test_restarted_node_gets_the_quote_again(self):
+        node, now = FakeNode(), [0.0]
+        agent = self.threshold_agent([(500000, 3, ["a"])] * 3, node, now)
+        self.assertEqual(agent.poll(), "published")
+        node.held = None                                          # the node restarted: it holds no quote
+        now[0] = 75
+        self.assertEqual(agent.poll(), "published")
+        now[0] = 150
+        self.assertEqual(agent.poll(), "unchanged")
+        self.assertEqual(len(node.setquotes()), 2)
+
+    def test_threshold_after_a_clear_and_an_rpc_failure(self):
+        # after a clear (L5) or a failed push the next good aggregate is pushed whatever the price
+        node, now = FakeNode(), [0.0]
+        good = (500000, 3, ["a"])
+        agent = yq.QuoteAgent(StubFeed([good, None, None, good, good, good]), node, fail_polls=2, min_move_bps=10,
+                              heartbeat_seconds=600, clock=lambda: now[0])
+        self.assertEqual([agent.poll() for _ in range(4)], ["published", "failed", "cleared", "published"])
+        node.fail = ConnectionRefusedError("refused")             # the unchanged poll's yed_getinfo fails:
+        self.assertEqual(agent.poll(), "published")               # counted as "no quote held", pushed again
+        node.fail = ConnectionRefusedError("refused")
+        node.held = None
+        now[0] = 600                                              # the heartbeat's push fails ...
+        self.assertEqual(agent.poll(), "rpc-error")
+        self.assertIsNone(agent.published)
+        self.assertEqual(node.setquotes(), [(500000, 3), (0, 0), (500000, 3), (500000, 3), (500000, 3)])
+        script_more = StubFeed([good])
+        agent.feed = script_more
+        self.assertEqual(agent.poll(), "published")               # ... and the next good poll pushes again
+
+    def test_yellowback_not_active_is_retried_quietly(self):
+        # a node before its network's attestor set (testnet-yb-fast in beta3): every yed_* is "Method not found"
+        class Inactive(FakeNode):
+            active = False
+
+            def call(self, method, *params):
+                if not self.active:
+                    self.calls.append((method,) + params)
+                    raise yp.RpcError(-32601, "Method not found (Yellowback is not active: ...)")
+                return super().call(method, *params)
+        node, now = Inactive(), [0.0]
+        agent = self.threshold_agent([(500000, 3, ["a"])] * 3, node, now)
+        logging.disable(logging.NOTSET)
+        with self.assertLogs("yellowback-quote", level="DEBUG") as logs:
+            self.assertEqual(agent.poll(), "rpc-error")
+            self.assertEqual(agent.poll(), "rpc-error")
+            node.active = True
+            self.assertEqual(agent.poll(), "published")
+        levels = [r.levelname for r in logs.records]
+        self.assertEqual(levels.count("WARNING"), 1, logs.output)       # said once, not every poll
+        self.assertNotIn("ERROR", levels)
+        self.assertFalse(agent.inactive)
 
     def test_clears_after_fail_polls(self):
         # Rule: L5 clear after two failed polls
@@ -254,6 +341,10 @@ class MainTests(unittest.TestCase):
             "[node]\nrpc_url = 1\n[[sources]]\nname='a'\n",                                     # source without url/path
             MINIMAL + "\n[quote]\n",                                                            # duplicate table: TOML error
             MINIMAL.replace("fail_polls = 2", "fail_polls = 0"),
+            MINIMAL.replace("fail_polls = 2", "heartbeat_seconds = 1800"),                     # the node's quote would lapse
+            MINIMAL.replace("poll_seconds = 1", "poll_seconds = 700"),                          # heartbeat below poll
+            MINIMAL.replace("fail_polls = 2", "min_move_bps = -1"),
+            MINIMAL.replace("poll_seconds = 1", "poll_seconds = 0"),
             MINIMAL.replace("min_sources = 1", "min_sources = 0"),
             MINIMAL + "\n[extra]\nx = 1\n",
             MINIMAL.replace('rpc_user = "u"', 'rpc_user = "u"\nrpc_cookie = "/x"'),             # both auth forms
@@ -272,6 +363,14 @@ class MainTests(unittest.TestCase):
         cfg = yq.load_config(self.conf)
         self.assertEqual(cfg["node"], {"rpc_url": "http://127.0.0.1:18232", "rpc_user": "u", "rpc_password": "p"})
         self.assertEqual((cfg["quote"]["poll_seconds"], cfg["quote"]["fail_polls"], cfg["quote"]["twap_seconds"]), (1, 2, 900))
+        # the agent's own defaults (beta4 item 3b)
+        write(self.conf, MINIMAL.replace("poll_seconds = 1\n", ""))
+        q = yq.load_config(self.conf)["quote"]
+        self.assertEqual((q["poll_seconds"], q["silence_seconds"], q["min_move_bps"], q["heartbeat_seconds"]), (75, 180, 10, 600))
+        write(self.conf, MINIMAL.replace("poll_seconds = 1\n", "poll_seconds = 60\nmin_move_bps = 25\nheartbeat_seconds = 300\nsilence_seconds = 200\n"))
+        q = yq.load_config(self.conf)["quote"]
+        self.assertEqual((q["poll_seconds"], q["silence_seconds"], q["min_move_bps"], q["heartbeat_seconds"]), (60, 200, 25, 300))
+        write(self.conf, MINIMAL)
         self.assertEqual(cfg["sources"][0]["venue"], "nowhere")
         node = yq.make_node(cfg["node"])
         self.assertEqual((node.url, node.auth), ("http://127.0.0.1:18232", yp.base64.b64encode(b"u:p").decode()))
@@ -297,7 +396,8 @@ class MainTests(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             code = yq.main(["--conf", self.conf, "--mock-price", self.mock], node_factory=lambda cfg: self.node, sleep=sleep)
         self.assertEqual(code, 0)
-        self.assertEqual(self.node.setquotes(), [(50000, 0), (50000, 0)])
+        self.assertEqual(self.node.setquotes(), [(50000, 0)])     # the second poll: same price, the node holds it
+        self.assertEqual([c[0] for c in self.node.calls], ["yed_getinfo", "yed_setquote", "yed_getinfo"])
         self.assertTrue(all(0 < d <= 1 for d in polls))
 
     def test_stop_during_a_poll_is_not_swallowed(self):
@@ -354,7 +454,7 @@ class MainTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             code = yq.main(["--conf", self.conf, "--mock-price", self.mock], node_factory=lambda cfg: node, sleep=sleep)
         self.assertEqual(code, 0)
-        self.assertEqual(node.setquotes(), [(50000, 0), (50000, 0)])   # one retry of yed_getinfo, then two polls
+        self.assertEqual(node.setquotes(), [(50000, 0)])   # one retry of yed_getinfo, then two polls (the second: same price, held)
         # --dry-run never asks the node; the sources path does not involve the mock
         code, _ = self.run_main("--conf", self.conf, "--dry-run", "--mock-price", self.mock, node=FakeNode("main"))
         self.assertEqual(code, 0)

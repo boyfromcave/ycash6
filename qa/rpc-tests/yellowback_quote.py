@@ -213,6 +213,17 @@ class YellowbackQuoteTest(YellowbackTestFramework):
         tip = nodes[0].getblockcount()
         assert_equal(nodes[0].yed_gettag(str(tip))['priceMicroUsd'], 2_000_000)
 
+        print('an unchanged price is not pushed again: the node keeps its quote (beta4 item 3b)')
+        # every yed_setquote rebuilds the node's template; at one poll a second the agent pushed once
+        # (the first quote) and has kept the node's quote on every poll since
+        time.sleep(4 * POLL_SECONDS)
+        for i in POOLS:
+            assert_equal(self.miner(i)['quoteKind'], 'quote')
+            with open(os.path.join(self.options.tmpdir, 'quote-%d.log' % i)) as f:
+                pushes = [l for l in f if ' published ' in l]
+            assert_equal(len(pushes), 1)
+            assert '(new)' in pushes[0], pushes
+
         print('the mock changes: the next tags carry the new price')
 # Rule: MINER-1 TAG-3
         for i in POOLS:
