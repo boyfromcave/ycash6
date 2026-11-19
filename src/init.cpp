@@ -2396,6 +2396,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             SetMiscWarning(heldWarning, GetTime());
         }
     }
+    if (pwalletMain) {
+        // Beta4 (item 2b): a restore whose start-up scan reached the tip of a chain no block extends completes once the
+        // node stays at its header tip with peers (CWallet::MaybeCompleteRestore).
+        scheduler.scheduleEvery([] { if (pwalletMain) pwalletMain->MaybeCompleteRestore(); }, 5);
+    }
 #else // ENABLE_WALLET
     LogPrintf("No wallet support compiled in!\n");
 #endif // !ENABLE_WALLET

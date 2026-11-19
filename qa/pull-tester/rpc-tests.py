@@ -110,6 +110,8 @@ BASE_SCRIPTS= [
     'wallet_reindex_chainstate.py',
     # beta3: a post-quantum miner shields its coinbase with z_sendmany (mature only, shielded recipients, no change).
     'wallet_pq_coinbase_spend.py',
+    'wallet_pq_shieldcoinbase.py',
+    'wallet_restore_parked_chain.py',
     # ycash-bootstrap against a real node (testnet plan §4.4): a regtest bundle packed, a changed chunk
     # refused, the bundle restored by a real import. Byte-identical on both lines.
     'ycash_bootstrap.py',

@@ -358,9 +358,9 @@ getcoinbasetemplatefor "address" {"previousblockhash": "<hex>", "txids": ["<hex>
 - The node keeps nothing between calls, and `getblocktemplate` and `submitblock` are unchanged.
   The call needs neither a wallet nor `-mineraddress`.
 - A reward paid to a transparent address (ECC or post-quantum) is spendable after 101 confirmations and, on
-  mainnet and the testnets, can then only be sent to shielded addresses with no change: an ECC
-  miner uses `z_shieldcoinbase`, a post-quantum miner `z_sendmany` from its address to a Sapling
-  address (`doc/yellowback-rpc.md`, "A post-quantum miner shields its coinbase"; for a pool and its
+  mainnet and the testnets, can then only be sent to shielded addresses with no change: a miner
+  uses `z_shieldcoinbase` from its address (ECC or, since beta4, post-quantum) to a Sapling address;
+  a post-quantum miner may also `z_sendmany` the exact amount (`doc/yellowback-rpc.md`, "A post-quantum miner shields its coinbase"; for a pool and its
   miners, "A reward paid to a post-quantum address" below). A reward paid to a Sapling address needs
   neither.
 - The call checks that each named transaction is in the mempool, not that the set is complete or in
@@ -427,10 +427,24 @@ the requests a pool has in flight and set `-rpcthreads` to that cap plus two or 
   ```
 
   Sending 6.249935 instead moves the one reward and leaves the other for the next call.
-- **ycashd's `z_shieldcoinbase` and `z_mergetoaddress` do not move it**: ycashd's `z_shieldcoinbase`
-  refuses a post-quantum source and `z_mergetoaddress` leaves its coinbase out. (yewd's
-  `z_shieldcoinbase` does move a post-quantum reward, at the exact amount with no change: a
-  yewd-only extension.) A transparent (ECC or
+- **ycashd and yewd move it with `z_shieldcoinbase` (beta4)**: named as the `fromaddress`, a
+  post-quantum address shields its mature rewards to one Sapling address at the exact amount (the
+  rewards less the fee), with no change, largest first, up to `limit` (default 50; 0 or more than
+  100 means 100, `MAX_PQ_INPUTS_PER_TX`); `remainingUTXOs` counts the rest for the next call. The
+  fee is the one the exact-amount `z_sendmany` below names for the same rewards (an explicit fee
+  below it is refused). The same call, arguments and refusals on both C++ lines and in yewd:
+
+  ```
+  z_shieldcoinbase "<sqf… address>" "<ys1… address>"
+    -> {"remainingUTXOs": 0, "remainingValue": 0.00, "shieldingUTXOs": 2, "shieldingValue": 12.50, "opid": …}
+  z_shieldcoinbase "<sqf… address>" "<ys1… address>"      (only immature rewards)
+    -> -6 Could not find any coinbase funds to shield. The address holds 6.25 YEC of immature mining
+          rewards (coinbase); a mining reward can be shielded after 101 confirmations, the first of
+          these in 37 more blocks.
+  ```
+
+  `z_shieldcoinbase "*"` still takes ECC rewards only, and `z_mergetoaddress` leaves coinbase out.
+  A transparent (ECC or
   post-quantum) recipient never receives it; the refusal names the mining rewards the address holds
   and the exact amount that sends them to one Sapling address, for example (beta4):
 
@@ -443,7 +457,8 @@ the requests a pool has in flight and set `-rpcthreads` to that cap plus two or 
   ```
 
   A reward under 101 confirmations is named with the confirmations it still needs, coins that
-  `minconf` left out are named with it, and `sendtoaddress`, `sendmany` and `z_shieldcoinbase "*"`
-  say when the wallet's only funds are such rewards and that `z_sendmany` moves them.
+  `minconf` left out are named with it, `sendtoaddress` and `sendmany` say when the wallet's only
+  funds are such rewards and that `z_sendmany` moves them, and `z_shieldcoinbase "*"` that naming
+  the address shields them.
 - **A transparent (ECC) reward and a Sapling reward are unchanged**: an ECC reward is shielded with
   `z_shieldcoinbase` after 101 confirmations, a Sapling reward is an ordinary note.
