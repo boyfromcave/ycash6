@@ -577,6 +577,8 @@ tip = st["tip"]
 h = lambda n: "%%064x" %% n
 cmd = args[0]
 if cmd == "getblockcount" and os.environ.get("FAKE_WARMUP"): sys.exit("error code: -28")   # never leaves warm-up
+elif cmd == "getblockcount" and not os.path.exists(os.path.join(datadir, net, "fake-peers.json")):
+    sys.exit("error code: -28")   # the stand-in node has not started yet (it writes fake-peers.json first): warming up
 elif cmd == "getblockcount": print(tip)
 elif cmd == "getblockhash": print(h(int(args[1])))
 elif cmd == "getblockheader": print(json.dumps({"chainwork": "%%064x" %% (int(args[1], 16) * 3)}))
