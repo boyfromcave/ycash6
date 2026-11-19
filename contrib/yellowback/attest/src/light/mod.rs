@@ -1136,14 +1136,18 @@ pub mod fake {
         pub collateral_zat: i64,
         pub minted_cents: i64,
         /// bump every hash by this (a lying endpoint)
-        pub hash_salt: u8,
+        pub hash_fork: u8,
         pub down: bool,
     }
 
-    pub fn h(height: u32, salt: u8) -> String {
-        let mut b = [salt; 32];
-        b[0..4].copy_from_slice(&height.to_le_bytes());
-        hex::encode(b)
+    /// The fake chain's block hash at `height`: SHA-256 of the height and the chain's `fork` byte, so two fakes
+    /// with different bytes disagree at every height.
+    pub fn h(height: u32, fork: u8) -> String {
+        use sha2::{Digest, Sha256};
+        let mut d = Sha256::new();
+        d.update(height.to_le_bytes());
+        d.update([fork]);
+        hex::encode(d.finalize())
     }
 
     impl Chain {
@@ -1163,7 +1167,7 @@ pub mod fake {
                 ])),
                 Req::Set(_) => Ok(json!({"memberlist": [{"key": self.key_hex, "current": true}]})),
                 Req::Block(height) if *height as u32 <= self.tip => {
-                    Ok(json!({"height": height, "hash": h(*height as u32, self.hash_salt), "vtx": []}))
+                    Ok(json!({"height": height, "hash": h(*height as u32, self.hash_fork), "vtx": []}))
                 }
                 Req::Block(_) => Err(RpcError::Node {
                     code: 11,
@@ -1223,7 +1227,7 @@ mod tests {
             ref_height: 90,
             collateral_zat: 10 * 100_000_000,
             minted_cents: 100 * 100,
-            hash_salt: 0,
+            hash_fork: 0,
             down: false,
         }
     }
@@ -1323,8 +1327,8 @@ mod tests {
             .await);
         assert!(e.starts_with("equivocation-guard"), "{e}");
         // after a reorg across citedHeight (another hash) a new price is not equivocation
-        rig.set(0, |c| c.hash_salt = 7);
-        rig.set(1, |c| c.hash_salt = 7);
+        rig.set(0, |c| c.hash_fork = 7);
+        rig.set(1, |c| c.hash_fork = 7);
         let v2 = l
             .call("yed_signattestation", vec![json!(1), json!(51_000), json!(98)])
             .await
@@ -1360,7 +1364,7 @@ mod tests {
         // B-7: both answer with different hashes: nothing is signed, and nothing is recorded
         rig.set(0, |c| {
             c.down = false;
-            c.hash_salt = 9
+            c.hash_fork = 9
         });
         let e = err(l
             .call("yed_signattestation", vec![json!(1), json!(52_000), json!(97)])
@@ -1370,7 +1374,7 @@ mod tests {
         assert_eq!(l.guard.lock().await.len(), 1);
         // an endpoint behind the cited height is not counted
         rig.set(0, |c| {
-            c.hash_salt = 0;
+            c.hash_fork = 0;
             c.tip = 90
         });
         l.call("yed_signattestation", vec![json!(1), json!(52_000), json!(97)])

@@ -1454,7 +1454,7 @@ pub struct YedValidation {
 }
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct YedPayload {
     #[prost(int64, tag = "1")]
     pub attest_fee_vout: i64,
@@ -1482,6 +1482,42 @@ pub struct YedPayload {
     /// rpcversion 7 (MINT): the owner's scheme and 32-byte key hash (hex)
     #[prost(string, tag = "13")]
     pub owner_hash: ::prost::alloc::string::String,
+    /// When the hex is a raw transaction (beta4 item 3d: the light seat's cancel watcher reads a claim's bundle):
+    /// the payload output's index and the carrier input's bundle, decoded only, never verified.
+    #[prost(int64, tag = "14")]
+    pub op_return_index: i64,
+    #[prost(message, optional, tag = "15")]
+    pub bundle: ::core::option::Option<YedPayloadBundle>,
+}
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct YedBundleAttestation {
+    #[prost(int64, tag = "1")]
+    pub seq: i64,
+    #[prost(int64, tag = "2")]
+    pub price_micro_usd: i64,
+    #[prost(int64, tag = "3")]
+    pub cited_height: i64,
+    #[prost(string, tag = "4")]
+    pub sig: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub hex: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct YedPayloadBundle {
+    #[prost(int64, tag = "1")]
+    pub vin: i64,
+    #[prost(string, tag = "2")]
+    pub hash: ::prost::alloc::string::String,
+    #[prost(int64, tag = "3")]
+    pub version: i64,
+    #[prost(int64, tag = "4")]
+    pub count: i64,
+    #[prost(message, repeated, tag = "5")]
+    pub attestations: ::prost::alloc::vec::Vec<YedBundleAttestation>,
 }
 /// rpcversion 5: a CLAIMING vault's claim intents (claimant / residual), released by vault_release at releaseHeight.
 #[derive(serde::Serialize)]

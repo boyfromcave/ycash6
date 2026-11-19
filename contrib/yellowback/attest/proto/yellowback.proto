@@ -163,6 +163,13 @@ message YedPayload {
   int64 attestFeeVout = 1; int64 cents = 2; int64 feeVout = 3; int64 lockHeight = 4; string reason = 6;
   int64 refHeight = 7; string termClass = 8; string type = 9; bool valid = 10; int64 version = 11;   // version: 4 for a MINT, 3 otherwise
   int64 ownerScheme = 12; string ownerHash = 13;                      // rpcversion 7 (MINT): the owner's scheme and 32-byte key hash (hex)
+  // When the hex is a raw transaction (beta4 item 3d: the light seat's cancel watcher reads a claim's bundle):
+  // the payload output's index and the carrier input's bundle, decoded only, never verified.
+  int64 opReturnIndex = 14; YedPayloadBundle bundle = 15;
+}
+message YedBundleAttestation { int64 seq = 1; int64 priceMicroUsd = 2; int64 citedHeight = 3; string sig = 4; string hex = 5; }
+message YedPayloadBundle {
+  int64 vin = 1; string hash = 2; int64 version = 3; int64 count = 4; repeated YedBundleAttestation attestations = 5;
 }
 
 // ---- vaults --------------------------------------------------------------------------------

@@ -201,6 +201,14 @@ which answers it with the node's JSON shape:
   `yew-attestor` from fresh coins); an on-chain record funded from an address that is not a member's is not seen by
   the scan. Without `yew_attestor` the seat signs and co-signs but sends no heartbeat, drives no cancel and posts no
   fallback.
+- **The servers' budget.** A seat polls every `poll_seconds` (its cancel watcher included), and the seats of one host
+  share its address, so a lightwalletd-dd that seats use needs a larger per-peer budget than its phone-sized default
+  (`--yellowback-rate-burst`, `--yellowback-rate-interval`; lightwalletd-dd `docs/yellowback.md`). Its `DecodePayload`
+  must take a raw transaction and return the carrier's bundle (lightwalletd-dd 4cb5fcb and later).
+- **Tested end to end** by `qa/rpc-tests/yellowback_cancel_agent_light.py`: four light seats on two servers on two
+  nodes cancel a wrong-price claim three times (1, 2 and 3 co-signatures, the leader down for the second, the
+  on-chain fallback alone for the third) and leave an honest claim alone (needs `LIGHTWALLETD_BIN`,
+  `YEW_ATTESTOR_BIN`).
 - **The generated client.** `src/light/proto.rs` is generated from `proto/*.proto` (byte copies of lightwalletd-dd's,
   pinned in `proto/PIN`) by `proto/regen.sh`, which needs `protoc`; the agent's build does not.
 
