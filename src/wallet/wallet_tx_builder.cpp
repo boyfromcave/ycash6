@@ -639,7 +639,8 @@ WalletTxBuilder::PreparePQTransaction(
         resolvedPayments.begin(), resolvedPayments.end(), [](const ResolvedPayment& r) {
             return std::holds_alternative<CKeyID>(r.address) || std::holds_alternative<CScriptID>(r.address);
         });
-    const CAmount immatureCoinbase = PQImmatureCoinbase(wallet, GetScriptForDestination(source));
+    int immatureBlocks = 0;
+    const CAmount immatureCoinbase = PQImmatureCoinbase(wallet, GetScriptForDestination(source), &immatureBlocks);
     // Defence in depth (the coin locks already keep every YED output out of AvailableCoins): a coin the Yellowback
     // index knows as a token or vault, an unconfirmed output a Yellowback payload assigns YED, or a carrier, is never
     // spent as plain YEC; the send goes on with the other coins and is refused, naming them, only if it needs them.
@@ -669,10 +670,59 @@ WalletTxBuilder::PreparePQTransaction(
         std::sort(coins.begin(), coins.end(), largestFirst);
         return true;
     };
+    // Beta4 (REPORT item 7): what the refusal names. For mature coinbase left out (a recipient is transparent): the one
+    // amount that moves the rewards (largest first, as many as one transaction carries) to one Sapling address with no
+    // change, priced as that send is (no transparent output, one Sapling output padded to two).
+    const auto leftOut = [&](bool withCoinbase) -> PQFundsLeftOut {
+        PQFundsLeftOut left;
+        left.immature = immatureCoinbase;
+        left.immatureBlocks = immatureBlocks;
+        left.belowMinconf = PQBelowMinconf(wallet, GetScriptForDestination(source), minDepth);
+        left.minDepth = minDepth;
+        if (!withCoinbase || coinbaseCoins.empty()) return left;
+        left.coinbase = coinbaseValue;
+        left.coinbaseCoins = coinbaseCoins.size();
+        std::vector<COutput> cb = coinbaseCoins;
+        std::sort(cb.begin(), cb.end(), largestFirst);
+        if (cb.size() > MAX_PQ_INPUTS_PER_TX) cb.erase(cb.begin() + MAX_PQ_INPUTS_PER_TX, cb.end());
+        const std::vector<ResolvedPayment> toSapling = {
+            ResolvedPayment(std::nullopt, libzcash::SaplingPaymentAddress(), 0, std::nullopt, false)};
+        while (!cb.empty()) {
+            std::vector<std::pair<CScript, CAmount>> ins;
+            std::vector<CScript> prevScripts;
+            SpendableInputs cbInputs;
+            CAmount sum = 0;
+            for (const COutput& c : cb) {
+                ins.emplace_back(c.tx->vout[c.i].scriptPubKey, c.Value());
+                prevScripts.push_back(c.tx->vout[c.i].scriptPubKey);
+                cbInputs.utxos.push_back(c);
+                sum += c.Value();
+            }
+            const CTransaction shape = PQFeeShape(nHeight, ins, {}, 0, PadCount(1));
+            try {
+                EnsurePQShapeStandard(shape, prevScripts, cb.size());
+            } catch (const UniValue&) {
+                cb.pop_back();
+                continue;
+            }
+            const CAmount base = fee.has_value() ? fee.value() :
+                CalcZIP317Fee(wallet, cbInputs, toSapling, std::nullopt, consensusBranchId, {});
+            const CAmount needed = PQBuilderFee(base, shape);
+            const CAmount cbFee = fee.has_value() ? std::max(fee.value(), needed) : needed;
+            if (sum > cbFee) {
+                left.coinbaseSend = sum - cbFee;
+                left.coinbaseSelected = sum;
+                left.coinbaseFee = cbFee;
+                left.coinbaseSelectedCoins = cb.size();
+            }
+            break;
+        }
+        return left;
+    };
     if (coins.empty() && !addCoinbase()) {
         if (!yedRefusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, PQInsufficientFunds(
-            "Insufficient transparent funds, no UTXOs found for taddr from address.", coinbaseValue, immatureCoinbase));
+            "Insufficient transparent funds, no UTXOs found for taddr from address.", true, leftOut(true)));
     }
     std::sort(coins.begin(), coins.end(), largestFirst);
 
@@ -721,7 +771,7 @@ WalletTxBuilder::PreparePQTransaction(
             throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, PQInsufficientFunds(
                                strprintf("Insufficient transparent funds, have %s, need %s",
                                          FormatMoney(sum), FormatMoney(target)),
-                               coinbaseCoins.empty() ? 0 : coinbaseValue, immatureCoinbase));
+                               false, leftOut(!coinbaseCoins.empty())));
         }
         // A send that spends coinbase makes no change output: what is left over is refused below.
         const bool spendsCoinbase = std::any_of(selected.begin(), selected.end(), [](const COutput& o) { return o.fIsCoinbase; });

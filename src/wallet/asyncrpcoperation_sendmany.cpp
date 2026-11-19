@@ -71,6 +71,26 @@ AsyncRPCOperation_sendmany::AsyncRPCOperation_sendmany(
 AsyncRPCOperation_sendmany::~AsyncRPCOperation_sendmany() {
 }
 
+// Beta4 (REPORT item 7): the sentence an insufficient-funds refusal adds when minconf left some of the source's funds
+// out (MinconfNote, the reference line's text); "" for a source that is not one address and when nothing was left out.
+static std::string SelectorMinconfNote(
+        const WalletTxBuilder& builder, const CWallet& wallet, const ZTXOSelector& selector, int minDepth)
+{
+    if (minDepth <= 0) return "";
+    const bool oneAddress = examine(selector.GetPattern(), match {
+        [](const CKeyID&) { return true; },
+        [](const CScriptID&) { return true; },
+        [](const libzcash::SproutPaymentAddress&) { return true; },
+        [](const libzcash::SaplingPaymentAddress&) { return true; },
+        [](const libzcash::UnifiedAddress&) { return true; },
+        [](const auto&) { return false; },
+    });
+    if (!oneAddress) return "";
+    const CAmount below = builder.FindAllSpendableInputs(wallet, selector, 0).Total() -
+                          builder.FindAllSpendableInputs(wallet, selector, minDepth).Total();
+    return MinconfNote(below, minDepth);
+}
+
 void AsyncRPCOperation_sendmany::main() {
     if (isCancelled())
         return;
@@ -86,7 +106,9 @@ void AsyncRPCOperation_sendmany::main() {
     try {
         txid = main_impl(*pwalletMain)
             .map_error([&](const InputSelectionError& err) {
-                ThrowInputSelectionError(err, ztxoSelector_, strategy_);
+                ThrowInputSelectionError(err, ztxoSelector_, strategy_,
+                    std::holds_alternative<InvalidFundsError>(err) && !pqSource_.has_value()
+                        ? SelectorMinconfNote(builder_, *pwalletMain, ztxoSelector_, mindepth_) : "");
             })
             .value();
     } catch (const UniValue& objError) {

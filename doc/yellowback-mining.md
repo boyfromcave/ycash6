@@ -393,10 +393,17 @@ the requests a pool has in flight and set `-rpcthreads` to that cap plus two or 
 
 ### A reward paid to a post-quantum address
 
-- **Pay it to an address held in a ycashd or yewd wallet.** The YEW phone app and the web wallet cannot
+- **Pay it to an address held in a ycashd or yewd wallet; a YEW app or web address is not suitable.**
+  A coinbase output must be shielded first, to a Sapling address, at the exact amount (the selected
+  rewards less the fee, no change). The YEW phone app and the web wallet cannot do that: they cannot
   tell that a coin is a coinbase (the light-client coin listing, lightwalletd's `GetAddressUtxos`,
-  carries no such flag): they show the reward as spendable, and the node refuses their sends until
+  carries no such flag), so they show the reward as spendable, and the node refuses their sends until
   the coin is 100 blocks deep and the send has only shielded recipients and no change.
+- **Already paid at a YEW app or web address?** The reward is not lost. Restore the YEW recovery
+  phrase in yewd (`-mnemonicfile=<file>`, a new wallet, which then scans from genesis), `z_sendmany`
+  the exact amount from the post-quantum address to a Sapling address of that wallet, as below, and
+  then send it on from the Sapling address. The full procedure is in the yewd README
+  ([`yew/yewd/README.md`](https://github.com/boyfromcave/yew/blob/upgrade/vault/yewd/README.md)).
 - **Move it with `z_sendmany` from the address to a shielded address**, once it has 101
   confirmations (`listunspent` and `balance_pq` show it from then on). The wallet takes the
   address's largest coins first, and a selection that holds a coinbase allows no change, so name an
@@ -422,6 +429,19 @@ the requests a pool has in flight and set `-rpcthreads` to that cap plus two or 
   Sending 6.249935 instead moves the one reward and leaves the other for the next call.
 - **`z_shieldcoinbase` and `z_mergetoaddress` do not move it**: `z_shieldcoinbase` refuses a
   post-quantum source and `z_mergetoaddress` leaves its coinbase out. A transparent (ECC or
-  post-quantum) recipient never receives it; the refusal names the coinbase the address holds.
+  post-quantum) recipient never receives it; the refusal names the mining rewards the address holds
+  and the exact amount that sends them to one Sapling address, for example (beta4):
+
+  ```
+  z_sendmany "<sqf… address>" '[{"address":"<ys1… address>","amount":1}]'
+    -> -6 Insufficient transparent funds: this address has no coins this send can spend. The address
+          holds 12.50 YEC of mining rewards (coinbase), which can only be sent to a shielded (Sapling)
+          address, with no change: send exactly <a> to one Sapling address (the 12.50 of rewards less
+          the fee <f>).
+  ```
+
+  A reward under 101 confirmations is named with the confirmations it still needs, coins that
+  `minconf` left out are named with it, and `sendtoaddress`, `sendmany` and `z_shieldcoinbase "*"`
+  say when the wallet's only funds are such rewards and that `z_sendmany` moves them.
 - **A transparent (ECC) reward and a Sapling reward are unchanged**: an ECC reward is shielded with
   `z_shieldcoinbase` after 101 confirmations, a Sapling reward is an ordinary note.

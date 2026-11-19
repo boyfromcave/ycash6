@@ -20,6 +20,11 @@ the post-quantum address builds exactly that:
     4. with a transparent or post-quantum recipient the coinbase is never selected, and the refusal says what the
        address holds in coinbase; immature coinbase is named the same way.
 
+Beta4 (REPORT item 7, clearer refusals): the refusal calls coinbase "mining rewards", names the one amount that sends
+them to a Sapling address (and the test sends it), the confirmations an immature reward still needs, and the coins
+minconf left out (also for a Sapling source, where coinbase is not the cause); sendtoaddress and z_shieldcoinbase say
+where the rewards are and that z_sendmany moves them. An address with nothing at all keeps the old text.
+
 Every refusal below is the wallet's (the RPC or its operation), never the mempool's.
 
 Two separate two-node networks run the same steps, one with -regtestshieldcoinbase and one without:
@@ -64,9 +69,23 @@ COIN = 100000000
 MATURE_AT = 101              # confirmations at which the wallet spends a coinbase output (COINBASE_MATURITY + 1)
 INSUFFICIENT, WALLET_ERROR, INVALID_PARAMETER = -6, -4, -8
 
-NO_UTXOS = 'Insufficient transparent funds, no UTXOs found for taddr from address.'
-COINBASE_NOTE = ' The address holds %s of coinbase funds, which can only be sent to shielded recipients, with no change.'
-IMMATURE_NOTE = ' The address holds %s of immature coinbase funds, which can be sent to shielded recipients only, with no change, after 101 confirmations.'
+NO_UTXOS = 'Insufficient transparent funds, no UTXOs found for taddr from address.'   # an empty address (unchanged)
+# beta4 (REPORT item 7): the refusal names what the address holds and what to do with it
+NO_COINS = 'Insufficient transparent funds: this address has no coins this send can spend.'
+COINBASE_NOTE = re.compile(
+    r' The address holds ([0-9.]+) YEC of mining rewards \(coinbase\), which can only be sent to a shielded \(Sapling\) '
+    r'address, with no change: send exactly ([0-9.]+) to one Sapling address \(the ([0-9.]+) of rewards less the fee '
+    r'([0-9.]+)\)\.')
+IMMATURE_NOTE = (' The address holds %s YEC of mining rewards that are not spendable yet: a reward needs 101 confirmations, '
+                 'and the next one needs %d more; it can then only be sent to a shielded (Sapling) address, with no change.')
+MINCONF_NOTE = (' The address holds %s YEC with fewer than the %d confirmation%s this send requires (minconf): wait for them, '
+                'or pass a lower minconf.')
+SEND_PQ_COINBASE = ('this wallet also holds %s YEC of mining rewards (coinbase) at post-quantum addresses, which can only be '
+                    'sent to a shielded (Sapling) address, with no change: send them with z_sendmany from the address that '
+                    'holds them, which names the exact amount to send')
+SHIELD_PQ_COINBASE = (' The wallet holds %s YEC of mining rewards (coinbase) at post-quantum addresses, which z_shieldcoinbase '
+                      'does not spend: send them with z_sendmany from the address that holds them to a Sapling address, with '
+                      'no change; z_sendmany names the exact amount to send.')
 CHANGE_REFUSAL = re.compile(
     r'^When shielding coinbase funds, the wallet does not allow any change\. The proposed transaction would result in '
     r'([0-9.]+) in change\. To spend the selected coins, send exactly ([0-9.]+) to shielded recipients '
@@ -88,6 +107,22 @@ def money(z):
     s = '%d.%08d' % (z // COIN, z % COIN)
     s = s.rstrip('0')
     return s + '0' * max(0, 2 - len(s.split('.')[1]))
+
+
+def minconf_note(z, n):
+    return MINCONF_NOTE % (money(z), n, '' if n == 1 else 's')
+
+
+def coinbase_hint(message, held):
+    """The mining-rewards sentence of a refusal (held: the zat the address holds in mature coinbase): returns the
+    (amount to send, fee) it names, in zat, and the message with the sentence removed."""
+    m = COINBASE_NOTE.search(message)
+    assert m, message
+    assert_equal(zat(m.group(1)), held)
+    assert_equal(zat(m.group(3)), held)
+    send, fee = zat(m.group(2)), zat(m.group(4))
+    assert fee > 0 and send == held - fee, message
+    return send, fee, message[:m.start()] + message[m.end():]
 
 
 def block_from(gbt, coinbase_hex):
@@ -175,12 +210,16 @@ class WalletPQCoinbaseSpendTest(BitcoinTestFramework):
             time.sleep(0.1)
         assert_equal(got, expected)
 
-    def refused(self, src, outs, code, fee=None):
+    def blocks_left(self, txid):
+        """The confirmations coinbase `txid` still needs before the wallet spends it."""
+        return MATURE_AT - self.wallet.gettransaction(txid)['confirmations']
+
+    def refused(self, src, outs, code, fee=None, minconf=1):
         """z_sendmany src -> outs is refused by the wallet (the RPC itself or its operation) with `code`; nothing
         reaches the mempool. Returns the message."""
         before = sorted(self.wallet.getrawmempool())
         try:
-            opid = z_sendmany_opid(self.wallet, src, outs, 1, fee)
+            opid = z_sendmany_opid(self.wallet, src, outs, minconf, fee)
         except JSONRPCException as e:
             error = e.error
         else:
@@ -194,7 +233,10 @@ class WalletPQCoinbaseSpendTest(BitcoinTestFramework):
             assert result is not None, 'operation timed out'
             assert_equal(result['status'], 'failed')
             error = result['error']
-        assert_equal(error['code'], code)
+        if code is not None:
+            assert_equal(error['code'], code)
+        else:
+            assert error['code'] in (INSUFFICIENT, INVALID_PARAMETER), error
         assert_equal(sorted(self.wallet.getrawmempool()), before)
         assert 'bad-txns' not in error['message'] and 'CommitTransaction' not in error['message'], error
         return error['message']
@@ -269,21 +311,27 @@ class WalletPQCoinbaseSpendTest(BitcoinTestFramework):
         for a in (fn, slh, mix):
             assert_equal(self.unspent(a), [])
             assert_equal(zat(wallet.z_getbalance(a)), 0)
-        for a, held in ((fn, 2 * reward), (slh, 2 * reward), (mix, reward)):
+        for a, held, first in ((fn, 2 * reward, fn_a[0]), (slh, 2 * reward, slh_a[0]), (mix, reward, mix_cb[0])):
             for outs in ([(z, yec(reward) - 1)], [(t, Decimal('1'))]):
-                assert_equal(self.refused(a, outs, INSUFFICIENT), NO_UTXOS + IMMATURE_NOTE % money(held))
+                assert_equal(self.refused(a, outs, INSUFFICIENT),
+                             NO_COINS + IMMATURE_NOTE % (money(held), self.blocks_left(first)))
 
         print('an ordinary coin for the mixed address (from a Sapling coinbase note)')
         ordinary = zat('2')
         fund_txid = wait_and_assert_operationid_status(wallet, z_sendmany_opid(wallet, z_src, [(mix, yec(ordinary))]))
+        # unconfirmed, and then below a minconf of 5: the refusal names minconf
+        assert_equal(self.refused(mix, [(z, Decimal('1'))], INSUFFICIENT),
+                     NO_COINS + IMMATURE_NOTE % (money(reward), self.blocks_left(mix_cb[0])) + minconf_note(ordinary, 1))
         self.mine()
         assert_equal(self.unspent(mix), [(fund_txid, ordinary, False)])
+        assert_equal(self.refused(mix, [(t, Decimal('1'))], INSUFFICIENT, minconf=5),
+                     NO_COINS + IMMATURE_NOTE % (money(reward), self.blocks_left(mix_cb[0])) + minconf_note(ordinary, 5))
 
         print('100 confirmations are not enough; 101 are')
         self.mine_to(fn_a[2] + MATURE_AT - 2)
         assert_equal(wallet.gettransaction(fn_a[0])['confirmations'], MATURE_AT - 1)
         assert_equal(self.unspent(fn), [])
-        assert_equal(self.refused(fn, [(z, yec(reward) - 1)], INSUFFICIENT), NO_UTXOS + IMMATURE_NOTE % money(2 * reward))
+        assert_equal(self.refused(fn, [(z, yec(reward) - 1)], INSUFFICIENT), NO_COINS + IMMATURE_NOTE % (money(2 * reward), 1))
         self.mine()
         assert_equal(wallet.gettransaction(fn_a[0])['confirmations'], MATURE_AT)
         assert_equal(self.unspent(fn), [(fn_a[0], reward, True)])
@@ -293,17 +341,38 @@ class WalletPQCoinbaseSpendTest(BitcoinTestFramework):
         assert_equal(zat(info['immature_balance']), 4 * reward)
 
         print('FN-DSA: a transparent or post-quantum recipient never gets coinbase')
-        note = COINBASE_NOTE % money(reward) + IMMATURE_NOTE % money(reward)
+        hints = set()
         for outs in ([(t, Decimal('1'))], [(other, Decimal('1'))], [(z, Decimal('1')), (t, Decimal('1'))],
                      [(fn, Decimal('1'))]):
-            assert_equal(self.refused(fn, outs, INSUFFICIENT), NO_UTXOS + note)
+            message = self.refused(fn, outs, INSUFFICIENT)
+            if not hints:
+                print('  ' + message)
+            send, hint_fee, tail = coinbase_hint(message, reward)
+            assert_equal(tail, NO_COINS + IMMATURE_NOTE % (money(reward), self.blocks_left(fn_b[0])))
+            hints.add((send, hint_fee))
+        assert_equal(len(hints), 1)
+
+        print('sendtoaddress and z_shieldcoinbase say where the reward is and what moves it')
+        try:
+            wallet.sendtoaddress(t, 1)
+            raise AssertionError('sendtoaddress spent a post-quantum coinbase')
+        except JSONRPCException as e:
+            print('  ' + e.error['message'])
+            assert_equal(SEND_PQ_COINBASE % money(reward) in e.error['message'], shield)
+        try:
+            wallet.z_shieldcoinbase('*', z)
+            raise AssertionError('z_shieldcoinbase spent a post-quantum coinbase')
+        except JSONRPCException as e:
+            print('  ' + e.error['message'])
+            assert e.error['message'].endswith(SHIELD_PQ_COINBASE % money(reward)), e.error
 
         print('FN-DSA: change is refused, and the refusal names the amount to send')
         exact, fee = self.change_refusal(fn, [(z, Decimal('1'))], reward, zat('1'))
+        assert_equal(hints, {(exact, fee)})          # the amount the transparent refusal named
         # one zatoshi more than the selected coins hold: the next coinbase is immature
         m = HAVE_NEED.match(self.refused(fn, [(z, yec(exact + 1))], INSUFFICIENT))
         assert m and zat(m.group(1)) == reward, m
-        assert_equal(m.group(3), IMMATURE_NOTE % money(reward))
+        assert_equal(m.group(3), IMMATURE_NOTE % (money(reward), self.blocks_left(fn_b[0])))
 
         print('FN-DSA: the reward less the fee goes to Sapling')
         txid, tx = self.send(fn, [(z, yec(exact))])
@@ -316,6 +385,12 @@ class WalletPQCoinbaseSpendTest(BitcoinTestFramework):
         shielded = exact
         self.wait_balance(lambda: zat(wallet.z_getbalance(z)), shielded)
         assert_equal(shielded, reward - fee)
+        # the Sapling note has one confirmation: a minconf of 5 is named as the cause, not coinbase (the lead and
+        # the code are each line's own: -6 on the 4.5.0 line, -8 on the 6.20.0 line)
+        message = self.refused(z, [(t, Decimal('1'))], None, minconf=5)
+        print('  ' + message)
+        assert message.endswith(minconf_note(shielded, 5)), message
+        assert 'coinbase' not in message, message
 
         print('FN-DSA: the second reward, to two shielded recipients with an explicit fee')
         assert_equal(self.unspent(fn), [(fn_b[0], reward, True)])       # 101 confirmations with the block just mined
@@ -337,9 +412,11 @@ class WalletPQCoinbaseSpendTest(BitcoinTestFramework):
         print('SLH-DSA: two rewards in one send')
         self.mine_to(slh_b[2] + MATURE_AT - 1)
         assert_equal(self.unspent(slh), sorted([(slh_a[0], reward, True), (slh_b[0], reward, True)]))
-        assert_equal(self.refused(slh, [(t, Decimal('1'))], INSUFFICIENT), NO_UTXOS + COINBASE_NOTE % money(2 * reward))
+        send, hint_fee, tail = coinbase_hint(self.refused(slh, [(t, Decimal('1'))], INSUFFICIENT), 2 * reward)
+        assert_equal(tail, NO_COINS)
         one, fee_one = self.change_refusal(slh, [(z, Decimal('1'))], reward, zat('1'))
         both, fee_both = self.change_refusal(slh, [(z, yec(reward))], 2 * reward, reward)
+        assert_equal((send, hint_fee), (both, fee_both))     # the transparent refusal named the amount that moves both
         assert fee_both > fee_one > fee, (fee_both, fee_one, fee)       # each SLH-DSA input is priced on its size
         txid, tx = self.send(slh, [(z, yec(both))])
         assert_equal(sorted((i['txid'], i['vout']) for i in tx['vin']), sorted([(slh_a[0], 0), (slh_b[0], 0)]))
@@ -375,11 +452,13 @@ class WalletPQCoinbaseSpendTest(BitcoinTestFramework):
         # a transparent recipient the ordinary coin does not cover: the coinbase is not used
         m = HAVE_NEED.match(self.refused(mix, [(t, Decimal('3'))], INSUFFICIENT))
         assert m and zat(m.group(1)) == rest, m
-        assert_equal(m.group(3), COINBASE_NOTE % money(reward))
-        assert_equal(self.refused(mix, [(z, Decimal('3')), (other, Decimal('1'))], INSUFFICIENT)[-len(COINBASE_NOTE % money(reward)):],
-                     COINBASE_NOTE % money(reward))
+        send, hint_fee, tail = coinbase_hint(' ' + m.group(3).lstrip(), reward)
+        assert_equal(tail, '')
+        assert self.refused(mix, [(z, Decimal('3')), (other, Decimal('1'))], INSUFFICIENT).endswith(
+            ' ' + m.group(3).lstrip()), m.group(3)
         # a shielded recipient the ordinary coin does not cover: the coinbase joins, and then there is no change
-        self.change_refusal(mix, [(z, Decimal('3'))], reward, zat('3'))                 # the coinbase coin alone
+        alone, fee_alone = self.change_refusal(mix, [(z, Decimal('3'))], reward, zat('3'))     # the coinbase coin alone
+        assert_equal((send, hint_fee), (alone, fee_alone))    # the transparent refusal named that amount
         total, fee_mixed = self.change_refusal(mix, [(z, yec(reward))], reward + rest, reward)
         # one zatoshi short of that amount is not change: what is below the dust threshold goes to the fee
         txid, tx = self.send(mix, [(z, yec(total - 1))])

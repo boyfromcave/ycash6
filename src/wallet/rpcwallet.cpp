@@ -6432,7 +6432,29 @@ UniValue z_shieldcoinbase(const UniValue& params, bool fHelp)
     auto async_shieldcoinbase =
         new AsyncRPCOperation_shieldcoinbase(
                 std::move(builder), ztxoSelector, destaddress.value(), memo, strategy, nUTXOLimit, nFee, contextInfo);
-    auto results = async_shieldcoinbase->prepare(*pwalletMain);
+    std::optional<Remaining> prepared;
+    try {
+        prepared = async_shieldcoinbase->prepare(*pwalletMain);
+    } catch (const UniValue& objError) {
+        // Beta4 (REPORT item 7): "*" never takes the mining rewards a pool paid to a post-quantum address; when they are
+        // all the wallet has, say so and what moves them, instead of only "have 0.00".
+        if (!isFromWildcard || find_value(objError, "code").get_int() != RPC_INVALID_PARAMETER) throw;
+        CAmount pqCoinbase = 0;
+        {
+            LOCK2(cs_main, pwalletMain->cs_wallet);
+            std::vector<COutput> coins;
+            pwalletMain->AvailableCoins(coins, std::nullopt, true, nullptr, false, true);
+            for (const COutput& o : coins) {
+                if (o.fSpendable && o.tx->IsCoinBase() && IsPQKeyScript(o.tx->vout[o.i].scriptPubKey)) {
+                    pqCoinbase += o.tx->vout[o.i].nValue;
+                }
+            }
+        }
+        const std::string note = PQCoinbaseShieldNote(pqCoinbase);
+        if (note.empty()) throw;
+        throw JSONRPCError(RPC_INVALID_PARAMETER, find_value(objError, "message").get_str() + note);
+    }
+    const Remaining& results = prepared.value();
 
     // Create operation and add to global queue
     std::shared_ptr<AsyncRPCQueue> q = getAsyncRPCQueue();
