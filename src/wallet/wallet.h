@@ -2444,6 +2444,10 @@ public:
     /** Beta2 (audit M-1, review LOW-2): the value of the post-quantum coins SelectCoins leaves out when it may add coins,
      *  as far as z_sendmany would spend them; when that is 0 because each is a Yellowback outpoint, *yedRefusal names them. */
     CAmount PQSelectableValue(std::string* yedRefusal = nullptr) const;
+    /** Beta4 (REPORT item 7): where coinbase must be shielded, the mature coinbase this wallet holds at post-quantum
+     *  addresses (mining rewards paid by getcoinbasetemplatefor). No transparent send spends it, and PQSelectableValue
+     *  does not count it; the insufficient-funds refusals of sendtoaddress, sendmany and z_shieldcoinbase name it. */
+    CAmount PQCoinbaseLeftOut() const;
     /** Review WALLET-FOLLOW-REVIEW-2 LOW-4: where Yellowback is not live, the coins SelectCoins leaves out (when it may
      *  add coins) because their own Yellowback payload gives them YED; "" where none is, or where Yellowback is live
      *  (there the YED coin locks keep them out). Otherwise the sentence the stock sends append to "Insufficient funds". */

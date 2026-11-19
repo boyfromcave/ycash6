@@ -60,7 +60,8 @@ std::pair<CTransaction, UniValue> SignSendRawTransaction(UniValue obj, std::opti
 void ThrowInputSelectionError(
         const InputSelectionError& err,
         const ZTXOSelector& selector,
-        const TransactionStrategy& strategy)
+        const TransactionStrategy& strategy,
+        const std::string& fundsNote)
 {
     examine(err, match {
         [&](const AddressResolutionError& err) {
@@ -166,7 +167,7 @@ void ThrowInputSelectionError(
                                     FormatMoney(dte.dustThreshold));
                         }
                     }))
-                    + (selector.TransparentCoinbasePolicy() == TransparentCoinbasePolicy::Disallow
+                    + (selector.TransparentCoinbasePolicy() == TransparentCoinbasePolicy::Disallow && selector.SelectsTransparent()
                        ? "; note that coinbase outputs will not be selected if you specify "
                          "ANY_TADDR, any transparent recipients are included, or if the "
                          "`privacyPolicy` parameter is not set to `AllowRevealedSenders` or weaker"
@@ -178,7 +179,8 @@ void ThrowInputSelectionError(
                          "Resubmit with the `privacyPolicy` parameter set to "
                          "`AllowLinkingAccountAddresses` or weaker if you wish to allow this "
                          "transaction to proceed anyway.)"
-                       : "."));
+                       : ".")
+                    + fundsNote);
         },
         [](const ChangeNotAllowedError& err) {
             throw JSONRPCError(
@@ -366,14 +368,38 @@ bool SpendsPQCoin(const SpendableInputs& spendable)
     });
 }
 
-CAmount PQImmatureCoinbase(const CWallet& wallet, const CScript& script)
+CAmount PQImmatureCoinbase(const CWallet& wallet, const CScript& script, int* nextMaturesIn)
 {
     AssertLockHeld(cs_main);
     AssertLockHeld(wallet.cs_wallet);
     CAmount total = 0;
+    int next = 0;
     for (const std::pair<const uint256, CWalletTx>& item : wallet.mapWallet) {
         const CWalletTx& wtx = item.second;
         if (!wtx.IsCoinBase() || wtx.GetDepthInMainChain(std::nullopt) <= 0 || wtx.GetBlocksToMaturity(std::nullopt) <= 0) continue;
+        for (unsigned int i = 0; i < wtx.vout.size(); i++) {
+            if (wtx.vout[i].scriptPubKey == script && !wallet.IsSpent(item.first, i, std::nullopt)) {
+                total += wtx.vout[i].nValue;
+                const int left = wtx.GetBlocksToMaturity(std::nullopt);
+                if (next == 0 || left < next) next = left;
+            }
+        }
+    }
+    if (nextMaturesIn) *nextMaturesIn = next;
+    return total;
+}
+
+CAmount PQBelowMinconf(const CWallet& wallet, const CScript& script, int minDepth)
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(wallet.cs_wallet);
+    CAmount total = 0;
+    if (minDepth <= 0) return total;
+    for (const std::pair<const uint256, CWalletTx>& item : wallet.mapWallet) {
+        const CWalletTx& wtx = item.second;
+        if (wtx.IsCoinBase()) continue;
+        const int depth = wtx.GetDepthInMainChain(std::nullopt);
+        if (depth < 0 || depth >= minDepth) continue;
         for (unsigned int i = 0; i < wtx.vout.size(); i++) {
             if (wtx.vout[i].scriptPubKey == script && !wallet.IsSpent(item.first, i, std::nullopt)) total += wtx.vout[i].nValue;
         }
@@ -381,20 +407,51 @@ CAmount PQImmatureCoinbase(const CWallet& wallet, const CScript& script)
     return total;
 }
 
-std::string PQInsufficientFunds(const std::string& message, CAmount coinbaseExcluded, CAmount immatureCoinbase)
+std::string MinconfNote(CAmount belowMinconf, int minDepth)
 {
-    std::string s = message;
-    if (coinbaseExcluded <= 0 && immatureCoinbase <= 0) return s;
+    if (belowMinconf <= 0 || minDepth <= 0) return "";
+    return strprintf(" The address holds %s YEC with fewer than the %d confirmation%s this send requires (minconf): "
+                     "wait for them, or pass a lower minconf.",
+                     FormatMoney(belowMinconf), minDepth, minDepth == 1 ? "" : "s");
+}
+
+std::string PQInsufficientFunds(const std::string& message, bool noCoins, const PQFundsLeftOut& left)
+{
+    const std::string minconf = MinconfNote(left.belowMinconf, left.minDepth);
+    if (left.coinbase <= 0 && left.immature <= 0 && minconf.empty()) return message;
+    // Beta4 (REPORT item 7): with nothing ordinary to spend, the bare "no UTXOs found" read as an empty address.
+    std::string s = noCoins ? "Insufficient transparent funds: this address has no coins this send can spend." : message;
     if (s.empty() || s.back() != '.') s += ".";
-    if (coinbaseExcluded > 0) {
-        s += strprintf(" The address holds %s of coinbase funds, which can only be sent to shielded recipients, with no change.",
-                       FormatMoney(coinbaseExcluded));
+    if (left.coinbase > 0) {
+        s += strprintf(" The address holds %s YEC of mining rewards (coinbase), which can only be sent to a shielded (Sapling) "
+                       "address, with no change", FormatMoney(left.coinbase));
+        if (left.coinbaseSend <= 0) {
+            s += ".";
+        } else if (left.coinbaseSelectedCoins >= left.coinbaseCoins) {
+            s += strprintf(": send exactly %s to one Sapling address (the %s of rewards less the fee %s).",
+                           FormatMoney(left.coinbaseSend), FormatMoney(left.coinbaseSelected), FormatMoney(left.coinbaseFee));
+        } else {
+            s += strprintf(": send exactly %s to one Sapling address (the largest %u of the %u rewards, %s, less the fee %s), "
+                           "then send again for the rest.",
+                           FormatMoney(left.coinbaseSend), (unsigned)left.coinbaseSelectedCoins, (unsigned)left.coinbaseCoins,
+                           FormatMoney(left.coinbaseSelected), FormatMoney(left.coinbaseFee));
+        }
     }
-    if (immatureCoinbase > 0) {
-        s += strprintf(" The address holds %s of immature coinbase funds, which can be sent to shielded recipients only, with no change, after %d confirmations.",
-                       FormatMoney(immatureCoinbase), COINBASE_MATURITY + 1);
+    if (left.immature > 0) {
+        s += strprintf(" The address holds %s YEC of mining rewards that are not spendable yet: a reward needs %d confirmations, "
+                       "and the next one needs %d more; it can then only be sent to a shielded (Sapling) address, with no change.",
+                       FormatMoney(left.immature), COINBASE_MATURITY + 1, left.immatureBlocks);
     }
+    s += minconf;
     return s;
+}
+
+std::string PQCoinbaseShieldNote(CAmount pqCoinbase)
+{
+    if (pqCoinbase <= 0) return "";
+    return strprintf(" The wallet holds %s YEC of mining rewards (coinbase) at post-quantum addresses, which ycashd's z_shieldcoinbase "
+                     "does not spend: send them with z_sendmany from the address that holds them to a Sapling address, with "
+                     "no change; z_sendmany names the exact amount to send.", FormatMoney(pqCoinbase));
 }
 
 std::string PQCoinbaseChangeRefusal(CAmount change, CAmount selected, CAmount fee)

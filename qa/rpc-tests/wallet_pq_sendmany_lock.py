@@ -27,6 +27,7 @@ during the signing does. Now, on both lines:
 One file on both C++ lines (ycash-dd: BITCOIND=, ycash6: ZCASHD=).
 """
 
+import re
 import time
 from decimal import Decimal
 
@@ -46,6 +47,10 @@ ACTIVATION = 210
 NCOINS = 24                       # about 8 s of SLH-DSA signing: the window the checks below run in
 RPC_WALLET_INSUFFICIENT_FUNDS = -6
 NO_COIN_REFUSAL = 'Insufficient transparent funds, no UTXOs found for taddr from address.'
+# beta4 (item 7): when the first send's change is already back at the address, unconfirmed, the refusal says so
+NO_COIN_MINCONF = re.compile(
+    r'^Insufficient transparent funds: this address has no coins this send can spend\. The address holds [0-9.]+ YEC '
+    r'with fewer than the 1 confirmation this send requires \(minconf\): wait for them, or pass a lower minconf\.$')
 NO_MERGE_REFUSAL = 'Could not find any funds to merge.'
 
 
@@ -131,7 +136,8 @@ class WalletPQSendmanyLockTest(BitcoinTestFramework):
         assert NO_MERGE_REFUSAL in merge_refusal, merge_refusal
         assert_equal(r2['status'], 'failed')
         assert_equal(r2['error']['code'], RPC_WALLET_INSUFFICIENT_FUNDS)
-        assert NO_COIN_REFUSAL in r2['error']['message'], r2['error']['message']
+        assert (r2['error']['message'] == NO_COIN_REFUSAL or NO_COIN_MINCONF.match(r2['error']['message'])), \
+            r2['error']['message']
         print('  the second send: %s' % r2['error']['message'])
         assert_equal(n0.listlockunspent(), [])             # nothing left locked, the failed operation included
         self.mine(1)
@@ -141,7 +147,7 @@ class WalletPQSendmanyLockTest(BitcoinTestFramework):
         empty = n0.getnewaddress('', 'pqslh')
         (r,) = self.results(n0, [z_sendmany_opid(n0, empty, [(b, Decimal('0.1'))])])
         assert_equal(r['status'], 'failed')
-        assert NO_COIN_REFUSAL in r['error']['message'], r['error']['message']
+        assert_equal(r['error']['message'], NO_COIN_REFUSAL)   # an empty address: the old text, unchanged
         assert_equal(n0.listlockunspent(), [])
 
 
