@@ -15,13 +15,14 @@ what the upgrade changed is marked **(U-2x)**. P4-b (`SCHEMA_VERSION` 7: the att
 primitive's set `attestorSetId`) is marked **(P4-b)**. In-term claims
 (`docs/plans/yellowback-in-term-claims-plan.md`, `SCHEMA_VERSION` 8: the V's `appHeight` is `refHeight + 1`
 and the vault record remembers it; RED-4 decides a claim at every height; CLAIMING collateral stays in the
-system ratio until release) are marked **(IT-n)**.
+system ratio until release) are marked **(IT-n)**. Tag v2 (`docs/plans/beta4/price-feed.md` §4.3,
+`SCHEMA_VERSION` 16: a post-quantum payout key; the payee is `kind ‖ hash`) is marked **(TAG-v2)**.
 
-The golden vector `yellowback_golden.json` (440 synthetic heights, 462 block entries, regtest
+The golden vector `yellowback_golden.json` (440 synthetic heights, 463 block entries, regtest
 params `{startHeight 1, sigmaRefBps 0, supplyCapBps 0, attestorSetId = the txid of the vector's own
 SET_CREATE at 224 (livenessWindow 150, maturity 8 = BOND_MATURITY, 15 seats, open), attestArmMin 3, bundleCarrier
 scriptsig, mintRequiresArmed false, pqFalconHeight 400 (not hashed)}`) pins the result of all of these choices: state hash
-`ee6a9f157175b6e084df52f96dc5039e4d411189352542f329971e6dd7bb0c0b`. Twenty-two entries are flagged
+`e45e83e80a681192e237e62bfad7155c4cb01dcf93fd756da76bccb2799bfe5a`. Twenty-three entries are flagged
 `"invalid"`, one per consensus verdict the vector covers (audit 03/T-1; `golden_rejected` in
 `test_yellowback_model.py` lists them): they are rejected and not applied, and the next entry is
 the same height mined again without the offending transaction.
@@ -35,14 +36,14 @@ of its own with the C++ `GOLDEN_HASH` and `statehash_golden_vector`'s list of re
 
 | # | Record(s) | Key | Value (in field order) |
 |---|---|---|---|
-| 1 | `Tip` | `T` | `i32 height`, `uint256 blockHash`, `u32 schemaVersion = 15`, `string network` |
-| 2 | every `Tags[h]`, ascending `h` | `Q` ‖ `u32be h` | `uint160 payoutKey`, `u64 priceMicroUsd`, `bool signal`, `u16 sourceMask` |
+| 1 | `Tip` | `T` | `i32 height`, `uint256 blockHash`, `u32 schemaVersion = 16`, `string network` |
+| 2 | every `Tags[h]`, ascending `h` | `Q` ‖ `u32be h` | `Payee payee` (**TAG-v2**, schema 16: in place of `uint160 payoutKey`), `u64 priceMicroUsd`, `bool signal`, `u16 sourceMask` |
 | 3 | every `Judgements[t]`, ascending `t` | `J` ‖ `u32be t` | `bool evaluated`, `bool inBand`, `bool penalized` |
 | (4) | ~~`Activation`~~ | ~~`C`~~ | removed with ACT-1..6 **(U-21)** |
 | 5 | every `Vaults[op]`, ascending outpoint | `V` ‖ `uint256 txid` ‖ `u32be n` | `bytes ownerPubKey`, `u8 termClass`, `i32 lockHeight`, `i32 claimHeight`, `i64 collateralZat`, `i64 mintedCents`, `i32 mintHeight`, `i32 refHeight`, `u8 status`, `string voidReason`, `i32 closeHeight`, `uint256 closingTxid`, `i64 burnedCents`, `i64 feePaidZat`, `bool unbacked`, `i32 appHeight`, `i32 ownerHeight` (IT-1: both `refHeight + 1`; `lockHeight + GRACE` / `lockHeight` for a vault minted before the in-term plan), `i64 pMint` (FEE-1', quantum plan D-Q-23: MINT-5's price at the mint, micro-USD per YEC, the price every later fee of the vault converts at; schema 9, appended last so every earlier field keeps its offset), `u8 cancelCount`, `i32 lastCancelHeight` (**CAN-2**, the cancel-limit design, schema 14, appended last: the position's cancels counted by the escalation schedule and the height of its last cancel; 0/0 at the mint, carried by every re-creation) |
 | 6 | every `Tokens[op]`, ascending outpoint | `K` ‖ `uint256 txid` ‖ `u32be n` | `i64 cents`, `i64 nValue`, `bytes scriptPubKey`, `i32 height` |
 | 7 | `Totals` | `G` | `i64 supplyCents`, `i64 collateralZat`, `u32 activeVaults`, `u32 voidVaults`, `u32 closedVaults`, `u32 claimedVaults`, `i64 unbackedCents`, `i64 openDebtCents` (**HALT-2**, owner 2026-10-28, appended last: `SCHEMA_VERSION` 15) |
-| 8 | every `Snapshots[h]`, ascending `h` | `S` ‖ `u32be h` | `uint256 blockHash`, `bool tagged`, `bool quote`, `i64 pFast`, `i64 pMid`, `i64 pSlow`, `i64 pMint`, `i64 pClaim`, `i32 sigmaMultBps`, `i64 issuedZat`, `i64 supplyCents`, `i64 collateralZat`, `i64 globalRatioBps`, `u32 haltMask`; v3: `Attest` (`u8 status`, `i32 triggerHeight`, `i32 armHeight`), `u16[] seated`, `uint160[] pinnedKeys`, `u16[] pinnedSeqs` (**U-21**: `u32 signalCount` and the `Activation` copy are gone); `i64 openDebtCents` (**HALT-2**, appended last: `SCHEMA_VERSION` 15) |
+| 8 | every `Snapshots[h]`, ascending `h` | `S` ‖ `u32be h` | `uint256 blockHash`, `bool tagged`, `bool quote`, `i64 pFast`, `i64 pMid`, `i64 pSlow`, `i64 pMint`, `i64 pClaim`, `i32 sigmaMultBps`, `i64 issuedZat`, `i64 supplyCents`, `i64 collateralZat`, `i64 globalRatioBps`, `u32 haltMask`; v3: `Attest` (`u8 status`, `i32 triggerHeight`, `i32 armHeight`), `u16[] seated`, `Payee[] pinnedKeys` (**TAG-v2**, schema 16: CompactSize count, then each Payee, sorted by kind then hash), `u16[] pinnedSeqs` (**U-21**: `u32 signalCount` and the `Activation` copy are gone); `i64 openDebtCents` (**HALT-2**, appended last: `SCHEMA_VERSION` 15) |
 | 9 | `Params` | `P` | `i32 startHeight` (the `UPGRADE_VAULT` activation height, U-22), `i32 sigmaRefBps`, `i32 supplyCapBps`, `uint256 attestorSetId` (32 internal bytes; it replaced v3's `i32 enforceUntil`, **U-22**); v3: `u32 attestArmMin`, `u8 bundleCarrier`; hardening H-1: `u8 mintRequiresArmed` |
 | 10–14 | v3: `Attestors[seq]`, `AttestorSeq`, `Attest`, `BundleLog[h]`, `Notices[op]` | `A` ‖ `u16be seq`, `N`, `M`, `W` ‖ `u32be h`, `E` ‖ outpoint | as `yellowback_model.py` `_ser_attestor`, `_ser_attest`, `_ser_bundle_log`, `_ser_notice`. `Attestors`: `bytes attestorPubKey`, `bytes bondPubKey`, `COutPoint bondOutpoint`, `i64 bondZat`, `u32 bondLocktime`, `u8 flags`, `i32 registerHeight`, `u8 status` (`PENDING, ELIGIBLE, DORMANT, EJECTED, WITHDRAWN`), `i32 statusHeight`, `i32 bondSpentHeight`, `i32 seatedSince`, then **(P4-b)** `i32 lastAct`, `bool bondFrozen` |
 | 15 | every `Intents[op]`, ascending outpoint **(U-23)** | `I` ‖ `uint256 txid` ‖ `u32be n` | `COutPoint vault` (`uint256 txid`, `u32 n` little-endian), `u8 role` (`CLAIMANT = 0`, `RESIDUAL = 1`), `i32 height`, `bytes refundScript` (**CAN-1**, audit 03/H-1, schema 13, appended last: on the claimant intent the scriptPubKey of the token the claim spent at its lowest-index YED input; empty on the residual), `i32 claimRefHeight` (**C4b**, schema 14: the claim's REDEEM `refHeight`, on both intents), `COutPoint heldBy` (**CAN-3**, schema 14: on a residual whose claimant intent was cancelled the re-created position, else null = 32 zero bytes and `n = 0xffffffff`) |
@@ -61,6 +62,11 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
   `uint256` bytes, `u32be n`; "ascending outpoint order" is the byte order of that key.
 - `uint256` / `uint160` are the raw internal bytes (`uint256::begin()`, i.e. the RPC display hex
   **reversed** for txids and block hashes; `payoutKey` as the 20 bytes in the tag).
+- **(TAG-v2)** A `Payee` is `u8 kind` then the raw hash, no length prefix: kind 0 (P2PKH) and the 20-byte
+  Hash160, or kind 1 (SLH-DSA-SHA2-128s) / 2 (FN-DSA-512) and the 32-byte `CPQKeyID` hash `SHA256(scheme ‖ pk)`.
+  Order (maps, sets, `pinnedKeys`): by kind, then the hash bytes in memcmp order. A v1 tag's payee is kind 0 /
+  `payoutKey`, a v2 tag's is kind `payoutScheme` / `payoutHash`. The tag version is not stored.
+  `TxLog.payee` (not hashed) is a Payee too (kind 0 and 20 zero bytes when there is none).
 - `bool` is one byte `0x00`/`0x01`.
 - Enumerations are `u8` in declaration order: `Vaults.status` `ACTIVE = 0, VOID = 1, CLOSED = 2,
   CLAIMED = 3, CLAIMING = 4` (VOID is never produced since the upgrade; CLAIMING is a vault whose
@@ -101,7 +107,10 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
   was read as "a record per judged tag".
 - The peer window `[t − PEER_LAG, t + PEER_LAG − 1]` reads only heights `≥ START_HEIGHT` (there
   are no tags below it).
-- `E(R)` is the quote tags' keys in `(R − PAYEE_WINDOW, R]`, height order, deduplicated.
+- `E(R)` is the quote tags' payees in `(R − PAYEE_WINDOW, R]`, height order, deduplicated (**TAG-v2**: v1 and
+  v2 payees side by side; PIN-1, REG-1, the penalty and accuracy reads and the wallet's default payee key on the
+  Payee). A fee output is the payee of an `E(R)` member only if its scriptPubKey is exactly that payee's script:
+  the 25-byte P2PKH for kind 0, the 35-byte TX_PQPKH `0x20 ‖ hash ‖ OP_1|OP_2 ‖ OP_CHECKPQSIG` for kind 1/2.
 - **(U-21)** ACT-1..6 are gone: no signal count, no Activation record, no carried PARTICIPATION /
   ENFORCEMENT bits and no ACT-5 enforcement predicate. The module is active from `START_HEIGHT`
   (the `UPGRADE_VAULT` activation height) and every invalid block is rejected.
@@ -167,7 +176,7 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
   `0 < burn < mintedCents` ⇒ `vault-spend-short-burn`.
 - **H. RED-3 verdicts.** `vault-spend-bad-fee` for `feeVout = 0xFF`, out of range, the
   `OP_RETURN`, an assigned vout, or `nValue < feeZat`; `vault-spend-bad-payee` when the output is
-  not `P2PKH(k)` for some `k ∈ E(R)`. Checked in that order (structure, payee, value).
+  not exactly the script of some payee `k ∈ E(R)` (P2PKH or TX_PQPKH, **TAG-v2**). Checked in that order (structure, payee, value).
 - **I. Closing (U-21, U-23).** A passing owner spend closes the vault (`CLOSED`); a passing claim
   leaves it `CLAIMING` (its `closeHeight`/`closingTxid` the claim's) with its collateral out of
   `Totals.collateralZat` and `activeVaults`; the claimant intent's release makes it `CLAIMED`
@@ -284,6 +293,11 @@ excluded (plan; `Rejected` no longer exists, **U-21**). Encodings:
   heights 1–16, else `1 + len(CScriptNum(nHeight))`), whatever bytes are actually there — a
   coinbase without the BIP34 push is consensus-invalid anyway. A scriptSig shorter than the
   prefix has no tag.
+- **TAG-1 / TAG-5 (TAG-v2).** The scan looks for the first occurrence of either `24 59 45 44 21` (v1, 32 bytes
+  follow) or `31 59 45 44 21` (v2, 45 bytes follow), whichever comes first by position; the first decides. A v1
+  pattern must be followed by version 1 and a v2 pattern by version 2; a v2 `payoutScheme` other than 0x01/0x02,
+  a reserved flag bit, a bad price or fewer bytes than the body is no tag. `yellowback_tag_vectors.json`
+  (`src/test/data`, `--write-tag-vectors`) pins the cases.
 - **§3.3 push shape.** `OP_RETURN <push>` accepts any `GetOp`-valid push encoding of the data
   (direct `0x01–0x4b`, `PUSHDATA1/2/4`), not only the canonical one; `OP_0`, `OP_1..OP_16`,
   `OP_1NEGATE` are not "a push of 4..80 bytes". Exactly one push, nothing after it.

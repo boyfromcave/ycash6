@@ -72,6 +72,20 @@ KEY1 = ym.hash160(b'yellowback-golden-miner-1')
 KEY2 = ym.hash160(b'yellowback-golden-miner-2')
 KEY3 = ym.hash160(b'yellowback-golden-miner-3')
 MINERS = [KEY1, KEY2, KEY3]
+# Tag v2 (beta4 D-T1): post-quantum payees, kind (scheme) || the 32-byte CPQKeyID hash
+PQF = ym.payee_pq(0x02, ym.sha256(b'yellowback-golden-miner-fn-dsa'))      # FN-DSA-512
+PQS = ym.payee_pq(0x01, ym.sha256(b'yellowback-golden-miner-slh-dsa'))     # SLH-DSA-SHA2-128s
+
+
+def fee_script(key):
+    """A fee output's script: a 20-byte key hash (P2PKH) or a payee (kind || hash, P2PKH or TX_PQPKH)."""
+    return ym.p2pkh_script(key) if len(key) == 20 else ym.payee_script(key)
+
+
+def tag_bytes(tag):
+    """The tag push of (flags, price, mask, key): a 20-byte key is a v1 tag, a payee picks v1 or v2."""
+    flags, price, mask, key = tag
+    return ym.tag_push(flags, price, mask, key) if len(key) == 20 else ym.tag_push_for_payee(flags, price, mask, key)
 OWNER_KEYHASH = ym.hash160(b'owner')
 SIG71 = bytes(range(1, 72))          # a placeholder signature push; the model verifies no signature
 # The framework's fixed regtest attestor / bond keys (yellowback_attest.py): [(secret32, pubkey33)]
@@ -130,7 +144,7 @@ class Chain(object):
         else:
             ss = ym.height_prefix(h) + extranonce
             if tag is not None:
-                ss += ym.tag_push(*tag)
+                ss += tag_bytes(tag)
         cb = self.coinbase(h, ss)
         subsidy = ym.regtest_subsidy(h)
         txs = list(txs)
@@ -215,7 +229,7 @@ class Chain(object):
         if fee_key is not None:
             if fee_value is None:
                 fee_value = self.mint_fee(cents, ref_height, p_mint)
-            vouts.append((fee_value, ym.p2pkh_script(fee_key)))
+            vouts.append((fee_value, fee_script(fee_key)))
         if attest_fee is not None:
             vouts.append((attest_fee[1], ym.p2pkh_script(attest_fee[0])))
         return ym.serialize_tx_v4(vin, vouts, 0, ref_height + self.params.ref_window).hex()
@@ -280,7 +294,7 @@ class Chain(object):
             vouts = [(claimant_zat, ym.yed_intent_script(self.params, v.owner_pubkey, v.owner_height, v.app_height, ym.p2pkh_script(OWNER_KEYHASH)))]
         else:
             vouts = [(collateral_out, ym.p2pkh_script(OWNER_KEYHASH))]
-        vouts.append((fee_value, ym.p2pkh_script(fee_key)) if fee_key is not None else (1000, ym.p2pkh_script(OWNER_KEYHASH)))
+        vouts.append((fee_value, fee_script(fee_key)) if fee_key is not None else (1000, ym.p2pkh_script(OWNER_KEYHASH)))
         attest_fee_vout = 3 + len(assignments) if attest_fee is not None else ym.FEE_VOUT_NONE
         if payload is None:
             payload = ym.encode_redeem(ref_height, fee_vout, list(assignments), attest_fee_vout)
@@ -431,6 +445,64 @@ def collateral_for(c, cents, ref_height, term_class=0, p_mint=None):
 
 # ===========================================================================
 # section 3.2  Tag decoder
+
+class TagV2Tests(unittest.TestCase):
+    """Tag v2 (docs/plans/beta4/price-feed.md section 4.3; beta4 P1 spec sections 1, 2)."""
+    P = ym.Params.regtest(1)
+
+    def ss(self, h, body, extra=b''):
+        return ym.height_prefix(h) + extra + body
+
+    # Rule: TAG-1
+    def test_v2_layout_and_roundtrip(self):
+        for scheme in ym.PQ_SCHEMES:
+            push = ym.tag_push_v2(1, 50_000, 3, scheme, PQF[1:])
+            self.assertEqual(len(push), 50)
+            self.assertEqual(push[:6], b'\x31YED!\x02')
+            t = ym.find_tag(self.ss(17, push), 17, self.P)
+            self.assertEqual((t.version, t.payout_scheme, t.payout_key, t.price_micro_usd, t.source_mask), (2, scheme, PQF[1:], 50_000, 3))
+            self.assertEqual(t.payee, bytes([scheme]) + PQF[1:])
+
+    # Rule: TAG-2
+    def test_v2_bad_scheme_truncated_wrong_version(self):
+        self.assertIsNone(ym.find_tag(self.ss(5, ym.tag_push_v2(1, 50_000, 0, 0x03, PQF[1:])), 5, self.P))
+        self.assertIsNone(ym.find_tag(self.ss(5, ym.tag_push_v2(1, 50_000, 0, 0x00, PQF[1:])), 5, self.P))
+        self.assertIsNone(ym.find_tag(self.ss(5, ym.tag_push_v2(1, 50_000, 0, 0x02, PQF[1:])[:-1]), 5, self.P))
+        self.assertIsNone(ym.find_tag(self.ss(5, ym.tag_push_v2(1, 50_000, 0, 0x02, PQF[1:], version=1)), 5, self.P))   # 31 YED! 01
+        self.assertIsNone(ym.find_tag(self.ss(5, ym.tag_push(1, 50_000, 0, KEY1, version=2)), 5, self.P))              # 24 YED! 02
+        self.assertIsNone(ym.find_tag(self.ss(5, ym.tag_push_v2(0x02, 50_000, 0, 0x02, PQF[1:])), 5, self.P))          # reserved flag
+        self.assertIsNone(ym.find_tag(self.ss(5, ym.tag_push_v2(1, 99, 0, 0x02, PQF[1:])), 5, self.P))                 # bad price
+
+    # Rule: TAG-5
+    def test_first_pattern_by_position_decides(self):
+        v1 = ym.tag_push(1, 50_000, 0, KEY1)
+        v2 = ym.tag_push_v2(1, 60_000, 0, 0x02, PQF[1:])
+        self.assertEqual(ym.find_tag(self.ss(40, v1 + v2), 40, self.P).version, 1)
+        self.assertEqual(ym.find_tag(self.ss(40, v2 + v1), 40, self.P).version, 2)
+        bad2 = ym.tag_push_v2(1, 50_000, 0, 0x03, PQF[1:])
+        self.assertIsNone(ym.find_tag(self.ss(40, bad2 + v1), 40, self.P))      # a bad v2 first: no tag, the v1 after it is not read
+
+    # Rule: FEE-2
+    def test_payee_script_roundtrip_and_order(self):
+        for p in (ym.payee_p2pkh(KEY1), PQF, PQS):
+            self.assertEqual(ym.payee_of_script(ym.payee_script(p)), p)
+        self.assertEqual(len(ym.payee_script(PQF)), 35)
+        self.assertEqual(len(ym.payee_script(ym.payee_p2pkh(KEY1))), 25)
+        self.assertIsNone(ym.payee_of_script(ym.p2sh_script(b'x')))
+        self.assertIsNone(ym.payee_of_script(ym.payee_script(PQF) + b'\x00'))
+        self.assertEqual(sorted([PQF, PQS, ym.payee_p2pkh(KEY1)]), [ym.payee_p2pkh(KEY1), PQS, PQF])   # kind, then hash
+
+    # Rule: FEE-2
+    def test_tag_push_for_payee_picks_the_version(self):
+        self.assertEqual(ym.tag_push_for_payee(1, 50_000, 0, ym.payee_p2pkh(KEY1)), ym.tag_push(1, 50_000, 0, KEY1))
+        self.assertEqual(ym.tag_push_for_payee(1, 50_000, 0, PQS)[0], 0x31)
+
+    # Rule: TAG-1
+    def test_tag_vectors_pinned(self):
+        """The model regenerates src/test/data/yellowback_tag_vectors.json byte for byte (D-T4; the C++ suite replays it)."""
+        with open(TAG_VECTORS_PATH) as f:
+            self.assertEqual(f.read(), tag_vectors_text())
+
 
 class TagTests(unittest.TestCase):
     P = ym.Params.regtest(1)
@@ -827,7 +899,7 @@ class SnapshotTests(unittest.TestCase):
         c = self.chain()
         c.mine_n(12, price_fn=lambda h: 500, key_fn=lambda h: MINERS[h % 3])
         e = c.model.eligible_payees(12)                # (2, 12]: heights 3..12
-        self.assertEqual(e, [MINERS[3 % 3], MINERS[4 % 3], MINERS[5 % 3]])
+        self.assertEqual(e, [ym.payee_p2pkh(MINERS[i % 3]) for i in (3, 4, 5)])
         c.mine_n(10, price_fn=lambda h: 0, key_fn=lambda h: MINERS[0])
         self.assertEqual(c.model.eligible_payees(22), [])   # signal-only tags register nothing
 
@@ -903,7 +975,7 @@ class MintTests(unittest.TestCase):
         self.assertEqual(m.totals.active_vaults, 1)
         rec = m.txlog[txid]
         self.assertEqual((rec.type, rec.verdict, rec.yed_in, rec.yed_out, rec.burned, rec.fee_zat, rec.payee),
-                         ('MINT', 'ok', 0, 10_000, 0, v.fee_paid_zat, KEY1))
+                         ('MINT', 'ok', 0, 10_000, 0, v.fee_paid_zat, ym.payee_p2pkh(KEY1)))
         self.assertEqual(rec.assigned, [(1, 10_000)])
         s = m.snapshots[c.height]
         self.assertEqual(s.supply_cents, 10_000)
@@ -1331,7 +1403,7 @@ class RedeemTests(unittest.TestCase):
         self.assertFalse(verdict.block_invalid)
         rec = c.model.txlog[txid]
         self.assertEqual((rec.type, rec.path, rec.verdict, rec.yed_in, rec.yed_out, rec.burned, rec.fee_zat, rec.payee),
-                         ('REDEEM', 'owner', 'ok', 20_000, 10_000, 10_000, self.fee, KEY1))
+                         ('REDEEM', 'owner', 'ok', 20_000, 10_000, 10_000, self.fee, ym.payee_p2pkh(KEY1)))
         v = c.model.vaults[self.vault]
         self.assertEqual((v.status, v.close_height, v.closing_txid, v.burned_cents, v.fee_paid_zat, v.unbacked),
                          (ym.V_CLOSED, c.height, txid, 10_000, self.fee, False))
@@ -1933,7 +2005,7 @@ def golden_rejected(claim_height):
     """The golden's rejected blocks in order, (height, verdict) -- the vector's manifest (doc/yellowback-testing.md); the
     C++ statehash_golden_vector carries the same list.  claim_height is where build_golden's emergency claim landed."""
     return [(137, 'bad-mint-amount'), (141, 'bad-mint-collateral'), (146, 'yed-template-output'), (150, 'bad-redeem-early-fee'),
-            (185, 'vault-spend-short-burn'), (217, 'vault-spend-malformed'), (231, 'attestor-register-retired'),
+            (185, 'vault-spend-short-burn'), (GOLDEN_V2_MINT, 'bad-mint-fee'), (217, 'vault-spend-malformed'), (231, 'attestor-register-retired'),
             (251, 'mint9-no-bundle'), (252, 'mint9-bundle-sig'), (253, 'mint9-bundle-member'), (292, 'liveness-unheld'),
             (claim_height, 'red5-residual'), (claim_height, 'red5-residual'), (claim_height, 'red5-claimant-short'),
             (claim_height + 1, 'intent-cancel-no-vault'), (claim_height + 1, 'intent-cancel-no-refund'),
@@ -1944,6 +2016,14 @@ GOLDEN_LIVENESS = 150          # P4-b: the golden attestor set's livenessWindow 
 GOLDEN_HEARTBEAT = 370
 GOLDEN_RELEASE_CHECK = 41      # CAN-3 round 2: the held residual's release attempt after CANCEL_QUIET (claim + 1 + 40)
 GOLDEN_FALCON = 400            # TOK-PQ binds from here (pqFalconHeight; not hashed): only the golden's TOK-PQ refusals come after it
+# Tag v2 (beta4 D-T1, D-T4): heights GOLDEN_V2_LO..GOLDEN_V2_HI quote with v2 tags only (even FN-DSA, odd SLH-DSA), so
+# E(R) holds only post-quantum payees for R in [GOLDEN_V2_LO + PAYEE_WINDOW - 1, GOLDEN_V2_HI]: a mint paying P2PKH there is
+# bad-mint-fee (rejected), a mint paying the FN-DSA payee holds, and its owner redeem pays the SLH-DSA payee (D-3).
+# claim3 at 215 (R = 213) then pays a P2PKH payee from a window holding both kinds (D-4).
+GOLDEN_V2_LO = 190
+GOLDEN_V2_HI = 206
+GOLDEN_V2_MINT = 201           # R = 199: E(R) = the v2 tags at 190..199
+GOLDEN_V2_REDEEM = 203         # R = 201
 
 
 def build_golden():
@@ -1978,7 +2058,7 @@ def build_golden():
     # RED-5b sizes the residual at pEmerg; $0.0031 (not $0.003) keeps that residual above RED-5' and leaves the
     # re-created vault claimable at the pools' price, so the CAN-3 round-2 hold still applies.
     price = lambda h: (50_000 + (h % 5) * 100) if h <= 149 else (9_000 + (h % 3) * 10) if h <= 251 else (3_800 + (h % 3) * 5)  # noqa: E731
-    key = lambda h: MINERS[h % 3]  # noqa: E731
+    key = lambda h: (PQF if h % 2 == 0 else PQS) if GOLDEN_V2_LO <= h <= GOLDEN_V2_HI else MINERS[h % 3]  # noqa: E731
     txs_at = {}
     v3 = {}     # heights and choices the v3 tail makes as it goes (deterministic; recorded for the tests)
     while c.height < GOLDEN_BLOCKS:
@@ -2003,6 +2083,17 @@ def build_golden():
         elif h == 145:
             txs_at['xfer2'] = c.transfer_tx([(txid_of(txs_at['xfer1']), 1)], [(0, 5_000)])   # over-assigned: burns 4,000
             txs.append(txs_at['xfer2'])
+        elif h == GOLDEN_V2_MINT:                               # D-3: a mint paying the FN-DSA v2 payee (E(R) is v2 only)
+            ref = h - 2
+            txs_at['mintq'] = c.mint_tx(10_000, 150, ref, collateral_for(c, 10_000, ref, term_class=2), fee_key=PQF, term_class=2)   # class C passes the halt (IT-5)
+            txs.append(txs_at['mintq'])
+        elif h == GOLDEN_V2_REDEEM:                             # D-3: its owner redeem (early: IT-9') paying the SLH-DSA v2 payee
+            opq = (txid_of(txs_at['mintq']), 0)
+            v = c.model.vaults[opq]
+            script = ym.vault_script(v.lock_height, G_PUBKEY, v.claim_height)
+            txs_at['redeemq'] = c.spend_tx(opq, script, 'owner', [(txid_of(txs_at['mintq']), 1)], h - 2, PQS, c.vault_fee(opq, h),
+                                           collateral_out=v.collateral_zat - 10 ** 9)
+            txs.append(txs_at['redeemq'])
         elif h == 185:
             v = c.model.vaults[(txid_of(txs_at['mint1']), 0)]
             script = ym.vault_script(v.lock_height, G_PUBKEY, v.claim_height)
@@ -2166,6 +2257,9 @@ def build_golden():
             payee = c.model.eligible_payees(148)[0]
             bad.append(c.rejected(lambda: c.spend_tx(op4, None, 'owner', [(txid_of(txs_at['mint4']), 1)], 148, payee,
                                                      c.vault_fee(op4), [], collateral_out=v.collateral_zat - 10 ** 9)))
+        elif h == GOLDEN_V2_MINT:                               # MINT-8: a P2PKH fee output where E(R) holds only v2 payees
+            ref = h - 2
+            bad.append(c.rejected(lambda: c.mint_tx(10_000, 150, ref, collateral_for(c, 10_000, ref, term_class=2), fee_key=KEY1, term_class=2)))
         elif h == 185:                                          # RED-2: 6,000 cents burned for a 10,000-cent debt
             op1 = (txid_of(txs_at['mint1']), 0)
             v = c.model.vaults[op1]
@@ -2275,7 +2369,10 @@ def golden_document(c):
         'description': 'Yellowback state-hash golden vector on the vault upgrade, P4-b: regtest params {startHeight 1, sigmaRefBps 0, '
                        'supplyCapBps 0, attestorSetId %s (the txid of the SET_CREATE at 224; livenessWindow %d, maturity 1), '
                        'attestArmMin 3, bundleCarrier 0 (scriptsig), mintRequiresArmed false, pqFalconHeight %d (not hashed: TOK-PQ binds from it)}; '
-                       'SCHEMA_VERSION 14 (in-term claims: the V ownerHeight = appHeight = refHeight + 1, 300/400/500 %% tiers, theta 125 %%; '
+                       'SCHEMA_VERSION 16 (tag v2, beta4 D-T1: the payee is kind || hash, P2PKH or post-quantum; heights %d..%d quote with v2 '
+                       'tags only, FN-DSA and SLH-DSA, so a mint at %d paying P2PKH is bad-mint-fee and the same mint paying the FN-DSA payee '
+                       'holds, and its owner redeem at %d pays the SLH-DSA payee; '
+                       'in-term claims: the V ownerHeight = appHeight = refHeight + 1, 300/400/500 %% tiers, theta 125 %%; '
                        'CAN-1: a cancelled claim refunds its burn; the per-vault cancel limit: CAN-2 escalating co-signed cancels, '
                        'C4b slashable cancel statements, CAN-3 the held residual); payload version 3, MINT version 4 with post-quantum (SLH-DSA) owners (quantum spec C-1, section 3); '
                        '%d synthetic heights (see test_yellowback_model.build_golden): the v2 lifecycle to 224 on V vaults '
@@ -2289,7 +2386,7 @@ def golden_document(c):
                        'txs[0] of every block is the coinbase. Blocks flagged "invalid" (%s; one per verdict, audit 03/T-1) are '
                        'rejected and not applied (U-21); the next entry is the same height mined again without the offending '
                        'transaction.'
-                       % (set_id, GOLDEN_LIVENESS, GOLDEN_FALCON, GOLDEN_BLOCKS,
+                       % (set_id, GOLDEN_LIVENESS, GOLDEN_FALCON, GOLDEN_V2_LO, GOLDEN_V2_HI, GOLDEN_V2_MINT, GOLDEN_V2_REDEEM, GOLDEN_BLOCKS,
                           ', '.join('%d %s' % hv for hv in golden_rejected(c.v3['claim_height']))),
         'params': {'startHeight': 1, 'sigmaRefBps': 0, 'supplyCapBps': 0, 'attestorSetId': set_id,
                    'attestArmMin': 3, 'bundleCarrier': ym.CARRIER_SCRIPTSIG, 'mintRequiresArmed': False,
@@ -2366,7 +2463,7 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(pre[:1], b'T')
         self.assertEqual(pre[1:5], b'\x00\x00\x00\x00')
         self.assertEqual(pre[5:37], bytes(32))
-        self.assertEqual(pre[37:41], b'\x0f\x00\x00\x00')        # SCHEMA_VERSION 15 (HALT-2 reads open debt, owner 2026-10-28)
+        self.assertEqual(pre[37:41], b'\x10\x00\x00\x00')        # SCHEMA_VERSION 16 (tag v2: the payee is kind || hash)
         self.assertEqual(pre[41:49], b'\x07regtest')
         self.assertEqual(pre[49:50], b'G')
         self.assertEqual(pre[50:98], bytes(48))                      # Totals, openDebtCents (i64) appended last
@@ -2392,10 +2489,10 @@ class StateHashTests(unittest.TestCase):
         pre = c.model.state_hash_preimage()
         i = 49                                                        # right after the 49-byte Tip record
         self.assertEqual(pre[i:i + 5], b'Q\x00\x00\x00\x01')
-        self.assertEqual(pre[i + 5:i + 25], KEY1)
-        self.assertEqual(pre[i + 25:i + 33], (50_000).to_bytes(8, 'little'))
-        self.assertEqual(pre[i + 33:i + 36], b'\x01\x02\x01')
-        j = 49 + 36 + 49                                              # Tip, Tags[1], Totals (openDebtCents appended, SCHEMA_VERSION 15)
+        self.assertEqual(pre[i + 5:i + 26], b'\x00' + KEY1)            # the payee: kind 0 (P2PKH) || 20 bytes (SCHEMA_VERSION 16)
+        self.assertEqual(pre[i + 26:i + 34], (50_000).to_bytes(8, 'little'))
+        self.assertEqual(pre[i + 34:i + 37], b'\x01\x02\x01')
+        j = 49 + 37 + 49                                              # Tip, Tags[1], Totals (openDebtCents appended, SCHEMA_VERSION 15)
         self.assertEqual(pre[j:j + 5], b'S\x00\x00\x00\x01')
         rec = pre[j + 5:]
         self.assertEqual(rec[:32], bytes.fromhex(c.block_hash(1))[::-1])
@@ -2421,6 +2518,15 @@ class StateHashTests(unittest.TestCase):
         self.assertIn(17, m.tags)
         self.assertFalse(m.tags[9].is_quote)
         self.assertEqual(m.vaults[(txid_of(txs_at['mint1']), 0)].status, ym.V_CLOSED)
+        # tag v2 (D-3, D-4): v2-only payees at GOLDEN_V2_MINT; the mint pays FN-DSA, its owner redeem SLH-DSA; claim3 pays P2PKH
+        self.assertEqual(m.tags[GOLDEN_V2_LO].payee, PQF)
+        self.assertEqual(m.tags[GOLDEN_V2_LO + 1].payee, PQS)
+        self.assertEqual(set(m.eligible_payees(GOLDEN_V2_MINT - 2)), {PQF, PQS})
+        self.assertEqual((m.txlog[txid_of(txs_at['mintq'])].verdict, m.txlog[txid_of(txs_at['mintq'])].payee), ('ok', PQF))
+        self.assertEqual((m.txlog[txid_of(txs_at['redeemq'])].verdict, m.txlog[txid_of(txs_at['redeemq'])].payee), ('ok', PQS))
+        self.assertEqual(m.vaults[(txid_of(txs_at['mintq']), 0)].status, ym.V_CLOSED)
+        self.assertTrue({PQF, PQS} <= set(m.eligible_payees(213)) and ym.payee_p2pkh(KEY3) in m.eligible_payees(213))
+        self.assertEqual(m.txlog[txid_of(txs_at['claim3'])].payee, ym.payee_p2pkh(KEY3))
         # U-21: one rejected block per verdict (audit 03/T-1), none applied; the same heights mined again without the
         # offending transaction (the C++ statehash_golden_vector's `expected` map is this list)
         v3 = c.v3
@@ -2450,7 +2556,7 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(c.refused[txid_of(txs_at['sweep4'])], 'vault-spend-malformed')
         self.assertNotIn(txid_of(txs_at['sweep4']), m.txlog)
         self.assertEqual(m.totals.as_dict(), {'supplyCents': 10_000, 'collateralZat': 8_775_196_019_613, 'activeVaults': 2,   # 300 % collateral (D-IT-4; the set id moved with its maturity); CAN-1's refund still held; RED-5b leaves more of it in the reopened vault; mintc at 500 %
-                                              'voidVaults': 0, 'closedVaults': 2, 'claimedVaults': 1,
+                                              'voidVaults': 0, 'closedVaults': 3, 'claimedVaults': 1,   # mintq (tag v2) redeemed
                                               'unbackedCents': 0, 'openDebtCents': 20_000})          # mintc's 10,000 (its YED closed mint4) and mint5's
         self.assertIsNone(m.open_debt_violation())
         self.assertTrue(m.snapshots[224].halt_mask & ym.HALT_DIVERGENCE == 0)   # windows refilled at ~9,000
@@ -2568,7 +2674,7 @@ class JsonFeedTests(unittest.TestCase):
              'vout': [{'valueZat': 1000, 'n': 0, 'scriptPubKey': {'hex': ym.p2pkh_script(KEY2).hex()}}]},
         ]}
         m.feed_block_json(blk, ym.regtest_subsidy(1))
-        self.assertEqual(m.tags[1].payout_key, KEY1)
+        self.assertEqual(m.tags[1].payee, ym.payee_p2pkh(KEY1))
         self.assertEqual(m.snapshots[1].block_hash, 'ab' * 32)
         self.assertEqual(ym.tx_from_json(blk['tx'][0]).vout[0].value, 625_000_000)
         self.assertEqual(m.stats()['height'], 1)
@@ -2758,6 +2864,74 @@ def write_pq_vectors():
                                                             doc['chain']['stateHash']))
 
 
+# ---------------------------------------------------------------------------
+# The tag vectors (beta4 P1 spec section 7, D-T4): src/test/data/yellowback_tag_vectors.json, generated here, replayed
+# by the C++ yellowback_tag_tests and copied byte for byte by ycash6 and kogany.  Regenerate with --write-tag-vectors.
+
+TAG_VECTORS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'src', 'test', 'data',
+                                'yellowback_tag_vectors.json')
+TV_KEY = ym.hash160(b'yellowback-tag-vector-p2pkh')
+TV_FN = ym.sha256(b'yellowback-tag-vector-fn-dsa')
+TV_SLH = ym.sha256(b'yellowback-tag-vector-slh-dsa')
+
+
+def tag_vectors_document():
+    P = ym.Params.regtest(1)
+    v1 = ym.tag_push(1, 3_800, 0x0003, TV_KEY)
+    v2f = ym.tag_push_v2(1, 123_456_789, 0x0005, 0x02, TV_FN)
+    v2s = ym.tag_push_v2(0, 3_800, 0x0001, 0x01, TV_SLH)
+    v2bad = ym.tag_push_v2(1, 3_800, 0, 0x03, TV_FN)
+    cases = [
+        ('v1', 1000, ym.height_prefix(1000) + b'\x00' + v1),
+        ('v2 FN-DSA-512', 1000, ym.height_prefix(1000) + b'\x00' + v2f),
+        ('v2 SLH-DSA-SHA2-128s', 1000, ym.height_prefix(1000) + b'\x00' + v2s),
+        ('v2 scheme 0x03: no tag', 1000, ym.height_prefix(1000) + b'\x00' + v2bad),
+        ('v2 truncated (48 bytes after the push opcode): no tag', 1000, ym.height_prefix(1000) + b'\x00' + v2f[:-1]),
+        ('v1 before v2: v1 decides', 1000, ym.height_prefix(1000) + v1 + v2f),
+        ('v2 before v1: v2 decides', 1000, ym.height_prefix(1000) + v2s + v1),
+        ('24 YED! 02 (a v1 pattern with version 2): no tag', 1000, ym.height_prefix(1000) + ym.tag_push(1, 3_800, 0, TV_KEY, version=2)),
+        ('31 YED! 01 (a v2 pattern with version 1): no tag', 1000, ym.height_prefix(1000) + ym.tag_push_v2(1, 3_800, 0, 0x02, TV_FN, version=1)),
+        ('a bad v2 before a good v1: no tag (TAG-5)', 1000, ym.height_prefix(1000) + v2bad + v1),
+        # the internal miner's budget (price-feed.md section 4.3): <h> 4 bytes + an extranonce push of 6 bytes (05 + 5) + 50 = 60
+        ('height 8,388,607, a 6-byte extranonce push (05 + 5 bytes) and a v2 tag: 60 bytes (D-6)', 8_388_607,
+         ym.height_prefix(8_388_607) + b'\x05' + bytes([0xA5] * 5) + v2f),
+    ]
+    out = []
+    for name, h, ss in cases:
+        t = ym.find_tag(ss, h, P)
+        row = {'name': name, 'height': h, 'scriptSig': ss.hex(), 'scriptSigSize': len(ss)}
+        if t is None:
+            row['tag'] = None
+            row['payeeScript'] = None
+        else:
+            row['tag'] = {'version': t.version, 'flags': t.flags, 'priceMicroUsd': t.price_micro_usd, 'sourceMask': t.source_mask,
+                          'payoutScheme': ym.PAYOUT_SCHEME_NAMES[t.payout_scheme], 'payeeKind': t.payout_scheme,
+                          'payoutHash': t.payout_key.hex()}
+            row['payeeScript'] = ym.payee_script(t.payee).hex()
+        out.append(row)
+    assert len(cases[-1][2]) == 60
+    return {
+        'description': 'Yellowback coinbase tag vectors, v1 and v2 (docs/plans/beta4/price-feed.md section 4.3, beta4 P1 spec section 7, '
+                       'D-T4). Each case: the coinbase scriptSig (hex) at a height, the tag FindTag reads (null = no tag; the block stays '
+                       'valid either way, TAG-4) and the fee-output script of its payee (25-byte P2PKH for v1, 35-byte TX_PQPKH for v2). '
+                       'Regtest price bounds. Generated by qa/rpc-tests/test_framework/test_yellowback_model.py --write-tag-vectors; '
+                       'ycash6 and kogany carry this file byte for byte.',
+        'cases': out,
+    }
+
+
+def tag_vectors_text():
+    return json.dumps(tag_vectors_document(), indent=1) + '\n'
+
+
+def write_tag_vectors():
+    text = tag_vectors_text()
+    with open(TAG_VECTORS_PATH, 'w') as f:
+        f.write(text)
+    print('wrote %s: %d cases, sha256 %s' % (os.path.normpath(TAG_VECTORS_PATH), len(tag_vectors_document()['cases']),
+                                             ym.sha256(text.encode()).hex()))
+
+
 class PQVectorTests(unittest.TestCase):
 
     # Rule: TOK-PQ
@@ -2810,5 +2984,7 @@ if __name__ == '__main__':
         sys.exit(check_golden())
     elif '--write-pq-vectors' in sys.argv:
         write_pq_vectors()
+    elif '--write-tag-vectors' in sys.argv:
+        write_tag_vectors()
     else:
         unittest.main()
