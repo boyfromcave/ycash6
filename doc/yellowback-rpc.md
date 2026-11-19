@@ -258,7 +258,7 @@ YED form): what node operators and clients should know.**
 - **`z_mergetoaddress` follows (D-6):** a named `sq…` source merges its coins (at most 100 per call, and
   only as many inputs as keep the policy sigops, P2SH redeem scripts included, within the standard limit; the
   rest are reported as remaining), an `sq…` destination receives the merge, with the same fee rule. PQ coins
-  are never merged with Sprout notes or into a Sprout address. `z_shieldcoinbase` still refuses a PQ source (D-7),
+  are never merged with Sprout notes or into a Sprout address. `z_shieldcoinbase` takes a PQ source since beta4 (below),
   and `z_mergetoaddress` leaves coinbase out, as it does for an ECC address.
 - **A post-quantum miner shields its coinbase with `z_sendmany` (beta3).** A pool may pay a block reward to an `sq…`
   address (`getcoinbasetemplatefor`); where coinbase must be shielded (mainnet, the testnets, regtest with
@@ -295,22 +295,38 @@ YED form): what node operators and clients should know.**
      addresses, which can only be sent to a shielded (Sapling) address, with no change: send them with z_sendmany from
      the address that holds them, which names the exact amount to send` to their insufficient-funds refusal where
      coinbase must be shielded, and `z_shieldcoinbase` (`"*"`) adds ` The wallet holds <v> YEC of mining rewards
-     (coinbase) at post-quantum addresses, which ycashd's z_shieldcoinbase does not spend: send them with z_sendmany from the
-     address that holds them to a Sapling address, with no change; z_sendmany names the exact amount to send.` Error
-     codes are unchanged.
+     (coinbase) at post-quantum addresses, which z_shieldcoinbase shields only from the address that holds them: name that
+     address as fromaddress, and they move to one Sapling address at the exact amount, with no change.` (beta4 item 7a)
+     Error codes are unchanged.
   So a miner names a shielded amount, reads the exact amount in the refusal and sends that. Coins are taken largest
   first, so an amount within the largest reward moves that one reward; an amount above it brings in the next coin
   (and so on, up to the input limit above), and the refusal then names the amount for all of them (a worked example:
   `doc/yellowback-mining.md` §13, "A reward paid to a post-quantum address"). Every refusal is the wallet's: nothing
-  reaches the mempool. ycashd's `z_shieldcoinbase` and `z_mergetoaddress` do not move such a reward (yewd's
-  `z_shieldcoinbase` does, at the exact amount with no change: a yewd-only extension; ycashd's refuses a
-  post-quantum source and `z_mergetoaddress` leaves coinbase out); ycashd has no one-call sweep. **The payout address must be held
+  reaches the mempool. `z_shieldcoinbase` moves such rewards in one call (beta4, next item); `z_mergetoaddress` leaves
+  coinbase out. **The payout address must be held
   in a ycashd or yewd wallet:** the YEW app and the web wallet cannot tell that a coin is a coinbase (lightwalletd's
   `GetAddressUtxos` carries no such flag), so they show the reward as spendable and the node refuses their sends
   until the coin is 100 blocks deep and the send has only shielded recipients and no change. A transparent (ECC) or
   Sapling reward is unchanged.
   Such a send has no transparent output, so `AllowRevealedSenders` is the privacy policy it needs.
   Pinned by `wallet_pq_coinbase_spend.py`, with and without `-regtestshieldcoinbase`, both schemes.
+- **`z_shieldcoinbase` from a post-quantum address (beta4 item 7a; reverses D-7)**, the same call as yewd's (yew #57)
+  on both C++ lines, with each line's own arguments (ycash-dd `fromaddress toaddress ( fee ) ( limit )`, 6.20.0 also
+  `( memo ) ( privacyPolicy )`) and result fields: a named `sq…` `fromaddress` moves its *mature* coinbase (unlocked,
+  never a Yellowback output) to one Sapling `toaddress`, largest first, at most `limit` (default 50; 0 or above 100
+  means `MAX_PQ_INPUTS_PER_TX` = 100) and as many as keep the standard sigops, in one transaction with no transparent
+  output and one Sapling output of the rewards less the fee: no change. The fee is `PQBuilderFee(fee or the line's
+  default fee, that shape)`, the fee the exact-amount `z_sendmany` names for the same rewards; an explicit fee below it
+  is refused (`Fee <x> is below the <y> this post-quantum spend needs`, -8), one above the post-quantum cap too.
+  `remainingUTXOs` / `remainingValue` count the mature rewards left for a next call; `z_getoperationstatus` names the
+  method `z_shieldcoinbase` (the transaction is built and committed by `z_mergetoaddress`'s operation, its D-6 path).
+  Refusals, with yewd's codes: no mature reward -6 `Could not find any coinbase funds to shield.`, followed when the
+  address holds immature rewards by ` The address holds <v> YEC of immature mining rewards (coinbase); a mining reward
+  can be shielded after 101 confirmations, the first of these in <k> more block<s>.`; a p2pkh, p2sh or post-quantum
+  `toaddress` -25 `Cannot shield coinbase output to a p2pkh|p2sh|post-quantum address.`; an unknown one -8 `Invalid
+  parameter, unknown address format: <a>`; an address the wallet does not hold -5 (as `z_sendmany`); a negative limit
+  -8. `"*"` still takes ECC coins only. Wallet RPC only, no consensus change. Pinned by `wallet_pq_shieldcoinbase.py`
+  (and `wallet_pq_address.py`, the yewd parity column).
 - The error strings of these paths (the same on every line):
   `post-quantum addresses can be spent from only once the vault upgrade is active at the next block`;
   `an FN-DSA-512 (scheme 2) post-quantum address can be spent from only once Falcon is active at the next block`;

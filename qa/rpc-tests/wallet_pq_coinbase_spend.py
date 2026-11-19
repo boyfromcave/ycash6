@@ -22,8 +22,9 @@ the post-quantum address builds exactly that:
 
 Beta4 (REPORT item 7, clearer refusals): the refusal calls coinbase "mining rewards", names the one amount that sends
 them to a Sapling address (and the test sends it), the confirmations an immature reward still needs, and the coins
-minconf left out (also for a Sapling source, where coinbase is not the cause); sendtoaddress and z_shieldcoinbase say
-where the rewards are and that z_sendmany moves them. An address with nothing at all keeps the old text.
+minconf left out (also for a Sapling source, where coinbase is not the cause); sendtoaddress says where the rewards are
+and that z_sendmany moves them, z_shieldcoinbase "*" that naming the address shields them (beta4 item 7a:
+wallet_pq_shieldcoinbase.py). An address with nothing at all keeps the old text.
 
 Every refusal below is the wallet's (the RPC or its operation), never the mempool's.
 
@@ -83,9 +84,9 @@ MINCONF_NOTE = (' The address holds %s YEC with fewer than the %d confirmation%s
 SEND_PQ_COINBASE = ('this wallet also holds %s YEC of mining rewards (coinbase) at post-quantum addresses, which can only be '
                     'sent to a shielded (Sapling) address, with no change: send them with z_sendmany from the address that '
                     'holds them, which names the exact amount to send')
-SHIELD_PQ_COINBASE = (' The wallet holds %s YEC of mining rewards (coinbase) at post-quantum addresses, which ycashd\'s z_shieldcoinbase '
-                      'does not spend: send them with z_sendmany from the address that holds them to a Sapling address, with '
-                      'no change; z_sendmany names the exact amount to send.')
+SHIELD_PQ_COINBASE = (' The wallet holds %s YEC of mining rewards (coinbase) at post-quantum addresses, which z_shieldcoinbase '
+                      'shields only from the address that holds them: name that address as fromaddress, and they move to one '
+                      'Sapling address at the exact amount, with no change.')
 CHANGE_REFUSAL = re.compile(
     r'^When shielding coinbase funds, the wallet does not allow any change\. The proposed transaction would result in '
     r'([0-9.]+) in change\. To spend the selected coins, send exactly ([0-9.]+) to shielded recipients '
@@ -352,7 +353,7 @@ class WalletPQCoinbaseSpendTest(BitcoinTestFramework):
             hints.add((send, hint_fee))
         assert_equal(len(hints), 1)
 
-        print('sendtoaddress and z_shieldcoinbase say where the reward is and what moves it')
+        print('sendtoaddress and z_shieldcoinbase "*" say where the reward is and what moves it')
         try:
             wallet.sendtoaddress(t, 1)
             raise AssertionError('sendtoaddress spent a post-quantum coinbase')
@@ -361,7 +362,7 @@ class WalletPQCoinbaseSpendTest(BitcoinTestFramework):
             assert_equal(SEND_PQ_COINBASE % money(reward) in e.error['message'], shield)
         try:
             wallet.z_shieldcoinbase('*', z)
-            raise AssertionError('z_shieldcoinbase spent a post-quantum coinbase')
+            raise AssertionError('z_shieldcoinbase "*" spent a post-quantum coinbase')
         except JSONRPCException as e:
             print('  ' + e.error['message'])
             assert e.error['message'].endswith(SHIELD_PQ_COINBASE % money(reward)), e.error

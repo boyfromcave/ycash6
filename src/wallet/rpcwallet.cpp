@@ -208,15 +208,6 @@ void EnsurePQAmountNotDust(const CTxDestination& dest, CAmount amount)
         throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Invalid parameter, amount %s is below the dust threshold %s of a post-quantum output", FormatMoney(amount), FormatMoney(dust)));
 }
 
-// The z_* RPCs take a libzcash::PaymentAddress, which has no post-quantum alternative: z_sendmany and
-// z_mergetoaddress decode an sq…/tq…/rq… address as a CTxDestination first (beta2 D-2, D-6); z_shieldcoinbase
-// names its refusal (quantum spec A-15, D-7) instead of "unknown format".
-static void RefusePQSource(const KeyIO& keyIO, const std::string& str, const std::string& method)
-{
-    if (IsPQKeyDestination(keyIO.DecodeDestination(str)))
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, method + " cannot spend from a post-quantum address; use z_sendmany");
-}
-
 UniValue getnewaddress(const UniValue& params, bool fHelp)
 {
     if (!EnsureWalletIsAvailable(fHelp))
@@ -245,7 +236,8 @@ UniValue getnewaddress(const UniValue& params, bool fHelp)
             "                  yed_getnewaddress \"pq\"); \"pqslh\": always SLH-DSA-SHA2-128s (larger spends, hash-based only).\n"
             "                  Needs the vault upgrade active at the next block and an unlocked wallet.\n"
             "                  A post-quantum address receives plain YEC; z_sendmany and z_mergetoaddress spend it (fee by\n"
-            "                  size, change back to it); sendtoaddress, sendmany and z_shieldcoinbase never do.\n"
+            "                  size, change back to it); z_shieldcoinbase moves its mature coinbase to Sapling; sendtoaddress\n"
+            "                  and sendmany never spend it.\n"
 
             "\nResult:\n"
             "\"zcashaddress\"    (string) The new transparent Ycash address\n"
@@ -6278,6 +6270,142 @@ UniValue z_getmigrationstatus(const UniValue& params, bool fHelp) {
     return migrationStatus;
 }
 
+/**
+ * Beta4 (item 7a): z_shieldcoinbase from a post-quantum address, as yewd serves it (yew #57). The address's mature
+ * coinbase (largest first, at most `limit`, MAX_PQ_INPUTS_PER_TX and the standard sigops) moves to one Sapling address,
+ * the amount the coins less the fee, so there is no change: the transaction an exact-amount z_sendmany from the address
+ * builds when it selects the same coins, at the same fee (PQBuilderFee(fee or LEGACY_DEFAULT_FEE) on its shape: the PQ
+ * inputs, no transparent output, one Sapling output padded to two; an explicit fee below it, or above PQMaxTxFee(), is
+ * refused). Built and committed by z_mergetoaddress's operation (its PQ builder path, beta2 D-6). Locks held.
+ */
+static UniValue ShieldPQCoinbase(
+        const UniValue& params,
+        const CTxDestination& source,
+        const std::optional<Memo>& memo,
+        const TransactionStrategy& strategy)
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(pwalletMain->cs_wallet);
+    EnsurePQSourceSpendable(source);
+    KeyIO keyIO(Params());
+    const std::string destStr = params[1].get_str();
+    if (IsPQKeyDestination(keyIO.DecodeDestination(destStr))) {
+        throw JSONRPCError(RPC_TRANSACTION_ERROR, "Cannot shield coinbase output to a post-quantum address.");
+    }
+    const auto decoded = keyIO.DecodePaymentAddress(destStr);
+    const libzcash::SaplingPaymentAddress* sapling =
+        decoded.has_value() ? std::get_if<libzcash::SaplingPaymentAddress>(&decoded.value()) : nullptr;
+    if (sapling == nullptr) {
+        // a coinbase is spent only into the shielded pool, here to one Sapling address
+        if (decoded.has_value() && std::holds_alternative<CScriptID>(decoded.value())) {
+            throw JSONRPCError(RPC_TRANSACTION_ERROR, "Cannot shield coinbase output to a p2sh address.");
+        } else if (decoded.has_value() && std::holds_alternative<CKeyID>(decoded.value())) {
+            throw JSONRPCError(RPC_TRANSACTION_ERROR, "Cannot shield coinbase output to a p2pkh address.");
+        }
+        throw JSONRPCError(RPC_INVALID_PARAMETER, std::string("Invalid parameter, unknown address format: ") + destStr);
+    }
+    std::optional<CAmount> fee;
+    if (params.size() > 2 && !params[2].isNull()) {
+        fee = AmountFromValue(params[2]);
+    }
+    const int nLimit = params.size() > 3 && !params[3].isNull() ? params[3].get_int() : SHIELD_COINBASE_DEFAULT_LIMIT;
+    if (nLimit < 0) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Limit on maximum number of utxos cannot be negative");
+    }
+
+    // The coins: the address's mature coinbase, unlocked and unspent (AvailableCoins), never a Yellowback output.
+    const CScript script = GetScriptForDestination(source);
+    std::vector<COutput> coins;
+    pwalletMain->AvailableCoins(coins, std::nullopt, true, nullptr, false, true);
+    coins.erase(std::remove_if(coins.begin(), coins.end(), [&](const COutput& o) {
+        return !o.fSpendable || !o.fIsCoinbase || o.tx->vout[o.i].scriptPubKey != script;
+    }), coins.end());
+    const std::string yedRefusal = DropYellowbackCoins(coins, true);
+    std::sort(coins.begin(), coins.end(), [](const COutput& i, const COutput& j) {
+        if (i.Value() != j.Value()) return i.Value() > j.Value();
+        if (i.tx->GetHash() != j.tx->GetHash()) return i.tx->GetHash() < j.tx->GetHash();
+        return i.i < j.i;
+    });
+    const size_t maxInputs = nLimit == 0 ? MAX_PQ_INPUTS_PER_TX : std::min<size_t>(nLimit, MAX_PQ_INPUTS_PER_TX);
+    SpendableInputs selected;
+    std::vector<std::pair<CScript, CAmount>> shapeIns;
+    std::vector<CScript> prevScripts;
+    CAmount shieldingValue = 0;
+    CAmount remainingValue = 0;
+    unsigned int sigops = 1;   // one left for the output's script, as z_mergetoaddress counts
+    for (const COutput& o : coins) {
+        const unsigned int n = GetPQSigOpCount(script);
+        if (selected.utxos.size() < maxInputs && sigops + n <= MAX_STANDARD_TX_SIGOPS) {
+            selected.utxos.push_back(o);
+            shapeIns.emplace_back(script, o.Value());
+            prevScripts.push_back(script);
+            shieldingValue += o.Value();
+            sigops += n;
+        } else {
+            remainingValue += o.Value();
+        }
+    }
+    const size_t numUtxos = selected.utxos.size();
+    if (numUtxos == 0) {
+        if (!yedRefusal.empty()) throw JSONRPCError(RPC_WALLET_ERROR, yedRefusal);
+        int blocksToGo = 0;
+        const CAmount immature = PQImmatureCoinbase(*pwalletMain, script, &blocksToGo);
+        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
+            "Could not find any coinbase funds to shield." + PQShieldImmatureTail(immature, blocksToGo));
+    }
+
+    const int nextBlockHeight = chainActive.Height() + 1;
+    if (fee.has_value()) EnsurePQFeeWithinCap(fee.value());
+    // 6.x: the Sapling builder pads a lone output to two.
+    const CTransaction shape = PQFeeShape(nextBlockHeight, shapeIns, {}, 0, 2);
+    EnsurePQShapeStandard(shape, prevScripts, numUtxos);
+    const CAmount needed = PQBuilderFee(fee.value_or(LEGACY_DEFAULT_FEE), shape);
+    if (fee.has_value() && needed > fee.value()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+            "Fee %s is below the %s this post-quantum spend needs", FormatMoney(fee.value()), FormatMoney(needed)));
+    }
+    EnsurePQFeeWithinCap(needed);
+    const CAmount nFee = fee.value_or(needed);
+    if (shieldingValue <= nFee) {
+        throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
+            strprintf("Insufficient coinbase funds, have %s, which is less than miners fee %s",
+            FormatMoney(shieldingValue), FormatMoney(nFee)));
+    }
+
+    UniValue contextInfo(UniValue::VOBJ);
+    contextInfo.pushKV("fromaddress", params[0]);
+    contextInfo.pushKV("toaddress", params[1]);
+    contextInfo.pushKV("fee", ValueFromAmount(nFee));
+
+    const ZTXOSelector selector = CWallet::LegacyTransparentZTXOSelector(true, TransparentCoinbasePolicy::Require);
+    WalletTxBuilder builder(Params(), minRelayTxFee);
+    auto effects = builder.PrepareTransaction(
+            *pwalletMain,
+            selector,
+            selected,
+            Recipients(NetAmountRecipient(decoded.value(), memo)),
+            chainActive,
+            strategy,
+            nFee,
+            nAnchorConfirmations)
+        .map_error([&](const auto& err) {
+            ThrowInputSelectionError(err, selector, strategy);
+        })
+        .value();
+    auto merge = new AsyncRPCOperation_mergetoaddress(*pwalletMain, strategy, effects, contextInfo);
+    merge->method = "z_shieldcoinbase";
+    std::shared_ptr<AsyncRPCOperation> operation(merge);
+    getAsyncRPCQueue()->addOperation(operation);
+
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("remainingUTXOs", static_cast<uint64_t>(coins.size() - numUtxos));
+    o.pushKV("remainingValue", ValueFromAmount(remainingValue));
+    o.pushKV("shieldingUTXOs", static_cast<uint64_t>(numUtxos));
+    o.pushKV("shieldingValue", ValueFromAmount(shieldingValue));
+    o.pushKV("opid", operation->getId());
+    return o;
+}
+
 UniValue z_shieldcoinbase(const UniValue& params, bool fHelp)
 {
     if (!EnsureWalletIsAvailable(fHelp))
@@ -6294,11 +6422,16 @@ UniValue z_shieldcoinbase(const UniValue& params, bool fHelp)
             + strprintf("%d bytes before Sapling, and %d bytes once Sapling activates.", MAX_TX_SIZE_BEFORE_SAPLING, MAX_TX_SIZE_AFTER_SAPLING)
             + HelpRequiringPassphrase() + "\n"
             "\nArguments:\n"
-            "1. \"fromaddress\"         (string, required) The address is a taddr or \"*\" for all taddrs belonging to the wallet.\n"
+            "1. \"fromaddress\"         (string, required) The address is a taddr or \"*\" for all ECC taddrs belonging to the wallet.\n"
+            "                         A post-quantum address shields its own mature coinbase (mining rewards) to one Sapling\n"
+            "                         toaddress at the exact amount, the coins less the fee, with no change (largest first, at most\n"
+            "                         " + strprintf("%d", MAX_PQ_INPUTS_PER_TX) + " per transaction); \"*\" never takes them.\n"
             "2. \"toaddress\"           (string, required) The address is a zaddr.\n"
             "3. fee                   (numeric, optional, default=null) The fee amount in " + CURRENCY_UNIT + " to attach to this transaction. The default behavior\n"
             "                         is the fee for the active -feepolicy: the Ycash per-Sapling-output\n"
-            "                         fee (peroutput, the default), or ZIP 317 (zip317).\n"
+            "                         fee (peroutput, the default), or ZIP 317 (zip317). From a post-quantum address the fee\n"
+            "                         is priced on the transaction's size (the default is raised to it, an explicit fee below\n"
+            "                         it is refused).\n"
             "4. limit                 (numeric, optional, default="
             + strprintf("%d", SHIELD_COINBASE_DEFAULT_LIMIT) + ") Limit on the maximum number of utxos to shield.  Set to 0 to use as many as will fit in the transaction.\n"
             "5. \"memo\"                (string, optional) Encoded as hex. This will be stored in the memo field of the new note.\n"
@@ -6352,12 +6485,16 @@ UniValue z_shieldcoinbase(const UniValue& params, bool fHelp)
     bool involvesOrchard{false};
     KeyIO keyIO(Params());
 
+    // Beta4 (item 7a): a post-quantum address shields its own mature coinbase at the exact amount (yewd's extension).
+    if (const CTxDestination pqSource = keyIO.DecodeDestination(fromaddress); !isFromWildcard && IsPQKeyDestination(pqSource)) {
+        return ShieldPQCoinbase(params, pqSource, memo, strategy);
+    }
+
     // Set of source addresses to filter utxos by
     ZTXOSelector ztxoSelector = [&]() {
         if (isFromWildcard) {
             return CWallet::LegacyTransparentZTXOSelector(true, TransparentCoinbasePolicy::Require);
         } else {
-            RefusePQSource(keyIO, fromaddress, "z_shieldcoinbase");   // quantum spec A-15
             auto decoded = keyIO.DecodePaymentAddress(fromaddress);
             if (!decoded.has_value()) {
                 throw JSONRPCError(

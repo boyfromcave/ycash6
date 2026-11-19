@@ -64,6 +64,9 @@ public:
 
     virtual UniValue getStatus() const;
 
+    /// The RPC getStatus() names (beta4: z_shieldcoinbase from a post-quantum address is built by this operation).
+    std::string method = "z_mergetoaddress";
+
     /// Set to true to disable sending txs and generating proofs
     bool testmode = false;
 

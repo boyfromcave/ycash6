@@ -3248,8 +3248,9 @@ SpendableInputs CWallet::FindSpendableInputs(
                 CTxDestination address;
                 bool hasDestination = ExtractDestination(output.scriptPubKey, address);
                 // A TX_PQPKH coin is never selected here (ANY_TADDR and the ECC selectors spend ECC coins only;
-                // z_shieldcoinbase refuses a PQ source, D-7): a post-quantum from address of z_sendmany is spent through
-                // WalletTxBuilder::PreparePQTransaction, z_mergetoaddress names its coins (beta2 D-2, D-6).
+                // "*" takes none, D-7): a post-quantum from address of z_sendmany is spent through
+                // WalletTxBuilder::PreparePQTransaction, z_mergetoaddress and z_shieldcoinbase name its coins (beta2 D-2,
+                // D-6; beta4 item 7a).
                 bool isSelectable =
                     hasDestination && !IsPQKeyDestination(address) && this->SelectorMatchesAddress(selector, address);
                 if (isSelectable) {

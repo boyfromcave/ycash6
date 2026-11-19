@@ -449,9 +449,17 @@ std::string PQInsufficientFunds(const std::string& message, bool noCoins, const 
 std::string PQCoinbaseShieldNote(CAmount pqCoinbase)
 {
     if (pqCoinbase <= 0) return "";
-    return strprintf(" The wallet holds %s YEC of mining rewards (coinbase) at post-quantum addresses, which ycashd's z_shieldcoinbase "
-                     "does not spend: send them with z_sendmany from the address that holds them to a Sapling address, with "
-                     "no change; z_sendmany names the exact amount to send.", FormatMoney(pqCoinbase));
+    return strprintf(" The wallet holds %s YEC of mining rewards (coinbase) at post-quantum addresses, which z_shieldcoinbase "
+                     "shields only from the address that holds them: name that address as fromaddress, and they move to one "
+                     "Sapling address at the exact amount, with no change.", FormatMoney(pqCoinbase));
+}
+
+std::string PQShieldImmatureTail(CAmount immature, int blocksToGo)
+{
+    if (immature <= 0) return "";
+    return strprintf(" The address holds %s YEC of immature mining rewards (coinbase); a mining reward can be shielded after %d "
+                     "confirmations, the first of these in %d more block%s.",
+                     FormatMoney(immature), COINBASE_MATURITY + 1, blocksToGo, blocksToGo == 1 ? "" : "s");
 }
 
 std::string PQCoinbaseChangeRefusal(CAmount change, CAmount selected, CAmount fee)
