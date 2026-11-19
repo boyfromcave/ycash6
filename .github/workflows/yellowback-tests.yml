@@ -282,9 +282,9 @@ env:
   # section 4.12).
   # dbf53a8 (B3-D5) adds the generator's beta3 line (rpcversion 10: no yed_* shape change,
   # docs/plans/beta3/rpc-contract-delta.md section 4.13).
-  # 802ddb8 (yellowback#80, beta4 P1) adds the generator's beta4 line (rpcversion 11: yed_gettag.version and
+  # 9b82b3c (yellowback#80, beta4 P1) adds the generator's beta4 line (rpcversion 11: yed_gettag.version and
   # payoutScheme, docs/plans/beta4/rpc-contract-delta.md section 4.14). Re-pin to its merge commit when #80 merges.
-  YB_WORKSPACE_COMMIT: ${{ inputs.workspace_commit || '802ddb898c5ed6e83b47179ebfefd859708b37cb' }}
+  YB_WORKSPACE_COMMIT: ${{ inputs.workspace_commit || '9b82b3c9e7f124b87cbe09f98a0dc00a405fc2d8' }}
   # The mixed tier's pins (workspace docs/plans/kogany/ci-design.md; bump by PR, never a branch tip).
   # kogany: upgrade/vault at 33a32a911 (the koganyd identity); its koganyd-bin artifact (any
   # kogany workflow) or, when that has expired or does not exist, a build at this commit (dev

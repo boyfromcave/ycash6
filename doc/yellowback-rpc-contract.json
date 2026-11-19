@@ -1098,6 +1098,7 @@
         "found": true,
         "kind": "quote",
         "payoutAddress": "smQvTmAz2ExamplePayoutAddress1111111",
+        "payoutScheme": "p2pkh",
         "priceMicroUsd": 2000000,
         "sourceMask": 3,
         "version": 1
