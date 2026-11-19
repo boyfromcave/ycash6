@@ -167,6 +167,7 @@ leg_rpc_cvt() {
 # One name per line with its reason; anything not named here that the fork added under qa/rpc-tests/
 # must be executable, registered and run by a CI job.
 REGISTRATION_EXCLUDE=$(sed 's/[[:space:]]*#.*$//' <<'EOF_EXCLUDE' | grep -v '^$' || true
+yellowback_cancel_agent_light   # needs a lightwalletd-dd and a yew-attestor build (LIGHTWALLETD_BIN, YEW_ATTESTOR_BIN), out of this repo: run by hand (beta4 item 3d)
 kogany_mixed_smoke     # run directly (python3 -u), not through rpc-tests.py: the `direct` row of the mixed node group
 kogany_sidecar_smoke   # run directly by the sidecar-rig job ("The test rig smoke")
 kogany_standin         # not a test: the stand-in koganyd for testing the mixed-line harness (KOGANY_BIN)

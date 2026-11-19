@@ -86,7 +86,7 @@ pub struct Subscriber {
 
 impl Subscriber {
     pub fn new(cfg: Config) -> anyhow::Result<Self> {
-        let node = Node::new(&cfg.node)?;
+        let node = Node::for_config(&cfg)?;
         Ok(Subscriber {
             cfg,
             node,

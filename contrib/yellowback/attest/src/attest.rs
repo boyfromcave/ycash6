@@ -149,7 +149,7 @@ impl Attestor {
         if mock.is_none() && cfg.sources.is_empty() {
             anyhow::bail!("no [[sources]] configured (or pass --mock-price)");
         }
-        let node = Node::new(&cfg.node)?;
+        let node = Node::for_config(&cfg)?;
         let feed = PriceFeed::new(
             cfg.sources.clone(),
             cfg.btc_usd_sources.clone(),
@@ -263,6 +263,14 @@ impl Attestor {
             }
         };
         let reused = reply.get("reused").and_then(Value::as_bool).unwrap_or(false);
+        // a light seat also hands the statement to its lightwalletd endpoints' nodes (SubmitAttestation, B-2): the
+        // pool their BuildBundle reads; gossip below reaches every other subscriber as before
+        if self.node.light().is_some() {
+            match self.node.call("yed_addattestation", vec![json!(att.to_hex())]).await {
+                Ok(v) => tracing::debug!("SubmitAttestation: {v}"),
+                Err(e) => tracing::warn!("SubmitAttestation of seq {} at {}: {e}", att.seq, att.cited_height),
+            }
+        }
         if let Err(e) = transport.publish(&att.encode()).await {
             tracing::error!("publish on {} failed: {e}; retrying next tick", transport.name());
             return Tick::PublishError;
@@ -429,7 +437,7 @@ impl Attestor {
         // The cancel-limit design's automation (CAN-2 + C4b): its topic shares the transport (one iroh endpoint, or the
         // dir bus's cancel/ subdirectory) and runs on its own task; the watcher and the collector run once per poll.
         let (mut transport, mut cancel) = if self.cfg.cancel.enabled {
-            let rt = CancelRuntime::open(&self.cfg, &network, self.seq).await?;
+            let rt = CancelRuntime::open(&self.cfg, self.node.clone(), &network, self.seq).await?;
             let topics_attest = rt.1;
             (topics_attest, Some(rt.0))
         } else {
@@ -506,7 +514,7 @@ pub struct CancelRuntime {
 }
 
 impl CancelRuntime {
-    pub async fn open(cfg: &Config, network: &str, seq: u16) -> anyhow::Result<(Self, Box<dyn Transport>)> {
+    pub async fn open(cfg: &Config, node: Node, network: &str, seq: u16) -> anyhow::Result<(Self, Box<dyn Transport>)> {
         let c = &cfg.cancel;
         let topics = transport::open_with_cancel(&cfg.transport, network, c.delivery.gossip()).await?;
         let mut idle = Vec::new();
@@ -522,10 +530,15 @@ impl CancelRuntime {
             }
         };
         let (bindings_tx, bindings_rx) = transport::spawn_pump(topics.bindings);
-        let path = c
-            .state_file
-            .clone()
-            .unwrap_or_else(|| crate::cancel::CancelAgent::default_path(&cfg.node, network, seq));
+        let path = c.state_file.clone().unwrap_or_else(|| match node.light() {
+            // a light seat keeps its state beside its key file
+            Some(l) => l
+                .key_file()
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(format!("yellowback-cancel-{network}-{seq}.json")),
+            None => crate::cancel::CancelAgent::default_path(&cfg.node, network, seq),
+        });
         let (direct, direct_tx, direct_announces, drx, idle_direct) = if c.delivery.direct() {
             let key = c
                 .direct_secret_key_file
@@ -543,7 +556,7 @@ impl CancelRuntime {
         let (ctx_tx, ctx_rx) = tokio::sync::watch::channel(std::sync::Arc::new(crate::gossip::Ctx::default()));
         let (vtx, verified) = tokio::sync::mpsc::channel(4096);
         crate::gossip::spawn(grx, drx, ctx_rx, vtx, c.gossip_burst, c.gossip_refill_seconds);
-        let agent = crate::cancel::CancelAgent::new(c.clone(), &cfg.node, seq, path)?;
+        let agent = crate::cancel::CancelAgent::with_node(c.clone(), node, &cfg.node, seq, path)?;
         tracing::info!(
             "cancel automation: delivery {:?}, on-chain fallback {} (after {} blocks, {} zat a transaction)",
             c.delivery,
