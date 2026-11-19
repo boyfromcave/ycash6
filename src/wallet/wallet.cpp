@@ -8908,6 +8908,55 @@ static bool ReadRecoveryPhraseFile(const std::string& path, std::optional<Mnemon
     return true;
 }
 
+bool CWallet::CompleteRestoreScan(int nFromHeight, const std::string& why)
+{
+    AssertLockHeld(cs_wallet);
+    pindexRestoreScanned = nullptr;
+    nRestoreAtHeaderTipSince = 0;
+    if (!CWalletDB(strWalletFile).EraseRestoreScan()) {
+        LogPrintf("Error: the restore's scan is complete, but erasing the restore marker failed: the next start scans again\n");
+        fWalletRestoreWarned = true;
+        SetWalletRestorePending(true);
+        return false;
+    }
+    LoadRestoreScan(-1);
+    LogPrintf("The restore's scan from height %d is complete%s\n", nFromHeight, why);
+    return true;
+}
+
+void CWallet::MaybeCompleteRestore()
+{
+    size_t peers = 0;
+    {
+        LOCK(cs_vNodes);
+        peers = vNodes.size();
+    }
+    LOCK2(cs_main, cs_wallet);
+    if (!RestoreInProgress() || pindexRestoreScanned == nullptr) return;
+    if (chainActive.Tip() != pindexRestoreScanned) {
+        // a block was connected after the scan, one at a time without the restore's re-pass: the next start scans again
+        LogPrintf("The restore's scan reached height %d, but the chain has moved on: the next start scans again\n",
+                  pindexRestoreScanned->nHeight);
+        pindexRestoreScanned = nullptr;
+        nRestoreAtHeaderTipSince = 0;
+        return;
+    }
+    const bool atHeaderTip = pindexBestHeader && pindexBestHeader->nHeight <= chainActive.Height();
+    if (Params().NetworkIDString() != "regtest") {
+        if (!atHeaderTip || peers == 0) {
+            nRestoreAtHeaderTipSince = 0;
+            return;
+        }
+        const int64_t now = GetTime();
+        if (nRestoreAtHeaderTipSince == 0) nRestoreAtHeaderTipSince = now;
+        if (now - nRestoreAtHeaderTipSince < RESTORE_SETTLE) return;
+    } else if (!atHeaderTip) {
+        return;
+    }
+    const int from = std::max(nRestoreScanFrom, 0);
+    CompleteRestoreScan(from, " (the node is at its header tip, which no new block has extended)");
+}
+
 bool CWallet::InitLoadWallet(const CChainParams& params, bool clearWitnessCaches)
 {
     std::string walletFile = GetArg("-wallet", DEFAULT_WALLET_DAT);
@@ -9183,15 +9232,19 @@ bool CWallet::InitLoadWallet(const CChainParams& params, bool clearWitnessCaches
         // re-pass a key used out of chain order needs: the next start scans again.
         if (fRestoreScan) {
             if (IsInitialBlockDownload(Params().GetConsensus())) {
-                LogPrintf("The restore's scan reached height %d, but the node is in initial block download: the next start scans again\n",
-                          chainActive.Height());
-            } else if (!CWalletDB(walletFile).EraseRestoreScan()) {
-                LogPrintf("Error: the restore's scan is complete, but erasing the restore marker failed: the next start scans again\n");
-                walletInstance->fWalletRestoreWarned = true;
-                SetWalletRestorePending(true);
+                // Beta4 (item 2b): on a chain no block extends the node stays in initial block download; the restore
+                // completes once the node stays at its header tip with this tip (MaybeCompleteRestore).
+                walletInstance->pindexRestoreScanned = chainActive.Tip();
+                LogPrintf("The restore's scan reached height %d, but the node is in initial block download: it completes once "
+                          "the node stays at its header tip with peers for %d s, or the next start scans again\n",
+                          chainActive.Height(), CWallet::RESTORE_SETTLE);
+                if (Params().NetworkIDString() == "regtest" && pindexBestHeader && pindexBestHeader->nHeight <= chainActive.Height()) {
+                    LOCK(walletInstance->cs_wallet);
+                    walletInstance->CompleteRestoreScan(pindexRescan->nHeight, " (the node is at its header tip, which no new block has extended)");
+                }
             } else {
-                walletInstance->LoadRestoreScan(-1);
-                LogPrintf("The restore's scan from height %d is complete\n", pindexRescan->nHeight);
+                LOCK(walletInstance->cs_wallet);
+                walletInstance->CompleteRestoreScan(pindexRescan->nHeight, "");
             }
         }
 

@@ -3399,9 +3399,11 @@ UniValue getwalletinfo(const UniValue& params, bool fHelp)
             "  \"restore_in_progress\": true|false, (bool) true while the wallet, created from a recovery phrase (-mnemonicfile), has not\n"
             "                                    completed its scan of the chain from genesis: its balances and transactions may be\n"
             "                                    incomplete. Every start of the node scans from genesis again until one scan completes\n"
-            "                                    with the node synced (an interrupted restore resumes this way; a restore made before the\n"
-            "                                    node had the chain completes at the first restart after it has synced, and getinfo's\n"
-            "                                    errors asks for that restart once the node has synced).\n"
+            "                                    with the node synced, or with the node at its header tip (blocks >= headers) and peers\n"
+            "                                    for 60 s on a chain no new block extends (regtest: at once). An interrupted restore\n"
+            "                                    resumes this way; a restore made before the node had the chain completes at the first\n"
+            "                                    restart after it has synced, and getinfo's errors asks for that restart once the node\n"
+            "                                    has synced).\n"
             "}\n"
             "\nbalance counts confirmed coins and this wallet's own unconfirmed outputs (a transaction whose every input\n"
             "is this wallet's, such as change); unconfirmed_balance counts the other unconfirmed outputs (payments from\n"
@@ -3414,6 +3416,7 @@ UniValue getwalletinfo(const UniValue& params, bool fHelp)
 
     auto asOfHeight = parseAsOfHeight(params, 0);
 
+    pwalletMain->MaybeCompleteRestore();   // beta4 item 2b: a restore on a parked chain completes at its header tip
     LOCK2(cs_main, pwalletMain->cs_wallet);
 
     UniValue obj(UniValue::VOBJ);

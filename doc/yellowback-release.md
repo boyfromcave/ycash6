@@ -367,7 +367,13 @@ release notes:
   wallet's best block and its keys' birthday (the time of the restore); `getwalletinfo`
   `restore_in_progress` is true meanwhile. A restore made on a node that does not have the chain yet
   completes at the first restart after the sync; once the node has synced, `getinfo` `errors` says
-  `Wallet restore in progress: restart the node after it has synced to finish scanning for older coins`. A shutdown request stops a pass at a block boundary
+  `Wallet restore in progress: restart the node after it has synced to finish scanning for older coins`. Beta4 (item 2b,
+  as yewd, yew #58): on a chain no new block extends the node stays in initial block download (its tip is older than
+  `-maxtipage`); a restore whose scan reached that tip, every re-pass included, completes once the node stays at its
+  header tip (blocks >= headers) with that tip and with peers for 60 s, on regtest at once (`The restore's scan from
+  height 0 is complete (the node is at its header tip, which no new block has extended)`); a node still downloading
+  (headers ahead of blocks), or a block connected after the scan, keeps the marker for the next start
+  (`wallet_restore_parked_chain.py`). A shutdown request stops a pass at a block boundary
   (`Still rescanning (pass n)` in the log every minute). An older binary ignores the marker: it
   starts from the wallet's best block and the keys' birthday, so it does not resume an unfinished
   restore (coins not found before the interruption stay unseen there), and it leaves the marker in
