@@ -18,9 +18,10 @@ none does the agent state its aggregate now; prints the 69-byte hex that `yed_bu
 watcher, the co-signature gossip and the collector of "Cancel automation" below, with no operator. `cosign` stays for an
 operator who wants to act by hand.
 
-**The agent never holds a key.** Signing happens inside the node, whose equivocation guard
+**With the default backend the agent never holds a key.** Signing happens inside the node, whose equivocation guard
 (`attest-signed.dat`, plan §4.5 S16) makes two prices for one height impossible from one node.
-Running two agents against two nodes with one hot key is the operator's error; do not.
+Running two agents against two nodes with one hot key is the operator's error; do not. A light seat
+(`[backend] kind = "lightwalletd"`, "The light seat" below) holds its own seat key and its own copy of that guard.
 
 **Failure behaviour** (the quote agent's, plan L5): an RPC or transport failure is logged at
 `error` and retried on the next tick, never fatal; after `fail_polls` consecutive failed
@@ -48,7 +49,15 @@ attest/
 ├── src/
 │   ├── main.rs                 clap: attest | subscribe | sources | check-config | cosign
 │   ├── config.rs               attest.toml → Config (bad config = exit 2)
-│   ├── rpc.rs                  JSON-RPC 1.0 client (cookie or user/password), + a mock server for tests
+│   ├── rpc.rs                  the backend seam: Node::call → the JSON-RPC 1.0 client (cookie or user/password) or the
+│   │                           light backend; + a mock server for tests
+│   ├── light/mod.rs            the light backend: node RPC names answered from lightwalletd-dd + the local signer
+│   ├── light/grpc.rs           one lightwalletd-dd endpoint (tonic), its answers in the node's JSON shapes
+│   ├── light/proto.rs          generated gRPC stubs (proto/regen.sh; checked in, so the build needs no protoc)
+│   ├── light/yew.rs            the yew-attestor CLI runner (heartbeat, cancel, on-chain fallback)
+│   ├── light/tx.rs             a raw transaction's txid and transparent outputs
+│   ├── signer.rs               the seat key file (WIF) and the node's three signatures, byte for byte
+│   ├── guard.rs                the equivocation guard file, ycashd's attest-signed.dat layout
 │   ├── price.rs                the aggregator: port of contrib/yellowback/yellowback_price.py
 │   ├── framing.rs              the 74-byte attestation (seq u16 ‖ price u32 ‖ citedHeight u32 ‖ sig 64, LE)
 │   ├── attest.rs               the attest loop, `sources` and `cosign`
@@ -63,6 +72,7 @@ attest/
 │   ├── fixtures.rs             the Rust side of the Rust/Python cross-check
 │   └── tls.rs                  installs the one rustls provider (ring) shared with iroh
 ├── fixtures/                   recorded exchange replies, scenarios.json, expected.json, expected.py
+├── proto/                      the pinned lightwalletd-dd protos (PIN), regen.sh and its generator crate
 └── packaging/                  systemd units (attest, subscribe) and a launchd plist
 ```
 
@@ -144,6 +154,55 @@ ycash-cli -regtest yed_getattestations           # the pool fills as blocks are 
 ```
 
 `--mock-price FILE` is re-read every poll, so `echo 0.60 > price-1` is the divergence demo.
+
+## The light seat (`[backend] kind = "lightwalletd"`, beta4 item 3d)
+
+A light seat runs no node (plan `docs/plans/beta4/price-feed.md` §2.2–§2.3, D-6/D-7). The host holds the agent, the seat
+key file, the guard file, `yew-attestor` (YEW, for the seat's transactions) and nothing else; it reads two
+lightwalletd-dd endpoints, in different regions.
+
+```toml
+[backend]
+kind = "lightwalletd"
+lightwalletd = ["https://lwd-a.example:9067", "https://lwd-b.example:9067"]
+key_file = "/var/lib/yellowback/seat.key"     # mode 0600: the WIF `ycash-cli dumpprivkey <bondKeyAddress>` prints
+# guard_file = "/var/lib/yellowback/seat.key.guard"   # default <key_file>.guard
+yew_attestor = "/usr/local/bin/yew-attestor"
+# cosign_endpoints = 2      # endpoints that must show a claim before the seat co-signs it (default min(2, endpoints))
+# allow_insecure = false    # plain http:// to a host that is not loopback
+# timeout = 30
+```
+
+No `[node]` table. The loops are the node backend's, unchanged: `rpc.rs` routes each node RPC to the light backend,
+which answers it with the node's JSON shape:
+
+| The agent calls | A light seat answers with |
+|---|---|
+| `yed_getinfo`, `yed_listattestors`, `set_getinfo`, `yed_getattestations`, `yed_listvaults`, `yed_getvault`, `yed_decodepayload`, `gettxout`, `getrawtransaction`, `getblockchaininfo` | the first endpoint that answers, failing over (B-6); a transaction is checked against its txid |
+| `getblockhash` | every endpoint: two that answer must agree, else nothing is signed on that height (B-7) |
+| `getrawmempool` | the union of the endpoints' (`GetMempoolTxids`) |
+| `getblock` (the on-chain fallback's scan) | the block's compact transactions and every member address's (`GetTaddressTxids`) |
+| `yed_signattestation`, `yed_signcancelcosign` | the seat key behind the guard file: ycashd's checks, message and signature, byte for byte |
+| `validateaddress`, `signmessage` (the direct endpoint's binding) | the seat key, for its own `bondKeyAddress` only |
+| `yed_addattestation` (and every signed statement) | `SubmitAttestation` to every endpoint, beside the gossip (B-2) |
+| `sendrawtransaction` | `SendTransaction` to every endpoint |
+| `set_heartbeat`; `yed_buildcancel` + `set_signcancel` + `vault_send`; the on-chain "YF" record | `yew-attestor heartbeat`, `cancel`, `op-return` |
+
+- **The key file and the guard.** The key is the seat's member key, which also controls its bond. The guard file is
+  ycashd's `attest-signed.dat` byte for byte: every (seq, citedHeight, block hash) the key signed with its price,
+  attestations and cancel co-signatures alike, fsynced before a signature leaves; a second price is refused
+  (`equivocation-guard`), the same price returns the recorded signature. Move a seat between a node and a light host
+  only with its guard file, and only after the old host is fenced (plan D-1).
+- **Trust.** A lying endpoint can make the seat cite a wrong hash. That statement is invalid and is not equivocation
+  (EQV-1 verifies under the real hash; the guard is keyed on the hash), so it costs liveness, never the bond. With two
+  endpoints the cited hash must agree before signing, and a claim must be shown by `cosign_endpoints` endpoints, and
+  denied by none, before it is co-signed (B-10). A fake claim yields a co-signature no rule counts.
+- **What it does not do.** `vault_refee` does not exist on a light seat (a cancel that left the mempool is rebuilt by
+  `yew-attestor` from fresh coins); an on-chain record funded from an address that is not a member's is not seen by
+  the scan. Without `yew_attestor` the seat signs and co-signs but sends no heartbeat, drives no cancel and posts no
+  fallback.
+- **The generated client.** `src/light/proto.rs` is generated from `proto/*.proto` (byte copies of lightwalletd-dd's,
+  pinned in `proto/PIN`) by `proto/regen.sh`, which needs `protoc`; the agent's build does not.
 
 ## Cancel automation (the cancel-limit design, CAN-2 + C4b)
 
