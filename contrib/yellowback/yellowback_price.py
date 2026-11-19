@@ -829,6 +829,13 @@ TAG_PATTERN = b"\x24" + TAG_MAGIC     # direct push of 36 bytes followed by the 
 TAG_SIZE = 36
 TAG_BODY_SIZE = TAG_SIZE - len(TAG_MAGIC)
 TAG_VERSION = 1
+# Tag v2 (docs/plans/beta4/price-feed.md section 4.3): 49 bytes pushed as 0x31 || tag, a post-quantum payout key:
+# magic | 0x02 | flags | price u64 | sourceMask u16 | payoutScheme u8 | payoutHash 32 (SHA256(scheme || pk)).
+TAG_PATTERN_V2 = b"\x31" + TAG_MAGIC
+TAG_SIZE_V2 = 49
+TAG_BODY_SIZE_V2 = TAG_SIZE_V2 - len(TAG_MAGIC)
+TAG_VERSION_V2 = 2
+PAYOUT_SCHEMES = {0x01: "slh-dsa-sha2-128s", 0x02: "fn-dsa-512"}   # crypto/pq/scheme.h; yed_gettag.payoutScheme
 
 
 def skip_height_push(script):
@@ -852,32 +859,42 @@ def skip_height_push(script):
     return hdr + n if len(script) >= hdr + n else None
 
 
-def decode_tag_body(body):
-    """TAG-2 over the 32 bytes after the pattern: the decoded fields or None (invalid tag = no tag)."""
-    if len(body) < TAG_BODY_SIZE:
+def decode_tag_body(body, v2=False):
+    """TAG-2 over the 32 (v1) or 45 (v2) bytes after the pattern: the decoded fields or None (invalid tag = no
+    tag). A v1 pattern must carry version 1, a v2 pattern version 2 and a registered payoutScheme."""
+    if len(body) < (TAG_BODY_SIZE_V2 if v2 else TAG_BODY_SIZE):
         return None
     version, flags, price, mask = struct.unpack_from("<BBqH", body, 0)
-    payout = body[12:32]
-    if version != TAG_VERSION or flags & 0xFE:
+    if version != (TAG_VERSION_V2 if v2 else TAG_VERSION) or flags & 0xFE:
         return None
     if price != 0 and not PRICE_MIN <= price <= PRICE_MAX:
         return None
-    return {"version": version, "flags": flags, "signal": bool(flags & 1), "priceMicroUsd": price,
-            "sourceMask": mask, "payoutKeyHex": payout.hex(),
-            "kind": "quote" if price > 0 else "signal"}
+    out = {"version": version, "flags": flags, "signal": bool(flags & 1), "priceMicroUsd": price,
+           "sourceMask": mask, "kind": "quote" if price > 0 else "signal"}
+    if v2:
+        scheme = body[12]
+        if scheme not in PAYOUT_SCHEMES:
+            return None
+        out.update({"payoutScheme": PAYOUT_SCHEMES[scheme], "payoutSchemeByte": scheme, "payoutHashHex": body[13:45].hex()})
+    else:
+        out.update({"payoutScheme": "p2pkh", "payoutKeyHex": body[12:32].hex()})
+    return out
 
 
 def decode_coinbase_tag(script_sig):
-    """TAG-1/TAG-5: skip the height push, scan the rest for the first 5-byte pattern, decode the
-    32 bytes that follow. Returns the field dict (with `offset`) or None."""
+    """TAG-1/TAG-5: skip the height push, scan the rest for the first occurrence of either pattern (24 YED!
+    for v1, 31 YED! for v2, whichever comes first), decode the bytes that follow. Returns the field dict (with
+    `offset`) or None; the first occurrence decides."""
     start = skip_height_push(bytes(script_sig))
     if start is None:
         return None
     rest = bytes(script_sig)[start:]
-    i = rest.find(TAG_PATTERN)
-    if i < 0:
+    i1, i2 = rest.find(TAG_PATTERN), rest.find(TAG_PATTERN_V2)
+    if i1 < 0 and i2 < 0:
         return None
-    tag = decode_tag_body(rest[i + len(TAG_PATTERN):])
+    v2 = i1 < 0 or 0 <= i2 < i1
+    i = i2 if v2 else i1
+    tag = decode_tag_body(rest[i + len(TAG_PATTERN):], v2=v2)
     if tag is None:
         return None
     tag["offset"] = start + i
@@ -893,6 +910,18 @@ def encode_tag(price_micro_usd, source_mask_bits, payout_key20, signal=True, ver
 
 def encode_tag_push(*args, **kw):
     return b"\x24" + encode_tag(*args, **kw)
+
+
+def encode_tag_v2(price_micro_usd, source_mask_bits, payout_scheme, payout_hash32, signal=True, version=TAG_VERSION_V2):
+    """The 49-byte v2 tag body (magic included); `encode_tag_v2_push` adds the 0x31."""
+    if len(payout_hash32) != 32:
+        raise ValueError("payoutHash must be 32 bytes")
+    return (TAG_MAGIC + struct.pack("<BBqH", version, 1 if signal else 0, price_micro_usd, source_mask_bits)
+            + bytes([payout_scheme]) + bytes(payout_hash32))
+
+
+def encode_tag_v2_push(*args, **kw):
+    return b"\x31" + encode_tag_v2(*args, **kw)
 
 
 def height_push(height):
