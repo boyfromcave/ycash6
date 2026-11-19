@@ -414,7 +414,7 @@ class YellowbackMiningTest(YellowbackTestFramework):
         assert ym.is_p2sh(_spk(self.nodes[0], p2sh))
         assert_start_raises_init_error(2, self.options.tmpdir,
                                        yellowback_node_args(['-yellowbackpayoutaddress=%s' % p2sh], sigma_ref=0),
-                                       '-yellowbackpayoutaddress must be a transparent P2PKH address')
+                                       '-yellowbackpayoutaddress must be a transparent P2PKH or post-quantum address')   # tag v2 (beta4 D-T2): P2SH still refused
         self.restart(2)
         set_quote(self.nodes[2], '2.00')
         h = self.mine(2)[0]
