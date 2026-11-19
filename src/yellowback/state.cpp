@@ -128,13 +128,13 @@ std::optional<Judgement> JudgementAt(const StateView& view, const Params& p, int
 
 /** Quote-tag prices with lo < h <= hi (heights >= START_HEIGHT), ascending height, skipping the keys in `excluded` (PIN-1). */
 std::vector<std::pair<int64_t, MicroUsd>> QuotePrices(const StateView& view, const Params& p, int64_t lo, int64_t hi,
-                                                      const std::vector<uint160>& excluded = std::vector<uint160>())
+                                                      const std::vector<Payee>& excluded = std::vector<Payee>())
 {
     std::vector<std::pair<int64_t, MicroUsd>> out;
     for (int64_t h = std::max<int64_t>(lo + 1, p.startHeight); h <= hi; h++) {
         std::optional<TagRecord> t = TagAt(view, p, h);
         if (!t.has_value() || !t->IsQuote()) continue;
-        if (std::find(excluded.begin(), excluded.end(), t->payoutKey) != excluded.end()) continue;
+        if (std::find(excluded.begin(), excluded.end(), t->payee) != excluded.end()) continue;
         out.push_back(std::make_pair(h, (MicroUsd)t->priceMicroUsd));
     }
     return out;
@@ -181,7 +181,7 @@ struct EvalContext
     const Params& params;
     const int height;
     SigCache* cache;
-    std::map<int, std::vector<CKeyID>> eligible;
+    std::map<int, std::vector<Payee>> eligible;
     std::map<int64_t, std::optional<Snapshot>> snapshots;
     // The BundleLog[H] accumulator (R12): flushed by EvaluateBlock before SNAP; a standalone ProcessTx never writes it.
     bool anyBundle;
@@ -246,7 +246,7 @@ struct EvalContext
         return row;
     }
 
-    const std::vector<CKeyID>& Eligible(int refHeight)
+    const std::vector<Payee>& Eligible(int refHeight)
     {
         auto it = eligible.find(refHeight);
         if (it != eligible.end()) return it->second;
@@ -276,7 +276,7 @@ bool Contains(const std::vector<SpentVault>& v, const COutPoint& o)
     return false;
 }
 
-bool ContainsKey(const std::vector<CKeyID>& keys, const CKeyID& k)
+bool ContainsKey(const std::vector<Payee>& keys, const Payee& k)
 {
     return std::find(keys.begin(), keys.end(), k) != keys.end();
 }
@@ -421,11 +421,12 @@ std::string MintVerdict(EvalContext& ctx, const CTransaction& tx, const Payload&
     // TOK-PQ (quantum spec F-7): from the Falcon height the token output is a Falcon TX_PQPKH.
     if (!HolderAllowed(P, H, tx.vout[1].scriptPubKey)) return verdict::BAD_YED_HOLDER;
     // MINT-8 shape and payee (FEE-0 when E(R) is empty, K11); the amount clause is MINT-8' below (after MINT-5)
-    const std::vector<CKeyID>& eligible = ctx.Eligible((int)ref);
+    const std::vector<Payee>& eligible = ctx.Eligible((int)ref);
     if (!eligible.empty()) {
         const uint8_t fv = p.feeVout;
         if (fv == FEE_VOUT_NONE || fv >= tx.vout.size() || fv == 0 || fv == 1 || fv == opReturnIndex) return verdict::BAD_MINT_FEE;
-        std::optional<CKeyID> key = P2PKHKey(tx.vout[fv].scriptPubKey);
+        // exactly the script of a payee in E(R): P2PKH (tag v1) or TX_PQPKH (tag v2)
+        std::optional<Payee> key = Payee::FromScript(tx.vout[fv].scriptPubKey);
         if (!key.has_value() || !ContainsKey(eligible, key.value())) return verdict::BAD_MINT_FEE;
     }
     if (!armed) {
@@ -490,7 +491,7 @@ bool ApplyMint(EvalContext& ctx, const CTransaction& tx, const uint256& txid, co
         if (!ctx.Eligible((int)p.refHeight).empty()) {
             vault.feePaidZat = tx.vout[p.feeVout].nValue;
             log.feeZat = vault.feePaidZat;
-            std::optional<CKeyID> key = P2PKHKey(tx.vout[p.feeVout].scriptPubKey);
+            std::optional<Payee> key = Payee::FromScript(tx.vout[p.feeVout].scriptPubKey);
             log.hasPayee = key.has_value();
             if (key.has_value()) log.payee = key.value();
         }
@@ -641,13 +642,13 @@ std::string RedVerdict(EvalContext& ctx, const CTransaction& tx, const std::opti
     // output (AFEE-1's rule gives the owner path no attestor share); at or after lockHeight the protocol fee only.
     // The redeem reads V.pMint only: never a snapshot, never a bundle (the owner's path reads no live price).
     const CAmount protocolFee = ProtocolFeeZat(vault.mintedCents, vault.pMint, P).value_or(MAX_MONEY);
-    const std::vector<CKeyID>& eligible = ctx.Eligible((int)ref);
+    const std::vector<Payee>& eligible = ctx.Eligible((int)ref);
     std::set<unsigned int> assignedVouts;
     for (const Assignment& a : p.assignments) assignedVouts.insert(a.vout);
     if (!eligible.empty()) {
         const uint8_t fv = p.feeVout;
         if (fv == FEE_VOUT_NONE || fv >= tx.vout.size() || fv == fp->opReturnIndex || assignedVouts.count(fv)) return verdict::VAULT_SPEND_BAD_FEE;
-        std::optional<CKeyID> key = P2PKHKey(tx.vout[fv].scriptPubKey);
+        std::optional<Payee> key = Payee::FromScript(tx.vout[fv].scriptPubKey);   // P2PKH or TX_PQPKH exactly
         if (!key.has_value() || !ContainsKey(eligible, key.value())) return verdict::VAULT_SPEND_BAD_PAYEE;
         if (tx.vout[fv].nValue < protocolFee) return verdict::VAULT_SPEND_BAD_FEE;
         if (!claim && H < (int64_t)vault.lockHeight && P.IsValidClass(vault.termClass)
@@ -773,7 +774,7 @@ bool ApplyVaultSpend(EvalContext& ctx, const CTransaction& tx, const uint256& tx
     if (!ctx.Eligible((int)p.refHeight).empty()) {
         vault.feePaidZat = tx.vout[p.feeVout].nValue;
         log.feeZat = vault.feePaidZat;
-        std::optional<CKeyID> key = P2PKHKey(tx.vout[p.feeVout].scriptPubKey);
+        std::optional<Payee> key = Payee::FromScript(tx.vout[p.feeVout].scriptPubKey);
         log.hasPayee = key.has_value();
         if (key.has_value()) log.payee = key.value();
     }
@@ -1551,58 +1552,56 @@ std::optional<Snapshot> SnapshotAt(const State& st, const Params& P, int64_t hei
     return st.GetSnapshot((uint32_t)height);
 }
 
-std::vector<CKeyID> EligiblePayees(const StateView& view, const Params& P, int refHeight)
+std::vector<Payee> EligiblePayees(const StateView& view, const Params& P, int refHeight)
 {
-    // PIN-1: keys pinned at R are not eligible payees at R
-    std::vector<CKeyID> pinned;
+    // PIN-1: payees pinned at R are not eligible payees at R
+    std::vector<Payee> pinned;
     if (refHeight >= P.startHeight && refHeight >= 0) {
         std::optional<Snapshot> s = State(const_cast<StateView&>(view)).GetSnapshot((uint32_t)refHeight);
-        if (s.has_value()) {
-            for (const uint160& k : s->pinnedKeys) pinned.push_back(CKeyID(k));
-        }
+        if (s.has_value()) pinned = s->pinnedKeys;
     }
-    std::vector<CKeyID> keys;
+    std::vector<Payee> keys;
     for (int64_t h = std::max<int64_t>((int64_t)refHeight - P.payeeWindow + 1, P.startHeight); h <= refHeight; h++) {
         std::optional<TagRecord> t = TagAt(view, P, h);
         if (!t.has_value() || !t->IsQuote()) continue;
-        CKeyID k(t->payoutKey);
+        const Payee& k = t->payee;
         if (ContainsKey(pinned, k)) continue;
         if (!ContainsKey(keys, k)) keys.push_back(k);
     }
     return keys;
 }
 
-bool Registered(const StateView& view, const Params& P, const CKeyID& key, int refHeight)
+bool Registered(const StateView& view, const Params& P, const Payee& key, int refHeight)
 {
     for (int64_t h = std::max<int64_t>((int64_t)refHeight - P.nReg + 1, P.startHeight); h <= refHeight; h++) {
         std::optional<TagRecord> t = TagAt(view, P, h);
-        if (t.has_value() && t->IsQuote() && t->payoutKey == key) return true;
+        if (t.has_value() && t->IsQuote() && t->payee == key) return true;
     }
     return false;
 }
 
-bool Penalized(const StateView& view, const Params& P, const CKeyID& key, int refHeight, int penaltyBlocks)
+bool Penalized(const StateView& view, const Params& P, const Payee& key, int refHeight, int penaltyBlocks)
 {
     // t + PEER_LAG < R <= t + PEER_LAG + N_PENALTY  <=>  R - PEER_LAG - N_PENALTY <= t < R - PEER_LAG
     const int64_t lo = (int64_t)refHeight - P.peerLag - std::max(0, penaltyBlocks);
     const int64_t hi = (int64_t)refHeight - P.peerLag - 1;
     for (int64_t t = std::max<int64_t>(lo, P.startHeight); t <= hi; t++) {
         std::optional<TagRecord> tag = TagAt(view, P, t);
-        if (!tag.has_value() || !tag->IsQuote() || !(tag->payoutKey == key)) continue;
+        if (!tag.has_value() || !tag->IsQuote() || !(tag->payee == key)) continue;
         std::optional<Judgement> j = JudgementAt(view, P, t);
         if (j.has_value() && j->penalized) return true;
     }
     return false;
 }
 
-int AccuracyBps(const StateView& view, const Params& P, const CKeyID& key, int refHeight, int accuracyWindow)
+int AccuracyBps(const StateView& view, const Params& P, const Payee& key, int refHeight, int accuracyWindow)
 {
     const int64_t hi = (int64_t)refHeight - P.peerLag;
     const int64_t lo = hi - std::max(0, accuracyWindow) + 1;
     int64_t quoted = 0, inBand = 0;
     for (int64_t t = std::max<int64_t>(lo, P.startHeight); t <= hi; t++) {
         std::optional<TagRecord> tag = TagAt(view, P, t);
-        if (!tag.has_value() || !tag->IsQuote() || !(tag->payoutKey == key)) continue;
+        if (!tag.has_value() || !tag->IsQuote() || !(tag->payee == key)) continue;
         std::optional<Judgement> j = JudgementAt(view, P, t);
         if (!j.has_value() || !j->evaluated) continue;
         quoted++;
@@ -1611,25 +1610,33 @@ int AccuracyBps(const StateView& view, const Params& P, const CKeyID& key, int r
     return quoted > 0 ? (int)(BPS * inBand / quoted) : 0;
 }
 
-std::optional<CKeyID> DefaultPayee(const StateView& view, const Params& P, int refHeight,
-                                   const std::vector<unsigned char>& selector, const PayeePolicy& policy)
+std::optional<Payee> DefaultPayee(const StateView& view, const Params& P, int refHeight,
+                                  const std::vector<unsigned char>& selector, const PayeePolicy& policy)
 {
-    const std::vector<CKeyID> eligible = EligiblePayees(view, P, refHeight);
+    std::vector<Payee> eligible = EligiblePayees(view, P, refHeight);
     if (eligible.empty()) return std::nullopt;
+    if (policy.txHeight.has_value() && !P.IsPQFalconActive(policy.txHeight.value())) {
+        // policy only: no FN-DSA payee before Falcon while another payee is eligible (the rules still accept one)
+        std::vector<Payee> preFalcon;
+        for (const Payee& k : eligible) {
+            if (k.kind != pq::SCHEME_FN_DSA_512) preFalcon.push_back(k);
+        }
+        if (!preFalcon.empty()) eligible = preFalcon;
+    }
     if (policy.preferred.has_value() && ContainsKey(eligible, policy.preferred.value())) return policy.preferred;
 
-    std::vector<std::pair<CKeyID, int64_t>> candidates;
+    std::vector<std::pair<Payee, int64_t>> candidates;
     for (int64_t h = std::max<int64_t>((int64_t)refHeight - P.payeeWindow + 1, P.startHeight); h <= refHeight; h++) {
         std::optional<TagRecord> t = TagAt(view, P, h);
         if (!t.has_value() || !t->IsQuote()) continue;
-        CKeyID k(t->payoutKey);
+        const Payee& k = t->payee;
         if (!ContainsKey(eligible, k)) continue;                       // pinned at R (PIN-1)
         if (Penalized(view, P, k, refHeight, policy.penaltyBlocks)) continue;
         const int64_t w = BPS + (int64_t)std::max(0, policy.tiltBps) * (int64_t)AccuracyBps(view, P, k, refHeight, policy.accuracyWindow) / BPS;
         candidates.push_back(std::make_pair(k, w));
     }
     if (candidates.empty()) {
-        for (const CKeyID& k : eligible) candidates.push_back(std::make_pair(k, (int64_t)BPS));
+        for (const Payee& k : eligible) candidates.push_back(std::make_pair(k, (int64_t)BPS));
     }
     int64_t total = 0;
     for (const auto& c : candidates) total += c.second;
@@ -1737,12 +1744,12 @@ Snapshot ComputeSnapshot(State& st, const Params& P, int height, const uint256& 
             if (row.aMint > aHi) aHi = row.aMint;
         }
         if (aLo >= 0 && (aHi - aLo) * BPS > (int64_t)std::max(0, P.pinDeltaBps) * aLo) {
-            std::map<uint160, std::pair<int, std::set<uint64_t>>> perKey;   // key -> (quote count, prices)
+            std::map<Payee, std::pair<int, std::set<uint64_t>>> perKey;   // payee -> (quote count, prices)
             for (int64_t h = std::max<int64_t>(H - P.pinWindow, P.startHeight); h <= H - 1; h++) {
                 std::optional<TagRecord> t = TagAt(st.View(), P, h);
                 if (!t.has_value() || !t->IsQuote()) continue;
-                perKey[t->payoutKey].first++;
-                perKey[t->payoutKey].second.insert(t->priceMicroUsd);
+                perKey[t->payee].first++;
+                perKey[t->payee].second.insert(t->priceMicroUsd);
             }
             for (const auto& kv : perKey) {
                 if (kv.second.first >= std::max(1, P.pinMinTags) && kv.second.second.size() == 1) s.pinnedKeys.push_back(kv.first);
@@ -1913,7 +1920,7 @@ BlockEvaluation EvaluateBlock(OverlayStateView& overlay, const Params& params, c
     }
     if (tag.has_value()) {
         TagRecord t;
-        t.payoutKey = tag->payoutKey;
+        t.payee = tag->payee;
         t.priceMicroUsd = tag->priceMicroUsd;
         t.signal = tag->Signal();
         t.sourceMask = tag->sourceMask;

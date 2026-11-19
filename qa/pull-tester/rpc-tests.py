@@ -79,6 +79,8 @@ BASE_SCRIPTS= [
     'yellowback_cancel_limit.py',     # the cancel-limit design (CAN-3 round 2: the held residual, R-1c)
     'yellowback_pq.py',
     'yellowback_pq_dayone.py',
+    'yellowback_tag_v2.py',           # beta4 D-T1/D-T2: tag v2, a post-quantum payout key (price-feed.md §4.5 D-1, D-3..D-5, D-9)
+    'yellowback_tag_v2_falcon.py',    # beta4 P1 follow-up: an FN-DSA payee is policy-gated on the Falcon height (init, miner, wallet draw)
     'yellowback_pricefeed.py',
     'yellowback_hardening.py',
     'wallet_yed_held_guard.py',      # beta2 item 32: the wallet-side has-held-YED guard beside H6

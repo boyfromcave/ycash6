@@ -56,6 +56,14 @@ static const std::vector<std::pair<std::string, std::string>> TAG_CORPUS = {
     {"height_16777216", "00000001040000000100112233445566772459454421010150c30000000000000700abababababababababababababababababababab"},
     {"height_0_genesis_shape", "00000000002459454421010150c30000000000000700abababababababababababababababababababab"},
     {"height_negative_bits", "ffffffff0387d6122459454421010150c30000000000000700abababababababababababababababababababab"},
+    {"v2_fn_dsa_after_height", "87d612000387d6123159454421020150c3000000000000070002cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"},
+    {"v2_slh_dsa_after_extranonce", "87d612000387d61200112233445566773159454421020150c3000000000000070001cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"},
+    {"v2_bad_scheme", "87d612000387d6123159454421020150c3000000000000070003cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"},
+    {"v2_truncated_by_one", "87d612000387d6123159454421020150c3000000000000070002cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"},
+    {"v2_version_1", "87d612000387d6123159454421010150c3000000000000070002cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"},
+    {"v1_then_v2", "87d612000387d6122459454421010150c30000000000000700abababababababababababababababababababab3159454421020150c3000000000000070002cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"},
+    {"v2_then_v1", "87d612000387d6123159454421020150c3000000000000070002cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd2459454421010150c30000000000000700abababababababababababababababababababab"},
+    {"v2_height_8388607_60_bytes", "ffff7f0003ffff7f05554e38776c3159454421020150c3000000000000070002cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"},
     {"pool_internal_miner", "40420f000340420f53"},
     {"pool_internal_miner_tagged", "40420f000340420f2459454421010150c30000000000000700abababababababababababababababababababab53"},
     {"pool_internal_miner_big_nonce", "41420f000341420f03563412"},
@@ -284,7 +292,7 @@ bool ReplayTag(const std::string& name, const std::vector<unsigned char>& data)
         const CScript prefix = CScript() << nHeight;
         BOOST_CHECK_MESSAGE(std::search(scriptSig.begin() + prefix.size(), scriptSig.end(), push.begin(), push.end()) != scriptSig.end(), name + ": found tag is in the scriptSig");
         BOOST_CHECK_MESSAGE(IsValidTag(tag.value()), name + ": found tag is valid");
-        BOOST_CHECK_EQUAL(EncodeTag(tag.value()).size(), TAG_SIZE);
+        BOOST_CHECK_EQUAL(EncodeTag(tag.value()).size(), tag->version == TAG_VERSION ? TAG_SIZE : TAG_SIZE_V2);   // v1 36, v2 49
     }
     for (int h : { 0, 1, 16, 17, 65535, 1234567 }) FindTag(CScript(data.begin(), data.end()), h);
     for (size_t n = 0; n < scriptSig.size(); n++) FindTag(CScript(scriptSig.begin(), scriptSig.begin() + n), nHeight);
@@ -353,7 +361,8 @@ BOOST_AUTO_TEST_CASE(tag_corpus_replay)
     // after_height, after_extranonce, after_pool_text, two_tags, signal_only, pushdata1_tag (6);
     // the six height_* budget seeds (6); height_0_genesis_shape (1); the ten *_tagged pool seeds (10).
     // height_negative_bits masks to 2,147,483,647, which is not the seed's height prefix, so no tag.
-    BOOST_CHECK_EQUAL(found, 6 + 6 + 1 + 10);
+    // Tag v2: v2_fn_dsa_after_height, v2_slh_dsa_after_extranonce, v1_then_v2, v2_then_v1, v2_height_8388607_60_bytes (5).
+    BOOST_CHECK_EQUAL(found, 6 + 6 + 1 + 10 + 5);
     for (const auto& e : TAG_CRASHES) ReplayTag("crash:" + e.first, ParseHex(e.second));
 }
 

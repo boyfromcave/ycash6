@@ -29,11 +29,8 @@ CScript BuildTagScript(const YellowbackIndex& index, int64_t now)
     const MinerStatus s = index.GetMinerStatus(now);
     if (s.kind == "none" || !s.payoutKey.has_value()) return CScript();
     const QuoteHolder q = index.GetQuote();
-    CoinbaseTag tag;
-    tag.flags = 0x00;                                              // no signal bit (ACT-1 left with the upgrade, §6)
-    tag.priceMicroUsd = q.priceMicroUsd;
-    tag.sourceMask = q.sourceMask;
-    tag.payoutKey = s.payoutKey.value();
+    // no signal bit (ACT-1 left with the upgrade, §6); tag v1 for a P2PKH payee, v2 for a post-quantum one (D-T2)
+    const CoinbaseTag tag = MakeTag(0x00, q.priceMicroUsd, q.sourceMask, s.payoutKey.value());
     if (!IsValidTag(tag)) return CScript();
     return TagPush(tag);
 }

@@ -66,7 +66,7 @@ std::vector<unsigned char> TestPQOwnerBytes(const CPubKey& k)
 }
 
 const CAmount SUBSIDY = 625000000;   // regtest post-Blossom
-const std::string GOLDEN_HASH = "ee6a9f157175b6e084df52f96dc5039e4d411189352542f329971e6dd7bb0c0b";   // SCHEMA_VERSION 15: HALT-2 divides by Totals.openDebtCents (owner 2026-10-28; Snapshot.openDebtCents; build_golden buys the stranded mint4 back with a class C mint at 232-233), 22 rejected blocks; 14: RED-5a/5b (positional claimant floor; path (b) caps at pEmerg), 22 rejected blocks; the per-vault cancel limit (CAN-2, C4b, CAN-3; round 2: the claimable-position hold), 20 rejected blocks; 13: CAN-1 (the cancel refunds the burn), R12 hardened, 17 rejected blocks (audit 03/T-1, 03/H-1, 03/M-2); FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 12 since the bounded liveness and join refusals; 11, seats and D-Q-30; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
+const std::string GOLDEN_HASH = "e45e83e80a681192e237e62bfad7155c4cb01dcf93fd756da76bccb2799bfe5a";   // SCHEMA_VERSION 16: tag v2 (beta4 D-T1, D-T4): the payee is kind || hash; v2-only quotes at 190..206, a P2PKH-fee mint refused at 201 (bad-mint-fee), the FN-DSA-fee mint and its SLH-DSA-fee owner redeem hold, 23 rejected blocks; 15: HALT-2 divides by Totals.openDebtCents (owner 2026-10-28; Snapshot.openDebtCents; build_golden buys the stranded mint4 back with a class C mint at 232-233), 22 rejected blocks; 14: RED-5a/5b (positional claimant floor; path (b) caps at pEmerg), 22 rejected blocks; the per-vault cancel limit (CAN-2, C4b, CAN-3; round 2: the claimable-position hold), 20 rejected blocks; 13: CAN-1 (the cancel refunds the burn), R12 hardened, 17 rejected blocks (audit 03/T-1, 03/H-1, 03/M-2); FEE-1' fees at the stored pMint and VaultRecord.pMint (SCHEMA_VERSION 12 since the bounded liveness and join refusals; 11, seats and D-Q-30; 9, D-Q-23); in-term claims, post-quantum owners and the v4 MINT (quantum spec §3)
 
 /** The YED attestor set every fixture names (U-22): its id only shapes the V template. */
 uint256 TestSet()
@@ -80,6 +80,24 @@ uint160 KeyOf(int i)
     return uint160(v);
 }
 
+/** The P2PKH payee of KeyOf(i) (tag v1). */
+Payee PK(int i)
+{
+    return Payee::FromKeyID(CKeyID(KeyOf(i)));
+}
+
+/** The P2PKH script of KeyOf(i): a v1 payee's fee output. */
+CScript KeyOfScript(int i)
+{
+    return GetScriptForDestination(CKeyID(KeyOf(i)));
+}
+
+/** A post-quantum payee (tag v2) of a scheme: the CPQKeyID hash is 32 bytes of 0x70 + scheme. */
+Payee PQPayee(uint8_t scheme)
+{
+    return Payee::FromPQ(CPQKeyID(scheme, uint256(std::vector<unsigned char>(32, (unsigned char)(0x70 + scheme)))));
+}
+
 struct MintOpts
 {
     int termClass = 0;
@@ -91,6 +109,7 @@ struct MintOpts
     std::optional<CPubKey> owner;
     std::vector<unsigned char> rawOwner; //!< overrides the key bytes in the payload
     int extraOutputs = 0;
+    std::optional<CScript> feeScript;  //!< overrides the fee output's script (tag v2: a payee's TX_PQPKH)
     bool p2shVault = true;           //!< the vault output is the V template (U-23; the name predates it); false = P2PKH(owner)
     std::vector<COutPoint> yedInputs;
     std::optional<CScript> vaultScriptOverride;
@@ -112,6 +131,7 @@ struct SpendOpts
     int feeKey = -2;                        //!< -2 = payee of the tag at refHeight; -1 = none
     uint8_t feeVout = 1;
     CAmount feeValue = -1;
+    std::optional<CScript> feeScript;       //!< overrides the fee output's script (tag v2: a payee's TX_PQPKH)
     std::vector<Assignment> assigned;       //!< token outputs at vout 3.. (caller chooses vouts)
     bool payload = true;
     std::optional<Payload> payloadOverride;
@@ -302,12 +322,17 @@ struct Fixture
         t.flags = signal ? 1 : 0;
         t.priceMicroUsd = price;
         t.sourceMask = mask;
-        t.payoutKey = KeyOf(key);
+        t.payee = PK(key);
         return t;
     }
     static CoinbaseTag SignalOnly(int key)
     {
         return Quote(0, key, true, 0);
+    }
+    /** A v2 quote tag (beta4 D-T1) naming the post-quantum payee of `scheme`. */
+    static CoinbaseTag QuoteV2(MicroUsd price, uint8_t scheme)
+    {
+        return MakeTag(0x01, price, 7, PQPayee(scheme));
     }
 
     static CMutableTransaction Coinbase(int height, const std::optional<CoinbaseTag>& tag)
@@ -445,7 +470,7 @@ struct Fixture
             int key = o.feeKey;
             if (key == -2) key = refHeight % 3;
             CAmount fee = o.feeValue >= 0 ? o.feeValue : ProtocolFeeZat(cents, o.pMint.value_or(PMintAt(refHeight)), P).value_or(0);
-            m.vout.push_back(CTxOut(fee, GetScriptForDestination(CKeyID(KeyOf(key)))));
+            m.vout.push_back(CTxOut(fee, o.feeScript.value_or(GetScriptForDestination(CKeyID(KeyOf(key))))));
         }
         if (o.attestPayee >= 0) {
             while (m.vout.size() < 4) m.vout.push_back(CTxOut(1000, GetScriptForDestination(userKey.GetPubKey().GetID())));
@@ -498,7 +523,7 @@ struct Fixture
         int key = o.feeKey == -2 ? refHeight % 3 : o.feeKey;
         CAmount fee = o.feeValue >= 0 ? o.feeValue : VaultFee(*v);
         if (o.feeValue < 0 && o.ownerPath && tip + 1 < v->lockHeight) fee += EarlyRedeemFeeZat(v->mintedCents, P.earlyRedeemFeeBps[v->termClass], v->pMint);   // IT-9': mined at tip + 1
-        m.vout.push_back(CTxOut(fee, GetScriptForDestination(CKeyID(KeyOf(key < 0 ? 9 : key)))));
+        m.vout.push_back(CTxOut(fee, o.feeScript.value_or(GetScriptForDestination(CKeyID(KeyOf(key < 0 ? 9 : key))))));
         size_t nOut = 3;
         for (const Assignment& a : o.assigned) nOut = std::max<size_t>(nOut, a.vout + 1);
         const uint8_t attestFeeVout = o.attestPayee >= 0 ? (uint8_t)nOut : FEE_VOUT_NONE;
@@ -774,15 +799,15 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
             // U-21: an invalid block is rejected, not applied (the vector keeps it to prove the rejection);
             // the next entry is the same height mined again without the offending transaction.
             // One rejected block per verdict, in order (audit 03/T-1; test_yellowback_model.golden_rejected is the same list;
-            // the emergency claim of build_golden landed at 299, the Falcon height is 400).
+            // the emergency claim of build_golden landed at 298 since tag v2, the Falcon height is 400).
             static const std::vector<std::pair<int, std::string>> expected = {
                 { 137, "bad-mint-amount" }, { 141, "bad-mint-collateral" }, { 146, "yed-template-output" }, { 150, "bad-redeem-early-fee" },
-                { 185, "vault-spend-short-burn" }, { 217, "vault-spend-malformed" }, { 231, "attestor-register-retired" },
+                { 185, "vault-spend-short-burn" }, { 201, "bad-mint-fee" }, { 217, "vault-spend-malformed" }, { 231, "attestor-register-retired" },
                 { 251, "mint9-no-bundle" }, { 252, "mint9-bundle-sig" }, { 253, "mint9-bundle-member" }, { 292, "liveness-unheld" },
-                { 299, "red5-residual" }, { 299, "red5-residual" }, { 299, "red5-claimant-short" },
-                { 300, "intent-cancel-no-vault" }, { 300, "intent-cancel-no-refund" }, { 300, "intent-cancel-cosign" },
-                { 308, "intent-cancel-residual" }, { 310, "intent-residual-held" },
-                { 340, "intent-residual-held" }, { 402, "bad-yed-holder" }, { 403, "bad-yed-holder" } };
+                { 298, "red5-residual" }, { 298, "red5-residual" }, { 298, "red5-claimant-short" },
+                { 299, "intent-cancel-no-vault" }, { 299, "intent-cancel-no-refund" }, { 299, "intent-cancel-cosign" },
+                { 307, "intent-cancel-residual" }, { 309, "intent-residual-held" },
+                { 339, "intent-residual-held" }, { 402, "bad-yed-holder" }, { 403, "bad-yed-holder" } };
             BOOST_CHECK(b.exists("invalid") && b["invalid"].get_bool());
             BOOST_REQUIRE((size_t)invalidBlocks < expected.size());
             BOOST_CHECK_EQUAL(height, expected[invalidBlocks].first);
@@ -798,7 +823,7 @@ BOOST_AUTO_TEST_CASE(statehash_golden_vector)
         CheckWalletReading(view, P, block, ev, height, hash);
         undos.push_back(undo);
     }
-    BOOST_CHECK_EQUAL(invalidBlocks, 22);
+    BOOST_CHECK_EQUAL(invalidBlocks, 23);
     BOOST_CHECK_EQUAL(Hash(view), GOLDEN_HASH);
     BOOST_CHECK_EQUAL(Hash(view), doc["stateHash"].get_str());
     State st(view);
@@ -903,10 +928,10 @@ BOOST_AUTO_TEST_CASE(tag3_signal_only_registers_nobody)
     BOOST_CHECK(f.Snap(1).tagged);
     BOOST_CHECK(!f.Snap(1).quote);
     BOOST_CHECK(EligiblePayees(f.view, f.P, 1).empty());
-    BOOST_CHECK(!Registered(f.view, f.P, CKeyID(KeyOf(1)), 1));
+    BOOST_CHECK(!Registered(f.view, f.P, PK(1), 1));
     f.Mine(Fixture::Quote(50000, 2));
     BOOST_CHECK(f.Snap(2).quote);
-    BOOST_CHECK(Registered(f.view, f.P, CKeyID(KeyOf(2)), 2));
+    BOOST_CHECK(Registered(f.view, f.P, PK(2), 2));
     BOOST_CHECK_EQUAL(EligiblePayees(f.view, f.P, 2).size(), 1u);
     // TAG-4: garbage in the coinbase (an invalid tag, or no tag) never makes a block invalid and is "no tag".
     CoinbaseTag bad = Fixture::Quote(50000, 1);
@@ -918,8 +943,8 @@ BOOST_AUTO_TEST_CASE(tag3_signal_only_registers_nobody)
     BOOST_CHECK(!ev.blockInvalid);
     BOOST_CHECK(!f.Snap(4).tagged);
     // REG-1 lapse: registration ends N_REG blocks after the last quote.
-    BOOST_CHECK(Registered(f.view, f.P, CKeyID(KeyOf(2)), 2 + f.P.nReg - 1));
-    BOOST_CHECK(!Registered(f.view, f.P, CKeyID(KeyOf(2)), 2 + f.P.nReg));
+    BOOST_CHECK(Registered(f.view, f.P, PK(2), 2 + f.P.nReg - 1));
+    BOOST_CHECK(!Registered(f.view, f.P, PK(2), 2 + f.P.nReg));
 }
 
 // Rule: PRICE-1
@@ -1090,7 +1115,7 @@ BOOST_AUTO_TEST_CASE(reg4_judgement_lag_and_bands)
     BOOST_REQUIRE(gs.GetJudgement(3).has_value());
     BOOST_CHECK(!gs.GetJudgement(3)->evaluated);
     // REG-2 window edges: penalised at t = 6 counts for R in (10, 22] (lag 4, N_PENALTY 12).
-    const CKeyID k2(KeyOf(0));   // 6 % 3 == 0
+    const Payee k2 = PK(0);   // 6 % 3 == 0
     BOOST_CHECK(!Penalized(f.view, f.P, k2, 10, f.P.nPenalty));
     BOOST_CHECK(Penalized(f.view, f.P, k2, 11, f.P.nPenalty));
     BOOST_CHECK(Penalized(f.view, f.P, k2, 22, f.P.nPenalty));
@@ -1100,7 +1125,7 @@ BOOST_AUTO_TEST_CASE(reg4_judgement_lag_and_bands)
     BOOST_CHECK_EQUAL(AccuracyBps(f.view, f.P, k2, 20, f.P.accuracyWindow), 8000);
     BOOST_CHECK_EQUAL(AccuracyBps(f.view, f.P, k2, 20, 1), 0);         // window 1: t = 16 only (pool 1's), none for pool 0
     BOOST_CHECK_EQUAL(AccuracyBps(f.view, f.P, k2, 20, 4), 10000);     // window 4: t in [13, 16]: pool 0's 15, in band
-    BOOST_CHECK_EQUAL(AccuracyBps(f.view, f.P, CKeyID(KeyOf(7)), 20, 24), 0);
+    BOOST_CHECK_EQUAL(AccuracyBps(f.view, f.P, PK(7), 20, 24), 0);
 }
 
 // Rule: FEE-2
@@ -1113,17 +1138,17 @@ BOOST_AUTO_TEST_CASE(fee2_eligible_set_window_edges)
     for (int h = 3; h <= 12; h++) f.Mine(std::nullopt);
     // PAYEE_WINDOW 10: E(R) contains key 0 for R in [1, 10], not at 11.
     BOOST_CHECK_EQUAL(EligiblePayees(f.view, f.P, 10).size(), 1u);
-    BOOST_CHECK(EligiblePayees(f.view, f.P, 10)[0] == CKeyID(KeyOf(0)));
+    BOOST_CHECK(EligiblePayees(f.view, f.P, 10)[0] == PK(0));
     BOOST_CHECK(EligiblePayees(f.view, f.P, 11).empty());          // FEE-0
     BOOST_CHECK(EligiblePayees(f.view, f.P, 2).size() == 1);        // the signal-only tag adds nobody
     // Dedup and height order.
     f.Mine(Fixture::Quote(50000, 2));                  // 13
     f.Mine(Fixture::Quote(50000, 0));                  // 14
     f.Mine(Fixture::Quote(50000, 2));                  // 15
-    std::vector<CKeyID> e = EligiblePayees(f.view, f.P, 15);
+    std::vector<Payee> e = EligiblePayees(f.view, f.P, 15);
     BOOST_REQUIRE_EQUAL(e.size(), 2u);
-    BOOST_CHECK(e[0] == CKeyID(KeyOf(2)));
-    BOOST_CHECK(e[1] == CKeyID(KeyOf(0)));
+    BOOST_CHECK(e[0] == PK(2));
+    BOOST_CHECK(e[1] == PK(0));
 }
 
 // Rule: FEE-1'
@@ -1177,15 +1202,15 @@ BOOST_AUTO_TEST_CASE(feew_accuracy_tilt_ratio)
 {
     Fixture f = PayeeFixture();
     // R = 60: E(R) = {A, B} from heights 51..60; accuracy over (60 - 4 - 24, 56] = (32, 56]: A 10000, B 0.
-    BOOST_CHECK_EQUAL(AccuracyBps(f.view, f.P, CKeyID(KeyOf(0)), 60, f.P.accuracyWindow), 10000);
-    BOOST_CHECK_EQUAL(AccuracyBps(f.view, f.P, CKeyID(KeyOf(1)), 60, f.P.accuracyWindow), 0);
+    BOOST_CHECK_EQUAL(AccuracyBps(f.view, f.P, PK(0), 60, f.P.accuracyWindow), 10000);
+    BOOST_CHECK_EQUAL(AccuracyBps(f.view, f.P, PK(1), 60, f.P.accuracyWindow), 0);
     PayeePolicy def = PayeePolicy::Defaults(f.P);
     int a = 0, b = 0;
     for (int i = 0; i < 1000; i++) {
-        std::optional<CKeyID> k = DefaultPayee(f.view, f.P, 60, Selector(i), def);
+        std::optional<Payee> k = DefaultPayee(f.view, f.P, 60, Selector(i), def);
         BOOST_REQUIRE(k.has_value());
-        if (k.value() == CKeyID(KeyOf(0))) a++;
-        else if (k.value() == CKeyID(KeyOf(1))) b++;
+        if (k.value() == PK(0)) a++;
+        else if (k.value() == PK(1)) b++;
         else BOOST_FAIL("pick outside E(R)");
     }
     BOOST_CHECK_MESSAGE(a >= 18 * b / 10 && a <= 22 * b / 10, strprintf("default tilt ratio %d:%d", a, b));
@@ -1193,8 +1218,8 @@ BOOST_AUTO_TEST_CASE(feew_accuracy_tilt_ratio)
     flat.tiltBps = 0;
     a = b = 0;
     for (int i = 0; i < 1000; i++) {
-        std::optional<CKeyID> k = DefaultPayee(f.view, f.P, 60, Selector(i), flat);
-        if (k.value() == CKeyID(KeyOf(0))) a++; else b++;
+        std::optional<Payee> k = DefaultPayee(f.view, f.P, 60, Selector(i), flat);
+        if (k.value() == PK(0)) a++; else b++;
     }
     BOOST_CHECK_MESSAGE(a >= 9 * b / 10 && a <= 11 * b / 10, strprintf("tilt 0 ratio %d:%d", a, b));
     // E(R) empty => nullopt.
@@ -1211,14 +1236,14 @@ BOOST_AUTO_TEST_CASE(feew_penalised_skipped_and_fallback)
     // Penalise B at t = 53 (R = 60: 57 < 60 <= 69): every pick is A.
     Judgement j; j.evaluated = true; j.inBand = false; j.penalized = true;
     st.Put(keys::Judgement(53), j);
-    for (int i = 0; i < 100; i++) BOOST_CHECK(DefaultPayee(f.view, f.P, 60, Selector(i), def).value() == CKeyID(KeyOf(0)));
+    for (int i = 0; i < 100; i++) BOOST_CHECK(DefaultPayee(f.view, f.P, 60, Selector(i), def).value() == PK(0));
     // Penalise A too: the all-penalised fallback picks among all of E(R) with equal weights, never empty.
     st.Put(keys::Judgement(54), j);
     int a = 0, b = 0;
     for (int i = 0; i < 1000; i++) {
-        std::optional<CKeyID> k = DefaultPayee(f.view, f.P, 60, Selector(i), def);
+        std::optional<Payee> k = DefaultPayee(f.view, f.P, 60, Selector(i), def);
         BOOST_REQUIRE(k.has_value());
-        if (k.value() == CKeyID(KeyOf(0))) a++; else b++;
+        if (k.value() == PK(0)) a++; else b++;
     }
     BOOST_CHECK(a > 350 && b > 350);
 }
@@ -1233,7 +1258,7 @@ BOOST_AUTO_TEST_CASE(feew_override_flags_change_pick)
     st.Put(keys::Judgement(53), j);                       // B penalised for R in (57, 69] at the default N_PENALTY 12
     auto count = [&](const PayeePolicy& pp, int R) {
         int b = 0;
-        for (int i = 0; i < 300; i++) if (DefaultPayee(f.view, f.P, R, Selector(i), pp).value() == CKeyID(KeyOf(1))) b++;
+        for (int i = 0; i < 300; i++) if (DefaultPayee(f.view, f.P, R, Selector(i), pp).value() == PK(1)) b++;
         return b;
     };
     BOOST_CHECK_EQUAL(count(def, 60), 0);
@@ -1251,9 +1276,9 @@ BOOST_AUTO_TEST_CASE(feew_override_flags_change_pick)
     PayeePolicy flat = shortPenalty; flat.tiltBps = 0;
     BOOST_CHECK(count(flat, 60) > bWide);
     // -yellowbackpreferredpayee replaces the pick when in E(R), never otherwise.
-    PayeePolicy pref = def; pref.preferred = CKeyID(KeyOf(1));
+    PayeePolicy pref = def; pref.preferred = PK(1);
     BOOST_CHECK_EQUAL(count(pref, 60), 300);
-    pref.preferred = CKeyID(KeyOf(7));
+    pref.preferred = PK(7);
     BOOST_CHECK_EQUAL(count(pref, 60), 0);
 }
 
@@ -2062,6 +2087,144 @@ BOOST_AUTO_TEST_CASE(red3_fee_and_payee_edges)
       BOOST_CHECK_EQUAL(r.vault.feePaidZat, 0);
       BOOST_CHECK_EQUAL(r.log.feeZat, 0);
       BOOST_CHECK(!r.log.hasPayee); }
+}
+
+// Tag v2 (docs/plans/beta4/price-feed.md §4.5 D-3, D-4): with only v2 quotes in the payee window, a MINT, an owner
+// REDEEM and a claim REDEEM paying the 35-byte script of an eligible post-quantum payee hold, and a P2PKH in its place
+// is refused (bad-mint-fee; vault-spend-bad-payee on both redeem paths); with v1 and v2 in the window both kinds pay.
+// Rule: MINT-8
+// Rule: RED-3
+// Rule: FEE-2
+BOOST_AUTO_TEST_CASE(tag_v2_fee_payees)
+{
+    Fixture f;
+    f.Activate();
+    const Payee fn = PQPayee(pq::SCHEME_FN_DSA_512), slh = PQPayee(pq::SCHEME_SLH_DSA_SHA2_128S);
+    auto v2Window = [&](MicroUsd price) {
+        for (int i = 0; i <= f.P.payeeWindow; i++) f.Mine(Fixture::QuoteV2(price, i % 2 ? pq::SCHEME_SLH_DSA_SHA2_128S : pq::SCHEME_FN_DSA_512));
+    };
+    const uint256 owned = f.MintActive(10000);                // minted from a v1 window; redeemed from a v2 one below
+    v2Window(50000);
+    {
+        const std::vector<Payee> e = EligiblePayees(f.view, f.P, f.tip);
+        BOOST_CHECK(e.size() == 2 && std::find(e.begin(), e.end(), fn) != e.end() && std::find(e.begin(), e.end(), slh) != e.end());
+        const TagRecord t = State(f.view).GetTag((uint32_t)f.tip).value();
+        BOOST_CHECK(t.payee == slh || t.payee == fn);
+    }
+    // MINT-8 (D-3): the FN-DSA payee's TX_PQPKH holds; a P2PKH (a v1 key, not in E(R)) is bad-mint-fee
+    { MintOpts o; o.feeScript = KeyOfScript(0); BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-fee"); }
+    uint256 minted;
+    { MintOpts o; o.feeScript = fn.Script();
+      CMutableTransaction m = f.MintTx(10000, 48, f.tip - 1, o);
+      BOOST_CHECK_EQUAL(m.vout[3].scriptPubKey.size(), 35u);
+      BOOST_CHECK_EQUAL(MintVerdictOf(f, m), "");
+      minted = CTransaction(m).GetHash();
+      std::optional<TxLogRecord> l = f.Log(minted);
+      BOOST_REQUIRE(l.has_value());
+      BOOST_CHECK(l->hasPayee && l->payee == fn); }
+    // a payee script one byte off (a P2PKH-shaped script naming the PQ hash prefix, an unknown scheme) is not a payee
+    { MintOpts o; CScript bad = CScript() << ToByteVector(fn.hash) << OP_3 << OP_CHECKPQSIG; o.feeScript = bad;
+      BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, o)), "bad-mint-fee"); }
+    // RED-3' owner path (D-3): P2PKH refused vault-spend-bad-payee, the SLH-DSA payee holds
+    v2Window(50000);
+    { SpendOpts o; o.feeScript = KeyOfScript(0);
+      BOOST_CHECK_EQUAL(Spend(f, owned, f.SpendTx(owned, { COutPoint(owned, 1) }, f.tip, o)).verdict, "vault-spend-bad-payee"); }
+    { SpendOpts o; o.feeScript = slh.Script();
+      RedResult r = Spend(f, owned, f.SpendTx(owned, { COutPoint(owned, 1) }, f.tip - 1, o));
+      BOOST_CHECK_EQUAL(r.verdict, verdict::OK);
+      BOOST_CHECK(r.log.hasPayee && r.log.payee == slh);
+      BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLOSED); }
+    // D-4: v1 and v2 quotes in the window: E(R) lists both kinds, and a fee to either holds
+    for (int i = 0; i < f.P.payeeWindow / 2; i++) f.Mine(Fixture::QuoteV2(50000, pq::SCHEME_FN_DSA_512));
+    for (int i = 0; i < f.P.payeeWindow / 2; i++) f.Mine(Fixture::Quote(50000, 1));
+    {
+        const std::vector<Payee> e = EligiblePayees(f.view, f.P, f.tip - 1);
+        BOOST_CHECK(std::find(e.begin(), e.end(), fn) != e.end() && std::find(e.begin(), e.end(), PK(1)) != e.end());
+        MintOpts a; a.feeScript = fn.Script();
+        BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, a)), "");
+        MintOpts b; b.feeScript = KeyOfScript(1);
+        BOOST_CHECK_EQUAL(MintVerdictOf(f, f.MintTx(10000, 48, f.tip - 1, b)), "");
+    }
+    // RED-3' claim path (D-3): crash the price, then a v2-only window; P2PKH refused vault-spend-bad-payee, FN-DSA holds
+    for (int i = 0; i < f.P.payeeWindow; i++) f.Mine(Fixture::Quote(50000, (f.tip + 1) % 3));
+    const uint256 w = f.MintActive(10000);
+    for (int i = 0; i < 64; i++) f.Mine(Fixture::Quote(9000, (f.tip + 1) % 3));
+    v2Window(9000);
+    BOOST_CHECK_EQUAL(f.Snap(f.tip).PClaim().value(), 9000);
+    { SpendOpts o; o.ownerPath = false; o.feeScript = KeyOfScript(0);
+      BOOST_CHECK_EQUAL(Spend(f, w, f.SpendTx(w, { COutPoint(w, 1) }, f.tip, o)).verdict, "vault-spend-bad-payee"); }
+    { SpendOpts o; o.ownerPath = false; o.feeScript = fn.Script();
+      RedResult r = Spend(f, w, f.SpendTx(w, { COutPoint(w, 1) }, f.tip - 1, o));
+      BOOST_CHECK_EQUAL(r.verdict, verdict::OK);
+      BOOST_CHECK_EQUAL(r.log.path, "claim");
+      BOOST_CHECK(r.log.hasPayee && r.log.payee == fn);
+      BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLAIMING); }
+}
+
+// beta4 P1 follow-up (policy only, the rules unchanged): the wallet's FEE-W draw for a transaction at a height where
+// Falcon is not active skips FN-DSA payees (the preference too) unless E(R) holds no other payee; with txHeight unset
+// or Falcon active there, the draw is FEE-W over all of E(R).
+// Rule: FEE-W
+BOOST_AUTO_TEST_CASE(feew_skips_fn_dsa_before_falcon)
+{
+    Fixture f;
+    f.Activate();
+    const Payee fn = PQPayee(pq::SCHEME_FN_DSA_512), slh = PQPayee(pq::SCHEME_SLH_DSA_SHA2_128S);
+    for (int i = 0; i <= f.P.payeeWindow; i++) f.Mine(Fixture::QuoteV2(50000, i % 2 ? pq::SCHEME_SLH_DSA_SHA2_128S : pq::SCHEME_FN_DSA_512));
+    const int R = f.tip;
+    yellowback::Params P = f.P;
+    P.pqFalconHeight = R + 5;
+    auto count = [&](const PayeePolicy& pp, const Payee& want) {
+        int n = 0;
+        for (int i = 0; i < 200; i++) {
+            std::optional<Payee> k = DefaultPayee(f.view, P, R, Selector(i), pp);
+            BOOST_REQUIRE(k.has_value());
+            BOOST_REQUIRE(k.value() == fn || k.value() == slh);
+            if (k.value() == want) n++;
+        }
+        return n;
+    };
+    PayeePolicy pp = PayeePolicy::Defaults(P);
+    BOOST_CHECK(count(pp, fn) > 0);                       // txHeight unset: FEE-W over all of E(R)
+    pp.txHeight = R + 1;                                  // before Falcon: never FN-DSA
+    BOOST_CHECK_EQUAL(count(pp, fn), 0);
+    pp.preferred = fn;                                    // the preference is skipped too
+    BOOST_CHECK_EQUAL(count(pp, fn), 0);
+    pp.preferred = std::nullopt;
+    pp.txHeight = R + 5;                                  // Falcon active at the transaction's height
+    BOOST_CHECK(count(pp, fn) > 0);
+    P.pqFalconHeight = -1;                                // no Falcon height: never FN-DSA
+    BOOST_CHECK_EQUAL(count(pp, fn), 0);
+    // E(R) holds only FN-DSA payees: the draw falls back to them (a fee to E(R) is what the rules accept)
+    for (int i = 0; i <= f.P.payeeWindow; i++) f.Mine(Fixture::QuoteV2(50000, pq::SCHEME_FN_DSA_512));
+    pp.txHeight = f.tip + 1;
+    BOOST_CHECK(DefaultPayee(f.view, P, f.tip, Selector(1), pp).value() == fn);
+}
+
+// D-7 (price-feed.md §4.5): a v2 tag with an unknown scheme (0x03) or a truncated one is no tag, and the block stays
+// valid (TAG-4): applied, nothing recorded at its height.
+// Rule: TAG-2
+// Rule: TAG-4
+BOOST_AUTO_TEST_CASE(tag_v2_malformed_is_no_tag_block_valid)
+{
+    Fixture f;
+    f.Activate();
+    Payee bad = PQPayee(pq::SCHEME_FN_DSA_512);
+    bad.kind = 0x03;
+    const CoinbaseTag t = MakeTag(0x01, 50000, 7, bad);
+    BOOST_CHECK_EQUAL(t.version, TAG_VERSION_V2);
+    BOOST_CHECK(!IsValidTag(t));
+    BlockEvaluation ev = f.Evaluate(t, {});
+    BOOST_CHECK(!ev.blockInvalid);
+    const int h = f.tip + 1;
+    f.Mine(t);
+    BOOST_CHECK_EQUAL(f.tip, h);
+    BOOST_CHECK(!State(f.view).GetTag((uint32_t)h).has_value());
+    BOOST_CHECK(!f.Snap(h).tagged);
+    // a good v2 tag at the next height is recorded with its payee
+    f.Mine(Fixture::QuoteV2(50000, pq::SCHEME_SLH_DSA_SHA2_128S));
+    BOOST_CHECK(State(f.view).GetTag((uint32_t)f.tip)->payee == PQPayee(pq::SCHEME_SLH_DSA_SHA2_128S));
+    BOOST_CHECK(f.Snap(f.tip).tagged);
 }
 
 // Rule: RED-4
@@ -3941,22 +4104,22 @@ BOOST_AUTO_TEST_CASE(pin1_excludes_key_from_medians_and_E)
     f.Mine(Fixture::Quote(50000, 0));
     const Snapshot s = f.Snap(f.tip);
     BOOST_REQUIRE_EQUAL(s.pinnedKeys.size(), 1u);
-    BOOST_CHECK(s.pinnedKeys[0] == KeyOf(0));
+    BOOST_CHECK(s.pinnedKeys[0] == PK(0));
     // the medians no longer see 50,000: pFast over pools 1 and 2 only (the slow window's 2/3 fill is then one short: pMint undefined, HALT-1)
     BOOST_CHECK(s.pFast != 50000);
     BOOST_CHECK(s.pFast > 0);
     BOOST_CHECK(s.haltMask & HALT_NO_PRICE);
     // E(H) excludes the pinned key; E(H - 1) still has it
-    std::vector<CKeyID> e = EligiblePayees(f.view, f.P, f.tip);
-    BOOST_CHECK(std::find(e.begin(), e.end(), CKeyID(KeyOf(0))) == e.end());
+    std::vector<Payee> e = EligiblePayees(f.view, f.P, f.tip);
+    BOOST_CHECK(std::find(e.begin(), e.end(), PK(0)) == e.end());
     BOOST_CHECK_EQUAL(e.size(), 2u);
-    std::vector<CKeyID> prev = EligiblePayees(f.view, f.P, f.tip - 1);
-    BOOST_CHECK(std::find(prev.begin(), prev.end(), CKeyID(KeyOf(0))) != prev.end());
+    std::vector<Payee> prev = EligiblePayees(f.view, f.P, f.tip - 1);
+    BOOST_CHECK(std::find(prev.begin(), prev.end(), PK(0)) != prev.end());
     // and FEE-W never picks it
     for (int i = 0; i < 8; i++) {
-        std::optional<CKeyID> pick = DefaultPayee(f.view, f.P, f.tip, valtype(1, (unsigned char)i), PayeePolicy::Defaults(f.P));
+        std::optional<Payee> pick = DefaultPayee(f.view, f.P, f.tip, valtype(1, (unsigned char)i), PayeePolicy::Defaults(f.P));
         BOOST_REQUIRE(pick.has_value());
-        BOOST_CHECK(!(pick.value() == CKeyID(KeyOf(0))));
+        BOOST_CHECK(!(pick.value() == PK(0)));
     }
     (void)before;
 }

@@ -33,25 +33,25 @@ src/vault/node.h 5ab9e85217a0d6cef5b19a8d6f195323c31aaec18bcd37acda15a4ebae3c1e7
 # re-derives openDebtCents (HALT-2, 2026-10-28) on both lines; pins updated then.
 # ParamsFromArgs takes the testnet profile (testnet plan Revision 3, 2026-10-29)
 # on both lines; pins updated then.
-src/yellowback/index.cpp 35c9707adf3faa5131852ae1e91d9cd4a5407454d8c448f8e696204cb8b0968d c4c47ec9cd4c5d50c8e4c581e3ac7afc1476c22282669956f00a1485ca37adf9
-src/yellowback/index.h 241446bc6a427a7d4ef4f44fe0f510511840f9caefbd805844155512d3f77295 b3a5554369b9bf8eeae2beefe5cd9b445f299ebbe56cb73ce5c8c548bb0758a8
+src/yellowback/index.cpp 996754238cfd57fcc97456d3fd9f7ba52376604ed5e700d43c69da908322246c 2147fff4db7f22d9047de93ffc47cd0c7f88d74a56dfa2f00bc1b1112b1bf0f6
+src/yellowback/index.h 201780ca78cbabd2c6e74e6a338b66602b683b1f9cad8b11985c23d9a7bc0135 41c8096c20b9b856098ad2a645f9fff72d146f8129524ace9bc176ccbef63634
 
 # Comment only: DEFAULT_YELLOWBACK_FEE still 1000; the note names the 6.20.0
 # P-2 rule max(-yellowbackfee, ZIP-317 conventional fee). TestFastParams is
 # declared on both lines (testnet plan Revision 3, 2026-10-29); pins updated then.
-src/yellowback/params.h 167a0256b73c5b0c3745ed37636e80d5c72b76525ea9f37409c80f2810db0f2f 1e5a5092ab7e8124147c48f02334859923efa204f4f70d6ddd9b8f49befba669
+src/yellowback/params.h bcc4054aac878b076a540f90aaeb47a6d8dfe72d9223b72213137778eb00a750 c7ac9d8548295e8dd1281f9372e6e5acbbac45f7feef6513a238760dc7ae6fd5
 
 # util/time.h, PrecomputedTransactionData(tx, prevouts), and
 # TransactionSignatureChecker(tx, txdata, nIn, amount).
-src/yellowback/policy.cpp 71796abe703b38f8d92526f87d4ab18e3e4307162f2312a92604609438f1391b 2fc8e15e19675825c378555f4eb4c54cfb62ff530365c7f569e3f14c0a4a62b8
+src/yellowback/policy.cpp e13b97ea99a66e48d8dab025b0626162ac3714e17646157e07282d18a25f1047 9f98dd64b3fedc5dc3e133911183ff81d4e471496b6e76a75777c26a7751592f
 
 # P-2 fee path. 6.20.0 prices with NetworkFee over a sized probe and reprices
 # until the ZIP-317 conventional fee covers the shape it selects. The builder
 # is held by unique_ptr (move drops firstSaplingSpendAddr), constructed in
 # place with a Sapling anchor, and dust is a fixed threshold. ycash-dd prices
 # with YedConventionalFeeEstimate instead. zip317.h and the header split.
-src/yellowback/txbuilder.cpp c9fc4d1f73f2987cd1e0008ee032c514913c8c7df2d4e61e14492dda19c90172 f20c2369a96950506456e7106217b6342aa3e057e1bf51e207e493b17d7f9d86
-src/yellowback/txbuilder.h 9ece9173f589471a26074b2aa8cf84ee8446b4c571f4e0f9a457d39879841247 9431bb4c9f985d179a9795f9dc9dc2be144072881d64570161a37ca41356f418
+src/yellowback/txbuilder.cpp a40a3de5241ea8c3478eb0ef83eb294ec8185062af74f284bb66962e9ef042c5 cc2192887e5537eba837ba23aef06069a6f82b47e0fcb870ff26b7102d52b7ff
+src/yellowback/txbuilder.h 1c4c979cc33a0dd9b7404fd76a519d30e2e06491dcf08242c9dcf02dade5b9a5 174cd371a238aafa74853b67b248b5dc89273b7bc0c93e3dc1154dab4c217b5c
 
 # util/system.h and util/moneystr.h. CommitTransaction and AcceptToMemoryPool
 # take CValidationState. RemoveOrphan erases through CWallet::EraseUnbroadcastTx.

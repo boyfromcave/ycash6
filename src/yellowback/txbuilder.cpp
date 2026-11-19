@@ -169,7 +169,7 @@ std::vector<CTxOut> MintOutputs(const MintShape& s, int& feeVout, int* attestFee
     // vout[1] token: the fresh holder key, P2PKH, or a Falcon TX_PQPKH from the Falcon height (TOK-PQ)
     vout.push_back(CTxOut(TOKEN_VALUE, s.pqHolder.has_value() ? GetScriptForDestination(s.pqHolder.value()) : GetScriptForDestination(s.owner.GetID())));
     vout.push_back(CTxOut(0, PayloadScript(payload)));                                  // vout[2] payload
-    if (s.payee.has_value()) vout.push_back(CTxOut(s.feeZat, GetScriptForDestination(s.payee.value())));   // vout[3] fee
+    if (s.payee.has_value()) vout.push_back(CTxOut(s.feeZat, s.payee->Script()));   // vout[3] fee
     if (s.attestPayee.has_value()) vout.push_back(CTxOut(s.attestFeeZat, GetScriptForDestination(s.attestPayee.value())));   // attestor fee
     return vout;
 }
@@ -234,7 +234,7 @@ VaultSpendPlan PlanVaultSpend(const VaultSpendShape& s)
         for (CSlot slot : order) {
             switch (slot) {
             case INTENT: plan.vout.push_back(CTxOut(plan.collateralOut, claimant)); break;
-            case FEE: plan.vout.push_back(CTxOut(s.feeZat, GetScriptForDestination(s.payee.value()))); break;
+            case FEE: plan.vout.push_back(CTxOut(s.feeZat, s.payee->Script())); break;
             case CHANGE: plan.vout.push_back(CTxOut(TOKEN_VALUE, s.changeScript)); break;
             case ATTEST: plan.vout.push_back(CTxOut(s.attestFeeZat, GetScriptForDestination(s.attestPayee.value()))); break;
             case RESIDUAL: plan.vout.push_back(CTxOut(residualValue, ownerIntent)); break;
@@ -301,7 +301,7 @@ VaultSpendPlan PlanVaultSpend(const VaultSpendShape& s)
     for (Slot slot : order) {
         switch (slot) {
         case COLLATERAL: plan.vout.push_back(CTxOut(plan.collateralOut, s.collateralScript.value())); break;
-        case FEE: plan.vout.push_back(CTxOut(s.feeZat, GetScriptForDestination(s.payee.value()))); break;
+        case FEE: plan.vout.push_back(CTxOut(s.feeZat, s.payee->Script())); break;
         case CHANGE: plan.vout.push_back(CTxOut(TOKEN_VALUE, s.changeScript)); break;
         case ATTEST: plan.vout.push_back(CTxOut(s.attestFeeZat, GetScriptForDestination(s.attestPayee.value()))); break;
         case RESIDUAL: plan.vout.push_back(CTxOut(s.residualZat, GetScriptForDestination(s.owner))); break;
@@ -728,10 +728,13 @@ struct Context
         return pq.has_value() ? GetScriptForDestination(pq.value()) : GetScriptForDestination(keyOut.GetID());
     }
 
-    /** The payee of §3.7 FEE-W (or the configured preference, the index's L6 values) for `selector` at `r`; nullopt under FEE-0. */
-    std::optional<CKeyID> Payee(int r, const std::vector<unsigned char>& selector) const
+    /** The payee of §3.7 FEE-W (or the configured preference, the index's L6 values) for `selector` at `r`; nullopt under FEE-0.
+     *  Drawn for a transaction at the next block: no FN-DSA payee before Falcon while another is eligible (policy). */
+    std::optional<yellowback::Payee> FeePayee(int r, const std::vector<unsigned char>& selector) const
     {
-        return DefaultPayee(st.View(), params, r, selector, index.GetPayeePolicy());
+        PayeePolicy pp = index.GetPayeePolicy();
+        pp.txHeight = (int64_t)chainHeight + 1;
+        return DefaultPayee(st.View(), params, r, selector, pp);
     }
 
     // ---- v3
@@ -1005,7 +1008,7 @@ BuiltTx BuildVaultSpend(Context& ctx, BuiltKind kind, const COutPoint& vaultOut,
             shape.changeScript = ctx.FreshHolderScript("yellowback-change", changeKey);   // TOK-PQ from the Falcon height
             out.freshKey = changeKey;
         }
-        shape.payee = ctx.Payee(R, OutPointSelector(vaultOut));
+        shape.payee = ctx.FeePayee(R, OutPointSelector(vaultOut));
         // FEE-1' / RED-3': the protocol fee of the debt at the vault's stored mint price (D-Q-23)
         shape.feeZat = shape.payee.has_value() ? ProtocolFeeZat(vault.mintedCents, vault.pMint, ctx.params).value_or(MAX_MONEY) : 0;
         // IT-9': a redeem that confirms before lockHeight pays the early-redeem fee (of the debt at pMint) too; the spend
@@ -1479,7 +1482,7 @@ MintPreflight PreflightMint(YellowbackWallet& yw, Cents cents, int lockBlocks, c
     const CAmount protocolFee = ProtocolFeeZat(cents, pf.pMint.value(), ctx.params).value_or(MAX_MONEY);
     BuiltTx fees;
     AttestFeeFor(ctx, pf.refHeight, std::vector<unsigned char>(), f, protocolFee, fees);
-    const bool payee = ctx.Payee(pf.refHeight, std::vector<unsigned char>()).has_value();   // eligibility does not depend on the selector
+    const bool payee = ctx.FeePayee(pf.refHeight, std::vector<unsigned char>()).has_value();   // eligibility does not depend on the selector
     PQFeeFollower follow;
     follow.fee = std::max(ctx.fee, YedNetworkFee({}, std::nullopt));
     const CAmount feesTotal = (payee ? protocolFee : 0) + fees.attestFeeZat + follow.fee + ctx.fee;
@@ -1676,7 +1679,7 @@ BuiltTx BuildMint(YellowbackWallet& yw, Cents cents, int lockBlocks, CReserveKey
     // FEE-W's selector: the payload's 33 owner bytes, scheme || keyHash (a wallet-only choice, spec §3.6)
     std::vector<unsigned char> ownerBytes(1, vaultOwner.scheme);
     ownerBytes.insert(ownerBytes.end(), vaultOwner.hash.begin(), vaultOwner.hash.end());
-    shape.payee = ctx.Payee(R, ownerBytes);
+    shape.payee = ctx.FeePayee(R, ownerBytes);
     shape.feeZat = shape.payee.has_value() ? ProtocolFeeZat(cents, out.pMint.value(), p).value_or(MAX_MONEY) : 0;   // FEE-1' at the mint price
     shape.attestPayee = out.attestPayeeKey;
     shape.attestFeeZat = out.attestFeeZat;

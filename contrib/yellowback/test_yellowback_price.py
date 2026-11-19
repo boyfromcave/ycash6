@@ -536,6 +536,40 @@ class TagTests(unittest.TestCase):
         self.assertIsNone(yp.decode_coinbase_tag(h))                       # no occurrence
         self.assertIsNone(yp.decode_coinbase_tag(b""))                     # no height push at all
 
+    def test_tag_v2(self):
+        # Rule: TAG-1 tag v2 (price-feed.md section 4.3): 0x31 || 49 bytes, a post-quantum payout key
+        h = yp.height_push(600000)
+        pq = bytes(range(32))
+        for scheme, name in ((1, "slh-dsa-sha2-128s"), (2, "fn-dsa-512")):
+            t = yp.decode_coinbase_tag(h + yp.encode_tag_v2_push(432007, 5, scheme, pq))
+            self.assertEqual((t["version"], t["payoutScheme"], t["payoutHashHex"], t["priceMicroUsd"], t["offset"]),
+                             (2, name, pq.hex(), 432007, 4))
+        self.assertEqual(len(yp.encode_tag_v2_push(432007, 5, 2, pq)), 50)
+        # Rule: TAG-2 an unknown scheme, a truncated body, a version mismatch: no tag
+        self.assertIsNone(yp.decode_coinbase_tag(h + yp.encode_tag_v2_push(432007, 5, 3, pq)))
+        self.assertIsNone(yp.decode_coinbase_tag(h + yp.encode_tag_v2_push(432007, 5, 2, pq)[:-1]))
+        self.assertIsNone(yp.decode_coinbase_tag(h + yp.encode_tag_v2_push(432007, 5, 2, pq, version=1)))
+        # Rule: TAG-5 the first pattern by position decides
+        v1, v2 = tag(), yp.encode_tag_v2_push(432007, 5, 2, pq)
+        self.assertEqual(yp.decode_coinbase_tag(h + v1 + v2)["version"], 1)
+        self.assertEqual(yp.decode_coinbase_tag(h + v2 + v1)["version"], 2)
+        self.assertIsNone(yp.decode_coinbase_tag(h + yp.encode_tag_v2_push(432007, 5, 3, pq) + v1))
+        self.assertEqual(yp.decode_coinbase_tag(h + v1)["payoutScheme"], "p2pkh")
+
+    def test_tag_vectors(self):
+        # Rule: TAG-1 the shared v1/v2 vectors (src/test/data/yellowback_tag_vectors.json, D-T4)
+        import json
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "src", "test", "data", "yellowback_tag_vectors.json")
+        with open(path) as f:
+            cases = json.load(f)["cases"]
+        for c in cases:
+            t = yp.decode_coinbase_tag(bytes.fromhex(c["scriptSig"]))
+            self.assertEqual(t is None, c["tag"] is None, c["name"])
+            if t is not None:
+                self.assertEqual(t["version"], c["tag"]["version"], c["name"])
+                self.assertEqual(t["payoutScheme"], c["tag"]["payoutScheme"], c["name"])
+                self.assertEqual(t.get("payoutHashHex", t.get("payoutKeyHex")), c["tag"]["payoutHash"], c["name"])
+
     def test_five_byte_pattern_rule(self):
         # Rule: P10 the magic without its push opcode is not a tag
         h = yp.height_push(300)

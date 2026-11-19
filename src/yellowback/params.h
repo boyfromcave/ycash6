@@ -308,6 +308,17 @@ const Params& TestParams();
 const Params& TestFastParams();
 
 /**
+ * The testnet-yb-fast attestor set id (beta4 C-T1, docs/plans/beta4/price-feed.md §3.4): the SET_CREATE txid
+ * the fast testnet's YED set ceremony produces (C-T7), as 64 display-hex characters. The ceremony fills it in;
+ * empty means null, and a null id keeps YED off (startHeight 0). Once set, YED starts at the UPGRADE_VAULT
+ * height (510,400 on testnet-yb-fast), retroactively (§3.1).
+ */
+extern const char* const TEST_FAST_ATTESTOR_SET_ID;
+
+/** TEST_FAST_ATTESTOR_SET_ID as a set id; null when empty. Not a user flag (-yellowbackattestorset stays regtest-only). */
+uint256 TestFastAttestorSetId();
+
+/**
  * Regtest parameters (§3.1 regtest column). startHeight is the UPGRADE_VAULT activation height
  * (-nuparams=6d5b7a31:<h>, U-22); attestorSetId is -yellowbackattestorset; the regtest-only flags
  * -yellowbacksigmaref (0 = multiplier fixed at 1), -yellowbacksupplycapbps (0 = no cap),

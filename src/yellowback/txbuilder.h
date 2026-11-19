@@ -84,7 +84,7 @@ struct BuiltTx
     int refHeight;                          //!< R = indexTip - REF_LAG
     CAmount feeZat;                         //!< the enforcement fee paid (0 under FEE-0, for a release and a sweep); a redeem before lockHeight includes earlyRedeemFeeZat (IT-9)
     CAmount earlyRedeemFeeZat;              //!< IT-9: the early-redeem part of feeZat (0 at or after lockHeight, on the claim path, under FEE-0)
-    std::optional<CKeyID> payee;            //!< the fee output's key hash (nullopt = no fee output)
+    std::optional<Payee> payee;             //!< the fee output's payee, P2PKH or post-quantum (nullopt = no fee output)
     int feeVout;                            //!< index of the fee output, -1 if none
     int termClass;                          //!< 0/1/2 = A/B/C
     uint32_t lockHeight;
@@ -157,7 +157,7 @@ struct MintShape
     std::optional<CPQKeyID> pqHolder;       //!< TOK-PQ: from the Falcon height the token output's Falcon key (replaces `owner`'s P2PKH)
     CPQKeyID vaultOwner;                    //!< the V's and the payload's owner (quantum plan §4.3: a post-quantum key)
     CAmount collateralZat;                  //!< vout[0].nValue (>= requiredZat, >= 4 * FEE_MIN, rounded)
-    std::optional<CKeyID> payee;            //!< nullopt under FEE-0: no fee output, feeVout = 0xFF
+    std::optional<Payee> payee;             //!< nullopt under FEE-0: no fee output, feeVout = 0xFF
     CAmount feeZat;                         //!< ProtocolFeeZat(cents, pMint) (FEE-1')
     std::optional<CKeyID> attestPayee;      //!< v3 AFEE-1: P2PKH(bondPubKey(s)) of attestFeeZat after the pool fee; nullopt under AFEE-0
     CAmount attestFeeZat;
@@ -168,7 +168,7 @@ struct MintShape
 
 /**
  * vout[0] the V template (shape.vaultScript, U-23), vout[1] P2PKH(owner) TOKEN_VALUE, vout[2] OP_RETURN MINT
- * payload (feeVout = 3 or 0xFF), vout[3] P2PKH(payee) feeZat when there is a payee, then
+ * payload (feeVout = 3 or 0xFF), vout[3] payee.Script() feeZat when there is a payee, then
  * (v3) P2PKH(attestPayee) attestFeeZat when there is one (vout[4] with both fees, vout[3]
  * under FEE-0). `feeVout` / `attestFeeVout` receive the index or -1. Throws on an unencodable shape.
  */
@@ -246,7 +246,7 @@ struct VaultSpendShape
     bool ownerPath;                         //!< owner scriptSig + nLockTime = ownerHeight; else claim scriptSig + appHeight
     bool withPayload;                       //!< REDEEM/CLAIM: burn + payload + fee; false = release/sweep (no burn, no fee, no payload)
     int refHeight;                          //!< REDEEM payload refHeight
-    std::optional<CKeyID> payee;            //!< nullopt under FEE-0 (and always for a release/sweep)
+    std::optional<Payee> payee;             //!< nullopt under FEE-0 (and always for a release/sweep)
     CAmount feeZat;
     std::vector<YedCoin> yedInputs;         //!< vin[1..]
     Cents changeCents;                      //!< 0 = no YED change output

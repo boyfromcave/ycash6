@@ -229,7 +229,7 @@ struct Builder
         t.flags = signal ? 1 : 0;
         t.priceMicroUsd = price;
         t.sourceMask = mask;
-        t.payoutKey = KeyOf(key);
+        t.payee = Payee::FromKeyID(CKeyID(KeyOf(key)));
         return t;
     }
 
@@ -525,7 +525,7 @@ struct Live
         BOOST_REQUIRE(index->SyncToChain());
         b.reset(new Builder(P, *index));
         MinerConfig cfg;
-        cfg.payoutKey = CKeyID(KeyOf(0));
+        cfg.payoutKey = Payee::FromKeyID(CKeyID(KeyOf(0)));
         index->SetMinerConfig(cfg);
     }
 
@@ -1122,12 +1122,47 @@ BOOST_AUTO_TEST_CASE(miner_tag_script)
         BOOST_CHECK_EQUAL(t->priceMicroUsd, 2000000u);
         BOOST_CHECK_EQUAL(t->sourceMask, 5);
         BOOST_CHECK(!t->Signal());
-        BOOST_CHECK(t->payoutKey == KeyOf(0));
+        BOOST_CHECK(t->payee == Payee::FromKeyID(CKeyID(KeyOf(0))));
+        BOOST_CHECK_EQUAL(t->version, TAG_VERSION);                  // a P2PKH payee: tag v1, 0x24 || 36 bytes
+        BOOST_CHECK_EQUAL(s.size(), 37u);
         MinerStatus st = live.index->GetMinerStatus(1050);
         BOOST_CHECK_EQUAL(st.kind, "quote");
         BOOST_CHECK_EQUAL(st.quoteAgeSeconds.value_or(-1), 50);
         BOOST_CHECK(st.registered);                                  // REG-1: KeyOf(0) quoted within N_REG
         BOOST_CHECK(st.eligible);
+    }
+    {
+        // Tag v2 (beta4 D-T2): a post-quantum payout key gives 0x31 || 49 bytes, version 2, the scheme and hash.
+        // An FN-DSA one only once Falcon is active at the next block (policy, beta4 P1 follow-up): this index has no
+        // Falcon height, so it emits no tag; an index with Falcon from height 0 emits the v2 tag.
+        BOOST_REQUIRE_EQUAL(live.P.pqFalconHeight, -1);
+        {
+            MinerConfig fncfg = cfg;
+            fncfg.payoutKey = Payee::FromPQ(CPQKeyID(pq::SCHEME_FN_DSA_512, uint256(std::vector<unsigned char>(32, 0x5A))));
+            live.index->SetMinerConfig(fncfg);
+            BOOST_CHECK(policy::BuildTagScript(*live.index, 1050).empty());
+            BOOST_CHECK_EQUAL(live.index->GetMinerStatus(1050).kind, "none");
+        }
+        yellowback::Params falconP = live.P;
+        falconP.pqFalconHeight = 0;
+        YellowbackIndex falconIndex(falconP, pathTemp / "yb-miner-falcon", 1 << 20, true);
+        BOOST_REQUIRE(falconIndex.SyncToChain());
+        falconIndex.SetQuote(2000000, 5, 1000);
+        for (uint8_t scheme : { pq::SCHEME_FN_DSA_512, pq::SCHEME_SLH_DSA_SHA2_128S }) {
+            YellowbackIndex& index = scheme == pq::SCHEME_FN_DSA_512 ? falconIndex : *live.index;
+            MinerConfig pqcfg = cfg;
+            pqcfg.payoutKey = Payee::FromPQ(CPQKeyID(scheme, uint256(std::vector<unsigned char>(32, 0x5A))));
+            index.SetMinerConfig(pqcfg);
+            CScript s = policy::BuildTagScript(index, 1050);
+            BOOST_CHECK_EQUAL(s.size(), 50u);
+            std::optional<CoinbaseTag> t = FindTag((CScript() << h << OP_0) + s, h);
+            BOOST_REQUIRE(t.has_value());
+            BOOST_CHECK_EQUAL(t->version, TAG_VERSION_V2);
+            BOOST_CHECK(t->payee == pqcfg.payoutKey.value());
+            BOOST_CHECK_EQUAL(t->priceMicroUsd, 2000000u);
+            BOOST_CHECK(index.GetMinerStatus(1050).payoutKey == pqcfg.payoutKey);
+        }
+        live.index->SetMinerConfig(cfg);
     }
     {
         // Stale quote: no tag at all.

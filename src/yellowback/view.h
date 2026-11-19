@@ -13,6 +13,7 @@
 #include "serialize.h"
 #include "uint256.h"
 #include "yellowback/params.h"
+#include "yellowback/tag.h"
 
 #include <algorithm>
 #include <functional>
@@ -86,7 +87,7 @@
  */
 namespace yellowback {
 
-static const uint32_t SCHEMA_VERSION = 15;  //!< 15: Totals.openDebtCents and Snapshot.openDebtCents (HALT-2 reads open debt, owner 2026-10-28), so a 14 directory is rebuilt; 14: VaultRecord.cancelCount/lastCancelHeight (CAN-2), IntentRecord.claimRefHeight (C4b) and heldBy (CAN-3) -- the per-vault cancel limit (owner 2026-10-13), so a 13 directory is rebuilt; 13: IntentRecord.refundScript (CAN-1, audit 03/H-1: a cancelled claim refunds its burn), so a 12 directory is rebuilt; 12: liveness by attestation, the join refusals and the seq-exhaustion rule (seats re-reviews: the mirror derives different Attestors), so an 11 directory is rebuilt; 11: seat ranking by SeatRank and eviction (owner 2026-10-11: seated and Attestors can differ) and D-Q-30 (the attestor bond minimum follows YED vault collateral at registration; eligibility can differ), so a 10 or older directory is rebuilt; 10: D-Q-28 (the bond minimum followed the price at registration; never merged); 9: VaultRecord.pMint, the mint price every later fee is converted at (FEE-1', quantum plan D-Q-23); 8: in-term claims (VaultRecord.appHeight and ownerHeight, IT-1); 7: P4-b (Attestors mirror attestorSetId: lastAct, bondFrozen, the AttestorSet record); 6: the vault upgrade (V template vaults, claim intents, no Activation/Rejected, attestorSetId in Params); 5: the Params record carries mintRequiresArmed (H-1); 4: BundleLog rows carry citedHeights (audit A-2); an older directory is rebuilt
+static const uint32_t SCHEMA_VERSION = 16;  //!< 16: tag v2 (beta4 D-T1, docs/plans/beta4/price-feed.md §4.3): TagRecord.payee, TxLogRecord.payee and Snapshot.pinnedKeys hold a Payee (kind u8 ‖ 20 or 32 bytes) in place of a uint160, so a 15 directory is rebuilt; 15: Totals.openDebtCents and Snapshot.openDebtCents (HALT-2 reads open debt, owner 2026-10-28), so a 14 directory is rebuilt; 14: VaultRecord.cancelCount/lastCancelHeight (CAN-2), IntentRecord.claimRefHeight (C4b) and heldBy (CAN-3) -- the per-vault cancel limit (owner 2026-10-13), so a 13 directory is rebuilt; 13: IntentRecord.refundScript (CAN-1, audit 03/H-1: a cancelled claim refunds its burn), so a 12 directory is rebuilt; 12: liveness by attestation, the join refusals and the seq-exhaustion rule (seats re-reviews: the mirror derives different Attestors), so an 11 directory is rebuilt; 11: seat ranking by SeatRank and eviction (owner 2026-10-11: seated and Attestors can differ) and D-Q-30 (the attestor bond minimum follows YED vault collateral at registration; eligibility can differ), so a 10 or older directory is rebuilt; 10: D-Q-28 (the bond minimum followed the price at registration; never merged); 9: VaultRecord.pMint, the mint price every later fee is converted at (FEE-1', quantum plan D-Q-23); 8: in-term claims (VaultRecord.appHeight and ownerHeight, IT-1); 7: P4-b (Attestors mirror attestorSetId: lastAct, bondFrozen, the AttestorSet record); 6: the vault upgrade (V template vaults, claim intents, no Activation/Rejected, attestorSetId in Params); 5: the Params record carries mintRequiresArmed (H-1); 4: BundleLog rows carry citedHeights (audit A-2); an older directory is rebuilt
 
 /**
  * The rules version (cf. DigiByte v9.26.7 src/digidollar/digidollar_state.h rules_version): bumped by a release
@@ -184,7 +185,7 @@ struct TipRecord
 /** Tags[height]: a valid coinbase tag (TAG-1..5). */
 struct TagRecord
 {
-    uint160 payoutKey;
+    Payee payee;              //!< the tag's payee: v1 kind 0 / payoutKey, v2 kind payoutScheme / payoutHash (SCHEMA_VERSION 16)
     uint64_t priceMicroUsd;   //!< 0 = signal-only (TAG-3)
     bool signal;
     uint16_t sourceMask;
@@ -196,7 +197,7 @@ struct TagRecord
     ADD_SERIALIZE_METHODS;
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream& s, Operation ser_action) {
-        READWRITE(payoutKey);
+        READWRITE(payee);
         READWRITE(priceMicroUsd);
         READWRITE(signal);
         READWRITE(sourceMask);
@@ -355,7 +356,7 @@ struct TxLogRecord
     int64_t burned;
     CAmount feeZat;              //!< the enforcement fee paid (0 under FEE-0 or on failure)
     bool hasPayee;
-    uint160 payee;               //!< key hash of the fee output when hasPayee
+    Payee payee;                 //!< the fee output's payee when hasPayee (kind 0, 20 zero bytes otherwise)
     std::vector<AssignedOutput> assigned;
     std::vector<AssignedOutput> spentTokens;   //!< Tokens consumed by this tx (scriptPubKey kept for wallet filtering, N21)
     std::vector<COutPoint> closedVaults;
@@ -691,7 +692,7 @@ struct Snapshot
     // PRICE-2's combination with a bundle statistic is per transaction and never stored here.
     AttestState attest;                   //!< the carried Attest after ARM-1/2 at this height
     std::vector<uint16_t> seated;         //!< the N_SLOTS highest-weighted ELIGIBLE seq, ascending
-    std::vector<uint160> pinnedKeys;      //!< PIN-1: payoutKeys excluded from the medians and E(H)
+    std::vector<Payee> pinnedKeys;        //!< PIN-1: payees excluded from the medians and E(H), sorted (Payee order)
     std::vector<uint16_t> pinnedSeqs;     //!< PIN-2: seq excluded from selection at this height
     int64_t openDebtCents;                //!< Totals.openDebtCents at H: globalRatioBps's denominator (HALT-2, owner 2026-10-28)
 

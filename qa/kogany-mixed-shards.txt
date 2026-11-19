@@ -106,6 +106,8 @@ yed      yellowback_redeem_boundary    gate    W9
 yed      yellowback_cancel_limit       gate    W9
 yed      yellowback_pq                 gate    W9
 yed      yellowback_pq_dayone          gate    W9
+yed      yellowback_tag_v2             report  W9     # beta4 P1: report until kogany carries tag v2
+yed      yellowback_tag_v2_falcon      report  W9     # beta4 P1 follow-up: report until kogany carries tag v2
 yed      yellowback_void_mint          gate    W9
 yed      yellowback_mint_armed         gate    W9
 yed      yellowback_wallet_restore     gate    W9
@@ -202,6 +204,8 @@ sidecar  yellowback_redeem_boundary    report  W9     # yed
 sidecar  yellowback_cancel_limit       report  W9     # yed
 sidecar  yellowback_pq                 report  W9     # yed
 sidecar  yellowback_pq_dayone          report  W9     # yed
+sidecar  yellowback_tag_v2             report  W9     # yed
+sidecar  yellowback_tag_v2_falcon      report  W9     # yed
 sidecar  yellowback_void_mint          report  W9     # yed
 sidecar  yellowback_mint_armed         report  W9     # yed
 sidecar  yellowback_wallet_restore     report  W9     # yed
@@ -287,6 +291,8 @@ pair     yellowback_redeem_boundary    report  W9     # yed
 pair     yellowback_cancel_limit       report  W9     # yed
 pair     yellowback_pq                 report  W9     # yed
 pair     yellowback_pq_dayone          report  W9     # yed
+pair     yellowback_tag_v2             report  W9     # yed
+pair     yellowback_tag_v2_falcon      report  W9     # yed
 pair     yellowback_void_mint          report  W9     # yed
 pair     yellowback_mint_armed         report  W9     # yed
 pair     yellowback_wallet_restore     report  W9     # yed

@@ -1,4 +1,4 @@
-# Yellowback RPC contract (`yed_*`), rpcversion 10
+# Yellowback RPC contract (`yed_*`), rpcversion 11
 
 This file is the interface between the node (`ycash-dd`) and the wallet application
 (`yecwallet-dd`). Nothing else crosses that boundary. It is written *before* the code it
@@ -15,7 +15,7 @@ example value is `null` is one the text marks *null when …* — the checker ac
 documented type for it. A field the text marks **optional** may be absent, and the checker asserts
 it only in the state the text names. Nothing else may be absent.
 
-**`rpcversion` rule.** `yed_getinfo.rpcversion` is `10` (the beta3 additions to stock calls, below; scheme-visible post-quantum prefixes took `9`, the fee structure `8`, post-quantum owners `7`, in-term claims `6`, the vault upgrade `5`, v3 `3`). Additions (new commands, new fields)
+**`rpcversion` rule.** `yed_getinfo.rpcversion` is `11` (tag v2, below; the beta3 additions to stock calls took `10`; scheme-visible post-quantum prefixes took `9`, the fee structure `8`, post-quantum owners `7`, in-term claims `6`, the vault upgrade `5`, v3 `3`). Additions (new commands, new fields)
 never bump it; a removal or a shape change does. Phase 8's additions (`yed_estimatesend`,
 `yed_unlockcoin`, `yed_getinfo.lockedOutputs`/`protectedByIndex`, H3/H5/H10) therefore landed
 under `rpcversion = 2`. **v3 bumps to `3` by decision (v3 plan W14), not by the letter of the
@@ -79,6 +79,28 @@ claim); `yed_listpositions` rows gain `earlyRedeemFeeZat`; `yed_estimateredeem` 
 wallet shows before the owner confirms a redeem); `vault-locked` no longer refuses an ACTIVE redeem
 in term and `claim-not-yet` no longer refuses a claim in term (the threshold decides:
 `claim-not-underwater`). Clients go to `6` with the in-term plan's T4.
+
+**Tag v2: a post-quantum payout key (`rpcversion` 11; workspace docs/plans/beta4/price-feed.md §4.3, D-8, D-10,
+docs/plans/beta4/rpc-contract-delta.md).** A pool whose payout key is post-quantum emits a 49-byte v2 coinbase tag
+(`0x31` ‖ `"YED!"` ‖ `0x02` ‖ flags ‖ price ‖ sourceMask ‖ payoutScheme ‖ payoutHash); a P2PKH pool keeps the 36-byte v1
+tag. Both are valid from YED's start, side by side in the payee window, and the fee of a MINT, a claim REDEEM or an owner
+REDEEM pays exactly the eligible payee's script: the 25-byte P2PKH or the 35-byte TX_PQPKH
+(`0x20 <hash> OP_1|OP_2 OP_CHECKPQSIG`). For a client: `yed_gettag` gains `version` (`1` or `2`; it was always `1`) and
+`payoutScheme` (`"p2pkh"`, `"slh-dsa-sha2-128s"` or `"fn-dsa-512"`). Every payee and payout address may now be a plain
+post-quantum address of the network (the D-9 form, `sqf…`/`sqs…`, `tqf…`/`tqs…`, `rqf…`/`rqs…`): `yed_gettag.payoutAddress`,
+`yed_getinfo.miner.payoutAddress` and `policy.preferredPayee`, `yed_listminers[].payoutAddress`, `yed_setquote.next.payoutAddress`,
+`yed_getfeepayee` `eligible[]` / `default.payoutAddress` / `preferred`, `yed_getprice.pinnedKeys[]`, and every `payee` field
+(`yed_gettxinfo`, `yed_validaterawtransaction`, `yed_getblockverdict`, `yed_listtransactions`, `yed_estimateredeem`, and the
+results of the wallet's mint, redeem and claim calls). Field names are unchanged. `-yellowbackpayoutaddress` and `-yellowbackpreferredpayee` accept a plain post-quantum address of the network as well as
+P2PKH. A post-quantum `-mineraddress` is not supported: the internal miner refuses it at init, and the `-mineraddress`
+default applies only to a P2PKH `-mineraddress`, so a post-quantum payout is set with `-yellowbackpayoutaddress`. An FN-DSA-512
+(`sqf…`/`tqf…`/`rqf…`) `-yellowbackpayoutaddress` or `-yellowbackpreferredpayee` is refused at init while Falcon is not active at
+the next block (the node's Falcon height, `yed_getinfo.params.pq.falconHeight`; under `-reindex` the check is skipped), and the
+miner emits no FN-DSA tag for a block before Falcon; SLH-DSA is unaffected. Policy only: a v2 FN-DSA tag and an FN-DSA fee
+output stay valid at every height. The wallet's fee-payee draw (FEE-W, and `yed_getfeepayee`'s `default`) skips FN-DSA payees
+while Falcon is not active at the next block, unless E(R) holds no other payee. A Sapling or YED address gives no tag. A post-quantum fee output is an ordinary TX_PQPKH output: spendable at one confirmation, to any destination
+(the post-quantum coinbase rule applies to block rewards only). The attestor fee (AFEE-1) stays P2PKH. The index's
+`SCHEMA_VERSION` goes to 16, so the index is rebuilt on upgrade.
 
 **The beta3 additions (`rpcversion` 10; workspace docs/plans/beta3/beta3-plan.md B3-D5, docs/plans/beta3/rpc-contract-delta.md),
 by decision as `3` and `4` were.** No `yed_*` field changes shape: every change of the run is an addition to a stock
@@ -723,7 +745,7 @@ Result of `yed_getinfo`:
 
 ```json
 {
-  "rpcversion": 10,
+  "rpcversion": 11,
   "enabled": true,
   "network": "regtest",
   "height": 331,
@@ -1062,6 +1084,7 @@ Result of `yed_getprice`:
     "version": 1,
     "priceMicroUsd": 2000000,
     "sourceMask": 3,
+    "payoutScheme": "p2pkh",
     "payoutAddress": "smQvTmAz2ExamplePayoutAddress1111111"
   }
 }
@@ -1138,9 +1161,14 @@ Result of `yed_gettag`:
   "version": 1,
   "priceMicroUsd": 2000000,
   "sourceMask": 3,
+  "payoutScheme": "p2pkh",
   "payoutAddress": "smQvTmAz2ExamplePayoutAddress1111111"
 }
 ```
+
+`version` is `1` for a P2PKH payout key and `2` for a post-quantum one (`rpcversion` 11); `payoutScheme` is `"p2pkh"`,
+`"slh-dsa-sha2-128s"` or `"fn-dsa-512"`, and `payoutAddress` is then the plain post-quantum address of the network
+(`rqf…`/`rqs…` on regtest).
 
 ### `yed_setquote <priceMicroUsd> <sourceMask>`
 
@@ -3143,8 +3171,8 @@ yet. `-yellowback` and `-experimentalfeatures` no longer gate anything (`-yellow
 accepted, as the H6 acknowledgement); `-yellowbackenforce`, `-yellowbacksignal`,
 `-yellowbacktemplatepolicy` and `-yellowbackrequirehealthy` are retired (logged and ignored),
 and `-yellowbackstartheight` and `-yellowbackenforceuntil` are refused at init (the start height
-is the activation height). `-yellowbackpayoutaddress=<s1…>` (P2PKH; defaults
-to a P2PKH `-mineraddress`); `-yellowbackquotemaxage=<sec>` (default
+is the activation height). `-yellowbackpayoutaddress=<s1…|sqf…|sqs…>` (P2PKH or post-quantum,
+FN-DSA-512 refused before Falcon; defaults to a P2PKH `-mineraddress`, a post-quantum `-mineraddress` is not supported); `-yellowbackquotemaxage=<sec>` (default
 1800); `-yellowbackpreferredpayee=<s1…>`; `-yellowbackpayeepenaltyblocks`, `-yellowbackpayeeaccuracywindow`,
 `-yellowbackpayeetiltbps` (FEE-W overrides, L6; reported in `yed_getinfo.params.policy` and
 `yed_getfeepayee.policy`); `-reindex-yellowback`; `-yellowbackfee`

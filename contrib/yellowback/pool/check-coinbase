@@ -56,15 +56,30 @@ _B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 PUBKEY_PREFIX = {"main": b"\x1c\x28", "test": b"\x1c\x95", "regtest": b"\x1c\x95"}   # chainparams.cpp PUBKEY_ADDRESS
 
 
-def p2pkh_address(key_hash_hex, chain):
-    """Base58Check P2PKH address of a Hash160 for `chain` (s1... on mainnet, sm... elsewhere)."""
-    payload = PUBKEY_PREFIX[chain] + bytes.fromhex(key_hash_hex)
+# The plain post-quantum address versions (D-9, key_io.cpp PlainPQAddressVersions), by scheme byte:
+# FN-DSA-512 sqf/tqf/rqf, SLH-DSA-SHA2-128s sqs/tqs/rqs.
+PQ_PREFIX = {"main": {2: b"\x4d\xdd\x04", 1: b"\x4d\xde\x6a"},
+             "test": {2: b"\x4f\x65\x19", 1: b"\x4f\x66\x7f"},
+             "regtest": {2: b"\x4c\x54\xef", 1: b"\x4c\x56\x55"}}
+
+
+def base58check(payload):
     check = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4]
     n, out = int.from_bytes(payload + check, "big"), ""
     while n:
         n, r = divmod(n, 58)
         out = _B58[r] + out
     return "1" * (len(payload + check) - len((payload + check).lstrip(b"\0"))) + out
+
+
+def p2pkh_address(key_hash_hex, chain):
+    """Base58Check P2PKH address of a Hash160 for `chain` (s1... on mainnet, sm... elsewhere)."""
+    return base58check(PUBKEY_PREFIX[chain] + bytes.fromhex(key_hash_hex))
+
+
+def pq_address(scheme, hash_hex, chain):
+    """The plain post-quantum address (D-9) of a tag v2 payout key for `chain` (sqf/sqs, tqf/tqs, rqf/rqs)."""
+    return base58check(PQ_PREFIX[chain][scheme] + bytes.fromhex(hash_hex))
 
 
 def describe(script_sig, height=None, blockhash=None, chain=None):
@@ -78,9 +93,15 @@ def describe(script_sig, height=None, blockhash=None, chain=None):
     if tag:
         out.update({"version": tag["version"], "signal": tag["signal"], "priceMicroUsd": tag["priceMicroUsd"],
                     "priceUsd": tag["priceMicroUsd"] / yp.MICRO, "sourceMask": tag["sourceMask"],
-                    "payoutKeyHash160": tag["payoutKeyHex"], "offset": tag["offset"]})
-        if chain in PUBKEY_PREFIX:
-            out["payoutAddress"] = p2pkh_address(tag["payoutKeyHex"], chain)
+                    "payoutScheme": tag["payoutScheme"], "offset": tag["offset"]})
+        if tag["version"] == yp.TAG_VERSION_V2:                # tag v2: a post-quantum payout key (price-feed.md section 4.3)
+            out["payoutHash"] = tag["payoutHashHex"]
+            if chain in PQ_PREFIX:
+                out["payoutAddress"] = pq_address(tag["payoutSchemeByte"], tag["payoutHashHex"], chain)
+        else:
+            out["payoutKeyHash160"] = tag["payoutKeyHex"]
+            if chain in PUBKEY_PREFIX:
+                out["payoutAddress"] = p2pkh_address(tag["payoutKeyHex"], chain)
     return out
 
 

@@ -194,9 +194,17 @@ UniValue PayeeToJSON(const std::optional<CKeyID>& payee)
     return UniValue(keyIO.EncodeDestination(CTxDestination(payee.value())));
 }
 
-UniValue PayeeToJSON(bool hasPayee, const uint160& payee)
+/** A fee payee as its address: P2PKH, or the plain post-quantum address of this network (tag v2, rpcversion 11); null when none. */
+UniValue PayeeToJSON(const std::optional<yellowback::Payee>& payee)
 {
-    return PayeeToJSON(hasPayee ? std::optional<CKeyID>(CKeyID(payee)) : std::nullopt);
+    if (!payee.has_value()) return NullUniValue;
+    KeyIO keyIO(::Params());
+    return UniValue(keyIO.EncodeDestination(payee->Destination()));
+}
+
+UniValue PayeeToJSON(bool hasPayee, const yellowback::Payee& payee)
+{
+    return PayeeToJSON(hasPayee ? std::optional<yellowback::Payee>(payee) : std::nullopt);
 }
 
 std::string ClassName(uint8_t termClass)
@@ -348,10 +356,12 @@ UniValue SpendResult(const uint256& txid, const BuiltTx& built)
  * reading) pays on top of FEE-1, and the FEE-1 payee it would pay it to. 0 for a vault that is not ACTIVE, at
  * or past lockHeight, for a class without a fee, and under FEE-0 (no eligible payee: the rule charges neither).
  */
-CAmount EarlyRedeemFeeAt(const YellowbackIndex& index, const COutPoint& out, const VaultRecord& v, int tip, std::optional<CKeyID>& payee)
+CAmount EarlyRedeemFeeAt(const YellowbackIndex& index, const COutPoint& out, const VaultRecord& v, int tip, std::optional<yellowback::Payee>& payee)
 {
     const yellowback::Params& p = index.GetParams();
-    payee = DefaultPayee(index.View(), p, tip, OutPointSelector(out), index.GetPayeePolicy());
+    PayeePolicy pp = index.GetPayeePolicy();
+    pp.txHeight = (int64_t)tip + 1;   // the wallet's draw for a spend at tip + 1: no FN-DSA payee before Falcon (policy)
+    payee = DefaultPayee(index.View(), p, tip, OutPointSelector(out), pp);
     if (v.Status() != VaultStatus::ACTIVE || !payee.has_value() || !p.IsValidClass(v.termClass)) return 0;
     if ((int64_t)tip + 1 >= (int64_t)v.lockHeight) return 0;
     return EarlyRedeemFeeZat(v.mintedCents, p.earlyRedeemFeeBps[v.termClass], v.pMint);   // IT-9': of the debt at the mint price
@@ -1093,7 +1103,7 @@ UniValue yed_estimateredeem(const UniValue& params, bool fHelp)
     const VaultRecord& v = rec.value();
     const int tip = IndexHeight(index);
     const bool active = v.Status() == VaultStatus::ACTIVE;
-    std::optional<CKeyID> payee;
+    std::optional<yellowback::Payee> payee;
     const CAmount early = EarlyRedeemFeeAt(index, out, v, tip, payee);
     // FEE-1 on the ACTIVE redeem (FEE-0 without an eligible payee); a VOID release pays nothing (L14).
     const CAmount fee1 = active && payee.has_value() ? ProtocolFeeZat(v.mintedCents, v.pMint, p).value_or(MAX_MONEY) : 0;   // FEE-1' at the vault's pMint
@@ -1617,7 +1627,7 @@ UniValue yed_listpositions(const UniValue& params, bool fHelp)
         o.pushKV("emergencyOpenAt", noticed ? UniValue((int64_t)notice->refHeight + p.emergencyPersist) : NullUniValue);
         const bool pendingSpend = yellowback::rpc::PushSpendPending(o, out).has_value();   // N1
         o.pushKV("canRedeem", v.IsOpen() && h >= v.ownerHeight && !pendingSpend);     // IT-1 (extended): in term too
-        std::optional<CKeyID> payee;
+        std::optional<yellowback::Payee> payee;
         o.pushKV("earlyRedeemFeeZat", EarlyRedeemFeeAt(index, out, v, h, payee));   // IT-9: what a redeem now adds to the fee
         o.pushKV("canClaim", est.claimable && balance >= v.mintedCents && !pendingSpend);
         o.pushKV("canNotice", est.canNotice);

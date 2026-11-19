@@ -188,7 +188,7 @@ env:
   # wallet_pq_sendmany_lock joined on 2026-11-16 (beta3 review S-1: a post-quantum send keeps its coins locked until it ends; ycash-dd's twin).
   # wallet_pq_shieldcoinbase joined on 2026-11-18 (beta4 item 7a: z_shieldcoinbase moves a post-quantum reward to Sapling at the exact amount, as yewd).
   # wallet_restore_parked_chain joined on 2026-11-18 (beta4 item 2b: a restore on a chain no block extends completes at its header tip, as yewd).
-  YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_activation_reorg yellowback_reorg_restart yellowback_redeem_boundary yellowback_interm yellowback_cancel_limit yellowback_pq yellowback_pq_dayone yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_attest_bond yellowback_attest_evict yellowback_attest_rejoin yellowback_attest_live yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke yellowback_fee yellowback_fees yellowback_fees_reaccept yellowback_mempool_limits yellowback_wr_flags vault_upgrade vault_activation_restart stopatheight ycash_ydf_default ycash_bootstrap testnet_ceremony vault_rpc vault_rpc_contract vault_refee vault_primitive vault_slashing vault_bridge vault_pq_reorg vault_pq vault_pq_wallet vault_pq_wallet_restore vault_undo_prune vault_policy vault_dos vault_pq_relay vault_lock_from wallet_pq_address wallet_balance_by_type wallet_getnewaddress_type wallet_yed_held_guard wallet_yed_output_guard lightwalletd_only yellowback_lightwalletd z_validateaddress_nowallet wallet_address_matrix wallet_pq_fee_cap wallet_yed_ecc_token wallet_beta2_followups wallet_beta2_followups2 wallet_seed_restore_ecc wallet_seed_lookahead_exposure getrawtransaction_insight_pq ycash_ydf_mandate_end wallet_gettransaction_fee value_pools_by_type getcoinbasetemplatefor wallet_reindex_chainstate wallet_pq_coinbase_spend wallet_pq_sendmany_lock wallet_pq_shieldcoinbase wallet_restore_parked_chain
+  YELLOWBACK_SCRIPTS: yellowback_index yellowback_upgrade yellowback_mining yellowback_lifecycle yellowback_claim yellowback_activation_reorg yellowback_reorg_restart yellowback_redeem_boundary yellowback_interm yellowback_cancel_limit yellowback_pq yellowback_pq_dayone yellowback_tag_v2 yellowback_tag_v2_falcon yellowback_void_mint yellowback_mint_armed yellowback_pricefeed yellowback_wallet_restore yellowback_sapling yellowback_stock_node yellowback_rpc_contract yellowback_hardening yellowback_attest yellowback_attest_wallet yellowback_attest_bond yellowback_attest_evict yellowback_attest_rejoin yellowback_attest_live yellowback_quote yellowback_stratum yellowback_chainviz yellowback_wallet_lifecycle yellowback_framework_smoke yellowback_fee yellowback_fees yellowback_fees_reaccept yellowback_mempool_limits yellowback_wr_flags vault_upgrade vault_activation_restart stopatheight ycash_ydf_default ycash_bootstrap testnet_ceremony vault_rpc vault_rpc_contract vault_refee vault_primitive vault_slashing vault_bridge vault_pq_reorg vault_pq vault_pq_wallet vault_pq_wallet_restore vault_undo_prune vault_policy vault_dos vault_pq_relay vault_lock_from wallet_pq_address wallet_balance_by_type wallet_getnewaddress_type wallet_yed_held_guard wallet_yed_output_guard lightwalletd_only yellowback_lightwalletd z_validateaddress_nowallet wallet_address_matrix wallet_pq_fee_cap wallet_yed_ecc_token wallet_beta2_followups wallet_beta2_followups2 wallet_seed_restore_ecc wallet_seed_lookahead_exposure getrawtransaction_insight_pq ycash_ydf_mandate_end wallet_gettransaction_fee value_pools_by_type getcoinbasetemplatefor wallet_reindex_chainstate wallet_pq_coinbase_spend wallet_pq_sendmany_lock wallet_pq_shieldcoinbase wallet_restore_parked_chain
   SANITIZER_SCRIPTS: yellowback_index
   # The functional scripts the nightly job runs by name, each in its own step (the Rust attest agent, the devnet,
   # a ycash6-stock build, the prune floor). qa/yellowback-audit.sh counts them as run by CI.
@@ -284,7 +284,9 @@ env:
   # section 4.12).
   # dbf53a8 (B3-D5) adds the generator's beta3 line (rpcversion 10: no yed_* shape change,
   # docs/plans/beta3/rpc-contract-delta.md section 4.13).
-  YB_WORKSPACE_COMMIT: ${{ inputs.workspace_commit || 'dbf53a83db4ee5fbb54992fbc4274b3902f1c5f5' }}
+  # 9b82b3c (yellowback#80, beta4 P1) adds the generator's beta4 line (rpcversion 11: yed_gettag.version and
+  # payoutScheme, docs/plans/beta4/rpc-contract-delta.md section 4.14). Re-pin to its merge commit when #80 merges.
+  YB_WORKSPACE_COMMIT: ${{ inputs.workspace_commit || '9b82b3c9e7f124b87cbe09f98a0dc00a405fc2d8' }}
   # The mixed tier's pins (workspace docs/plans/kogany/ci-design.md; bump by PR, never a branch tip).
   # kogany: upgrade/vault at 33a32a911 (the koganyd identity); its koganyd-bin artifact (any
   # kogany workflow) or, when that has expired or does not exist, a build at this commit (dev
@@ -1117,6 +1119,12 @@ jobs:
           if [ "$prefix" = 1 ] && head -1 doc/yellowback-rpc.md | grep -Eq 'rpcversion [1-9][0-9]$'; then beta3=1; fi
           echo "beta3=$beta3" >> "$GITHUB_OUTPUT"
           echo "beta3 line: $beta3"
+          # The beta4 line (the beta3 line after tag v2, docs/plans/beta4/price-feed.md section 4.3): the rpc doc's title
+          # states rpcversion 11; the contract comes from the workspace's beta4 mode (--check-beta4), as ycash-dd's audit decides it.
+          beta4=0
+          if [ "$beta3" = 1 ] && head -1 doc/yellowback-rpc.md | grep -Eq 'rpcversion (1[1-9]|[2-9][0-9])$'; then beta4=1; fi
+          echo "beta4=$beta4" >> "$GITHUB_OUTPUT"
+          echo "beta4 line: $beta4"
 
       - name: qa/yellowback-audit.sh (frozen set and line budgets, registration, the other script legs)
         # One script so the gate a developer runs locally is the gate CI runs. On the upgrade line
@@ -1278,7 +1286,7 @@ jobs:
           # cross-line leg, the same one a local run uses.
           YB_OTHER_LINE_REF=other-line/head qa/yellowback-audit.sh --only cross-line --require-cross-line ycash6-baseline
 
-      - name: RPC contract at rpcversion 5 (6 in term, 7 post-quantum, 8 fees, 9 prefixes, 10 beta3) through the workspace generator (findings (39), (44))
+      - name: RPC contract at rpcversion 5 (6 in term, 7 post-quantum, 8 fees, 9 prefixes, 10 beta3, 11 beta4) through the workspace generator (findings (39), (44))
         # The upgrade line's doc/yellowback-rpc-contract.json must be exactly what the workspace's
         # scripts/extract_spec.py produces from this tree's doc/yellowback-rpc.md in its upgrade
         # mode (the doc is the whole contract there), at the workspace commit pinned in env.
@@ -1293,6 +1301,7 @@ jobs:
           FEES: ${{ steps.line.outputs.fees }}
           PREFIX: ${{ steps.line.outputs.prefix }}
           BETA3: ${{ steps.line.outputs.beta3 }}
+          BETA4: ${{ steps.line.outputs.beta4 }}
         run: |
           git init -q "$RUNNER_TEMP/ws"
           git -C "$RUNNER_TEMP/ws" fetch -q --depth 1 "https://github.com/$YB_WORKSPACE_REPO.git" "$YB_WORKSPACE_COMMIT"
@@ -1307,6 +1316,7 @@ jobs:
           if os.environ.get("FEES") == "1": line, ver = ("fees", 8)
           if os.environ.get("PREFIX") == "1": line, ver = ("prefix", 9)
           if os.environ.get("BETA3") == "1": line, ver = ("beta3", 10)
+          if os.environ.get("BETA4") == "1": line, ver = ("beta4", 11)
           if x.doc_line(doc) != line:
               sys.exit("doc/yellowback-rpc.md is rpcversion %s; the %s line is rpcversion %d" % (x.rpcdoc_version(doc), line, ver))
           want = x.contract_text(x.read_plan(), x.read_plan_v3(), doc, x.RPCDOC6_REL)
@@ -1315,7 +1325,7 @@ jobs:
               sys.exit("contract rpcversion is not %d" % ver)
           if have != want:
               sys.stdout.writelines(difflib.unified_diff(have.splitlines(True), want.splitlines(True), "committed", "generated"))
-              sys.exit("doc/yellowback-rpc-contract.json is not the generator's output: regenerate it (make spec%s in the workspace)" % ({"interm": "-in-term", "quantum": "-quantum", "fees": "-fees", "prefix": "-prefix", "beta3": "-beta3"}.get(line, "-upgrade")))
+              sys.exit("doc/yellowback-rpc-contract.json is not the generator's output: regenerate it (make spec%s in the workspace)" % ({"interm": "-in-term", "quantum": "-quantum", "fees": "-fees", "prefix": "-prefix", "beta3": "-beta3", "beta4": "-beta4"}.get(line, "-upgrade")))
           print("contract: rpcversion %d, identical to the generator's output (%d bytes)" % (ver, len(have)))
           PY
 
@@ -1407,7 +1417,9 @@ jobs:
           # rpcversion 9 on the prefix line (D-9, quantum spec §4.1: the PQ address versions per scheme).
           if [ "$want" = 8 ] && grep -q 'PQAddressVersionsJSON' src/rpc/yellowback.cpp; then want=9; fi
           # rpcversion 10 on the beta3 line (B3-D5: the beta3 additions to stock calls, no yed_* shape change).
-          if [ "$want" = 9 ] && grep -q 'YELLOWBACK_RPC_VERSION = 10;' src/rpc/yellowback.cpp; then want=10; fi
+          if [ "$want" = 9 ] && grep -q 'YELLOWBACK_RPC_VERSION = 1[01];' src/rpc/yellowback.cpp; then want=10; fi
+          # rpcversion 11 on the beta4 line (tag v2: yed_gettag.version and payoutScheme, post-quantum fee payees).
+          if [ "$want" = 10 ] && grep -q 'YELLOWBACK_RPC_VERSION = 11;' src/rpc/yellowback.cpp; then want=11; fi
           export want
           test -f doc/yellowback-rpc.md && grep -q "rpcversion $want" doc/yellowback-rpc.md
           # rpcversion 5 (the vault upgrade, upgrade plan §15.10): yed_getinfo carries the upgrade object

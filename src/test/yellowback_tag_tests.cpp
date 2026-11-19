@@ -8,12 +8,18 @@
 
 #include "yellowback/tag.h"
 
+#include "crypto/pq/scheme.h"
 #include "script/script.h"
+#include "streams.h"
+#include "test/data/yellowback_tag_vectors.json.h"
 #include "test/test_bitcoin.h"
 #include "util/strencodings.h"
+#include "version.h"
 
 #include <boost/test/unit_test.hpp>
+#include <univalue.h>
 
+#include <algorithm>
 #include <functional>
 
 using namespace yellowback;
@@ -26,7 +32,7 @@ CoinbaseTag QuoteTag(uint64_t price = 50000, uint8_t flags = 0x01)
     t.flags = flags;
     t.priceMicroUsd = price;
     t.sourceMask = 0x0007;
-    t.payoutKey = uint160(std::vector<unsigned char>(20, 0xAB));
+    t.payee = Payee::FromKeyID(CKeyID(uint160(std::vector<unsigned char>(20, 0xAB))));
     return t;
 }
 
@@ -127,7 +133,7 @@ BOOST_AUTO_TEST_CASE(tag1_to_5_table)
         // TAG-3: signal-only
         { "signal_only", prefix + TagPush(signalOnly), signalOnly },
         // TAG-3: any 20 bytes is a payout key
-        { "zero_payout_key", prefix + TagPush([] { CoinbaseTag t = QuoteTag(); t.payoutKey.SetNull(); return t; }()), [] { CoinbaseTag t = QuoteTag(); t.payoutKey.SetNull(); return t; }() },
+        { "zero_payout_key", prefix + TagPush([] { CoinbaseTag t = QuoteTag(); t.payee.hash.SetNull(); return t; }()), [] { CoinbaseTag t = QuoteTag(); t.payee.hash.SetNull(); return t; }() },
         // TAG-1: the height prefix must be the exact minimal push
         { "wrong_height", (CScript() << (height + 1)) + TagPush(quote), std::nullopt },
         { "no_prefix", TagPush(quote), std::nullopt },
@@ -230,6 +236,144 @@ BOOST_AUTO_TEST_CASE(tag4_reader_never_judges_the_block)
         BOOST_CHECK(!got.has_value() || got.value() == QuoteTag());
         BOOST_CHECK_EQUAL(got.has_value(), n == tagged.size());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tag v2 (docs/plans/beta4/price-feed.md §4.3, beta4 P1 spec §1, §2, §7)
+
+namespace {
+
+CoinbaseTag V2Tag(uint8_t scheme, uint64_t price = 50000)
+{
+    return MakeTag(0x01, price, 0x0005, Payee::FromPQ(CPQKeyID(scheme, uint256(std::vector<unsigned char>(32, 0xCD)))));
+}
+
+} // namespace
+
+// Rule: TAG-1
+BOOST_AUTO_TEST_CASE(tag_v2_layout_and_roundtrip)
+{
+    const int height = 1000;
+    for (uint8_t scheme : { pq::SCHEME_SLH_DSA_SHA2_128S, pq::SCHEME_FN_DSA_512 }) {
+        const CoinbaseTag t = V2Tag(scheme);
+        BOOST_CHECK_EQUAL(t.version, TAG_VERSION_V2);
+        const std::vector<unsigned char> body = EncodeTag(t);
+        BOOST_CHECK_EQUAL(body.size(), TAG_SIZE_V2);
+        BOOST_CHECK_EQUAL(HexStr(body.begin(), body.begin() + 5), "5945442102");
+        BOOST_CHECK_EQUAL(body[16], scheme);
+        const CScript push = TagPush(t);
+        BOOST_CHECK_EQUAL(push.size(), 50u);
+        BOOST_CHECK_EQUAL(push[0], 0x31);
+        auto got = FindTag((CScript() << height << OP_0) + push, height);
+        BOOST_REQUIRE(got.has_value());
+        BOOST_CHECK(got.value() == t);
+        BOOST_CHECK(IsValidTag(t));
+    }
+    // v1 for a P2PKH payee, unchanged byte for byte
+    const CoinbaseTag v1 = MakeTag(0x01, 50000, 0x0007, QuoteTag().payee);
+    BOOST_CHECK(v1 == QuoteTag());
+    BOOST_CHECK_EQUAL(EncodeTag(v1).size(), TAG_SIZE);
+}
+
+// Rule: TAG-2
+// Rule: TAG-5
+BOOST_AUTO_TEST_CASE(tag_v2_bad_scheme_truncation_and_pattern_order)
+{
+    const int height = 1000;
+    const CScript prefix = CScript() << height;
+    std::vector<unsigned char> v2 = EncodeTag(V2Tag(pq::SCHEME_FN_DSA_512));
+    std::vector<unsigned char> bad = v2;
+    bad[16] = 0x03;                                                        // unknown scheme
+    BOOST_CHECK(!FindTag(prefix + (CScript() << bad), height).has_value());
+    bad[16] = 0x00;                                                        // P2PKH is not a v2 scheme
+    BOOST_CHECK(!FindTag(prefix + (CScript() << bad), height).has_value());
+    // truncated: 48 bytes after the 0x31 push opcode
+    BOOST_CHECK(!FindTag(Raw(prefix, Cat(Bytes("31"), std::vector<unsigned char>(v2.begin(), v2.end() - 1))), height).has_value());
+    // a v2 pattern with version 1, a v1 pattern with version 2
+    std::vector<unsigned char> v2as1 = v2;
+    v2as1[4] = 0x01;
+    BOOST_CHECK(!FindTag(prefix + (CScript() << v2as1), height).has_value());
+    std::vector<unsigned char> v1as2 = EncodeTag(QuoteTag());
+    v1as2[4] = 0x02;
+    BOOST_CHECK(!FindTag(prefix + (CScript() << v1as2), height).has_value());
+    // first by position decides
+    const CScript v1push = TagPush(QuoteTag()), v2push = TagPush(V2Tag(pq::SCHEME_SLH_DSA_SHA2_128S));
+    BOOST_CHECK_EQUAL(FindTag(prefix + v1push + v2push, height)->version, TAG_VERSION);
+    BOOST_CHECK_EQUAL(FindTag(prefix + v2push + v1push, height)->version, TAG_VERSION_V2);
+    BOOST_CHECK(!FindTag(prefix + (CScript() << bad) + v1push, height).has_value());
+}
+
+// Rule: FEE-2
+BOOST_AUTO_TEST_CASE(payee_script_order_and_serialisation)
+{
+    const Payee p2pkh = QuoteTag().payee;
+    const Payee fn = V2Tag(pq::SCHEME_FN_DSA_512).payee, slh = V2Tag(pq::SCHEME_SLH_DSA_SHA2_128S).payee;
+    BOOST_CHECK_EQUAL(p2pkh.Script().size(), 25u);
+    BOOST_CHECK(fn.Script() == GetScriptForPQKey(CPQKeyID(pq::SCHEME_FN_DSA_512, fn.hash)));
+    BOOST_CHECK_EQUAL(fn.Script().size(), 35u);
+    for (const Payee& p : { p2pkh, fn, slh }) {
+        BOOST_CHECK(Payee::FromScript(p.Script()) == p);
+        BOOST_CHECK(Payee::FromDestination(p.Destination()) == p);
+        CDataStream ss(SER_DISK, CLIENT_VERSION);
+        ss << p;
+        BOOST_CHECK_EQUAL(ss.size(), 1 + p.HashSize());
+        BOOST_CHECK_EQUAL(ss[0], (char)p.kind);
+        Payee back;
+        ss >> back;
+        BOOST_CHECK(back == p);
+    }
+    // nothing else is a payee: a P2SH, a trailing byte, an unknown scheme, a bare key
+    BOOST_CHECK(!Payee::FromScript(GetScriptForDestination(CScriptID(CScript() << OP_1))).has_value());
+    CScript longer = fn.Script();
+    longer << OP_0;
+    BOOST_CHECK(!Payee::FromScript(longer).has_value());
+    CScript scheme3 = CScript() << ToByteVector(fn.hash) << OP_3 << OP_CHECKPQSIG;
+    BOOST_CHECK(!Payee::FromScript(scheme3).has_value());
+    CDataStream bad(ParseHex("03" + std::string(64, '0')), SER_DISK, CLIENT_VERSION);
+    Payee junk;
+    BOOST_CHECK_THROW(bad >> junk, std::ios_base::failure);
+    // order: kind, then the hash bytes
+    BOOST_CHECK(p2pkh < slh && slh < fn);
+    BOOST_CHECK_EQUAL(p2pkh.SchemeName(), "p2pkh");
+    BOOST_CHECK_EQUAL(slh.SchemeName(), "slh-dsa-sha2-128s");
+    BOOST_CHECK_EQUAL(fn.SchemeName(), "fn-dsa-512");
+}
+
+// Rule: TAG-1
+// Rule: TAG-5
+BOOST_AUTO_TEST_CASE(tag_vectors_cross_line)
+{
+    // src/test/data/yellowback_tag_vectors.json (D-T4): generated by the Python model, carried byte for byte by the 6.20.0 line and kogany.
+    UniValue doc;
+    BOOST_REQUIRE(doc.read(std::string(json_tests::yellowback_tag_vectors, json_tests::yellowback_tag_vectors + sizeof(json_tests::yellowback_tag_vectors))));
+    const UniValue& cases = doc["cases"];
+    BOOST_REQUIRE(cases.size() >= 11);
+    int found = 0;
+    for (size_t i = 0; i < cases.size(); i++) {
+        const UniValue& c = cases[i];
+        const std::string name = c["name"].get_str();
+        const std::vector<unsigned char> raw = ParseHex(c["scriptSig"].get_str());
+        const CScript scriptSig(raw.begin(), raw.end());
+        BOOST_CHECK_EQUAL((int)scriptSig.size(), c["scriptSigSize"].get_int());
+        std::optional<CoinbaseTag> got = FindTag(scriptSig, c["height"].get_int());
+        BOOST_CHECK_MESSAGE(got.has_value() == !c["tag"].isNull(), name);
+        if (!got.has_value() || c["tag"].isNull()) continue;
+        found++;
+        const UniValue& t = c["tag"];
+        BOOST_CHECK_MESSAGE(got->version == t["version"].get_int(), name + ": version");
+        BOOST_CHECK_MESSAGE(got->flags == t["flags"].get_int(), name + ": flags");
+        BOOST_CHECK_MESSAGE((int64_t)got->priceMicroUsd == t["priceMicroUsd"].get_int64(), name + ": price");
+        BOOST_CHECK_MESSAGE(got->sourceMask == t["sourceMask"].get_int(), name + ": sourceMask");
+        BOOST_CHECK_MESSAGE(got->payee.kind == t["payeeKind"].get_int(), name + ": kind");
+        BOOST_CHECK_MESSAGE(got->payee.SchemeName() == t["payoutScheme"].get_str(), name + ": scheme");
+        BOOST_CHECK_MESSAGE(HexStr(got->payee.hash.begin(), got->payee.hash.begin() + got->payee.HashSize()) == t["payoutHash"].get_str(), name + ": hash");
+        const CScript script = got->payee.Script();
+        BOOST_CHECK_MESSAGE(HexStr(script.begin(), script.end()) == c["payeeScript"].get_str(), name + ": payee script");
+        // the push re-encodes to the bytes found
+        const CScript push = TagPush(got.value());
+        BOOST_CHECK_MESSAGE(std::search(scriptSig.begin(), scriptSig.end(), push.begin(), push.end()) != scriptSig.end(), name + ": re-encode");
+    }
+    BOOST_CHECK_EQUAL(found, 6);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

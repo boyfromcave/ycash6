@@ -18,6 +18,7 @@
 #include "util/system.h"
 #include "util/strencodings.h"
 #include "warnings.h"
+#include "crypto/pq/scheme.h"
 #include "yellowback/payload.h"
 #include "yellowback/script.h"
 #include "yellowback/state.h"
@@ -778,12 +779,15 @@ MinerStatus YellowbackIndex::GetMinerStatus(int64_t now) const
         s.kind = "none";
         return s;
     }
+    const int tip = TipHeight();
     // MINER-1: a quote tag iff a fresh quote is held (the signal-only tag left with ACT-1, §6)
     s.kind = quote.priceMicroUsd != 0 && now - quote.receivedAt <= miner.quoteMaxAge ? "quote" : "none";
-    const int tip = TipHeight();
+    // policy (beta4 P1 follow-up): no v2 FN-DSA tag for a block before Falcon (init refuses such a payout key then;
+    // this covers a node started past the Falcon height whose chain is reorganised below it)
+    if (miner.payoutKey->kind == pq::SCHEME_FN_DSA_512 && !params.IsPQFalconActive((int64_t)tip + 1)) s.kind = "none";
     if (tip >= params.startHeight) {
         s.registered = Registered(*db, params, miner.payoutKey.value(), tip);
-        for (const CKeyID& k : EligiblePayees(*db, params, tip)) {
+        for (const Payee& k : EligiblePayees(*db, params, tip)) {
             if (k == miner.payoutKey.value()) { s.eligible = true; break; }
         }
     }
@@ -825,8 +829,8 @@ UniValue YellowbackIndex::TemplateInfo(int64_t now, const CScript& coinbaseScrip
     o.pushKV("kind", !tag.has_value() ? "none" : tag->IsQuote() ? "quote" : "signal");
     o.pushKV("priceMicroUsd", tag.has_value() && tag->IsQuote() ? (int64_t)tag->priceMicroUsd : 0);
     o.pushKV("quoteAgeSeconds", ms.quoteAgeSeconds.has_value() ? UniValue(ms.quoteAgeSeconds.value()) : NullUniValue);
-    std::optional<CKeyID> payout = tag.has_value() ? std::optional<CKeyID>(CKeyID(tag->payoutKey)) : ms.payoutKey;
-    o.pushKV("payoutAddress", payout.has_value() ? UniValue(keyIO.EncodeDestination(CTxDestination(payout.value()))) : NullUniValue);
+    std::optional<Payee> payout = tag.has_value() ? std::optional<Payee>(tag->payee) : ms.payoutKey;
+    o.pushKV("payoutAddress", payout.has_value() ? UniValue(keyIO.EncodeDestination(payout->Destination())) : NullUniValue);
     o.pushKV("registered", ms.registered);
     o.pushKV("eligible", ms.eligible);
     o.pushKV("healthy", healthy);
@@ -1136,6 +1140,15 @@ int PQFalconHeightOf(const Consensus::Params& consensus)
     return std::max(vault, falcon);
 }
 
+namespace {
+std::optional<uint256> g_testFastSetIdOverride;   // unit tests only (SetTestFastAttestorSetIdForTesting)
+} // namespace
+
+void SetTestFastAttestorSetIdForTesting(const std::optional<uint256>& id)
+{
+    g_testFastSetIdOverride = id;
+}
+
 std::optional<std::string> ParamsFromArgs(const std::string& networkId, const std::string& testnetProfile,
                                           const Consensus::Params& consensus, Params& out)
 {
@@ -1161,6 +1174,7 @@ std::optional<std::string> ParamsFromArgs(const std::string& networkId, const st
         if (networkId == "test" && testnetProfile != "fast" && testnetProfile != "slow" && testnetProfile != "legacy")
             return "unknown testnet profile '" + testnetProfile + "' (fast, slow or legacy)";
         out = networkId == "test" && testnetProfile == "fast" ? TestFastParams() : ParamsForNetwork(networkId);
+        if (networkId == "test" && testnetProfile == "fast" && g_testFastSetIdOverride.has_value()) out.attestorSetId = g_testFastSetIdOverride.value();
         out.startHeight = out.attestorSetId.IsNull() ? 0 : startHeight;
         out.pqFalconHeight = PQFalconHeightOf(consensus);
         out.issuedBeforeStart = out.startHeight > 0 ? CirculatingSupplyAt(out.startHeight - 1, consensus) : 0;   // D-Q-25
