@@ -84,7 +84,7 @@ OPTIONAL = {
     'yed_listpositions': {'intents', 'heldResiduals', 'spendTxid'},
     'yed_listvaults': {'intents', 'refundHolder', 'heldResiduals'},
     'yed_getfeepayee': {'preferred'},
-    'yed_gettag': {'version', 'priceMicroUsd', 'sourceMask', 'payoutAddress'},
+    'yed_gettag': {'version', 'priceMicroUsd', 'sourceMask', 'payoutScheme', 'payoutAddress'},
     'yed_validateaddress': {'address', 'type', 'keyid', 'ismine', 'transparentAddress', 'pqscheme'},
     'yed_decodepayload': {'termClass', 'cents', 'lockHeight', 'refHeight', 'ownerScheme', 'ownerHash', 'feeVout', 'attestFeeVout', 'assignments',
                           'assignedCents', 'register', 'notice', 'equivocation', 'revive', 'bundle', 'cancelCosign', 'opReturnIndex'},
