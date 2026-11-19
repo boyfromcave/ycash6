@@ -1,0 +1,102 @@
+{
+ "bucket": "low",
+ "sla_days": 180,
+ "findings": [
+  {
+   "fingerprint": "8feb720a69350464",
+   "rule": "python.lang.security.audit.dynamic-urllib-use-detected",
+   "path": "qa/yellowback-other-line-branch.py",
+   "line": 133,
+   "first_seen": "2026-11-12",
+   "due": "2027-05-11"
+  },
+  {
+   "fingerprint": "9b10d343ff1022a7",
+   "rule": "python.lang.security.audit.insecure-file-permissions",
+   "path": "contrib/bootstrap/test_ycash_bootstrap.py",
+   "line": 361,
+   "first_seen": "2026-11-15",
+   "due": "2027-05-14"
+  },
+  {
+   "fingerprint": "ef65480409115eab",
+   "rule": "rust.lang.security.args",
+   "path": "contrib/yellowback/attest/proto/gen/src/main.rs",
+   "line": 11,
+   "first_seen": "2026-11-19",
+   "due": "2027-05-18"
+  },
+  {
+   "fingerprint": "226f4c19a9975bbd",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "contrib/yellowback/attest/src/light/mod.rs",
+   "line": 262,
+   "first_seen": "2026-11-19",
+   "due": "2027-05-18"
+  },
+  {
+   "fingerprint": "f221913dd45d1bc5",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "contrib/yellowback/attest/src/light/mod.rs",
+   "line": 269,
+   "first_seen": "2026-11-19",
+   "due": "2027-05-18"
+  },
+  {
+   "fingerprint": "c8b3d31f3459953b",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "contrib/yellowback/attest/src/light/mod.rs",
+   "line": 288,
+   "first_seen": "2026-11-19",
+   "due": "2027-05-18"
+  },
+  {
+   "fingerprint": "f2c5c1a1bc30ed26",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "contrib/yellowback/attest/src/light/mod.rs",
+   "line": 298,
+   "first_seen": "2026-11-19",
+   "due": "2027-05-18"
+  },
+  {
+   "fingerprint": "1fff38fd289bcf0c",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "contrib/yellowback/attest/src/light/mod.rs",
+   "line": 303,
+   "first_seen": "2026-11-19",
+   "due": "2027-05-18"
+  },
+  {
+   "fingerprint": "924bca9ce995910c",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "contrib/yellowback/attest/src/light/mod.rs",
+   "line": 437,
+   "first_seen": "2026-11-19",
+   "due": "2027-05-18"
+  },
+  {
+   "fingerprint": "e724b90e154268bf",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "contrib/yellowback/attest/src/light/mod.rs",
+   "line": 447,
+   "first_seen": "2026-11-19",
+   "due": "2027-05-18"
+  },
+  {
+   "fingerprint": "55080a17e4e43339",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "contrib/yellowback/attest/src/light/mod.rs",
+   "line": 493,
+   "first_seen": "2026-11-19",
+   "due": "2027-05-18"
+  },
+  {
+   "fingerprint": "c3fa1dde78c03d75",
+   "rule": "trailofbits.rs.panic-in-function-returning-result",
+   "path": "contrib/yellowback/attest/src/light/mod.rs",
+   "line": 695,
+   "first_seen": "2026-11-19",
+   "due": "2027-05-18"
+  }
+ ]
+}
