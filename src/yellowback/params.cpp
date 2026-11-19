@@ -208,6 +208,15 @@ const Params& TestParams()
     return p;
 }
 
+// The fast testnet's YED set (C-T1): filled in by the ceremony (C-T7), empty until then (YED off).
+const char* const TEST_FAST_ATTESTOR_SET_ID = "";
+
+uint256 TestFastAttestorSetId()
+{
+    const std::string hex(TEST_FAST_ATTESTOR_SET_ID);
+    return hex.empty() ? uint256() : uint256S(hex);
+}
+
 const Params& TestFastParams()
 {
     // The testnet-yb-fast column (testnet plan Revision 3, T-16). One rule scales every lifecycle window,
@@ -249,6 +258,8 @@ const Params& TestFastParams()
         // arm; testnet-yb-fast takes one thousandth (same 1:2 ratio). testnet-yb-slow keeps mainnet's.
         f.bondMinFloorZat     = 10 * COIN;  // D-Q-30     10,000 YEC
         f.bondMinCapZat       = 20 * COIN;  // D-Q-30     20,000 YEC
+        // The network's own YED set (C-T1): TEST_FAST_ATTESTOR_SET_ID, null until the ceremony names it.
+        f.attestorSetId       = TestFastAttestorSetId();
         // The invariants, asserted for every column by testnet_params_tests.
         assert(f.bondMaturity >= f.attestMaxAge);
         assert(f.claimDelay >= f.attestMaxAge);

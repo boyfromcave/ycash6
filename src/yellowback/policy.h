@@ -36,7 +36,8 @@ namespace policy {
  * than -yellowbackquotemaxage is held, else an empty script (the signal-only
  * tag and the signal bit left with ACT-1, upgrade plan §6); payoutKey from
  * -yellowbackpayoutaddress (MINER-2; none => empty script); empty while the
- * index is unhealthy (MINER-3). Returns the push `0x24 ‖ 36 bytes`
+ * index is unhealthy (MINER-3). Returns the push `0x24 ‖ 36 bytes` (tag v1, a
+ * P2PKH payee) or `0x31 ‖ 49 bytes` (tag v2, a post-quantum payee)
  * (TagPush) that COINBASE_FLAGS carries (V5).
  */
 CScript BuildTagScript(const YellowbackIndex& index, int64_t now);

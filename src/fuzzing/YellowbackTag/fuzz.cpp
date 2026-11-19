@@ -5,7 +5,7 @@
 // Fuzz target for the coinbase tag reader (plan §3.2, §7 "Fuzzing"). Input:
 // LE32(nHeight) ‖ scriptSig. FindTag must never throw or read out of bounds
 // on any bytes, and a tag it finds must re-encode to bytes that are present
-// in the scriptSig (0x24 ‖ EncodeTag(tag) after the height prefix). Same
+// in the scriptSig (0x24 or, tag v2, 0x31 ‖ EncodeTag(tag) after the height prefix). Same
 // layout as the other targets under src/fuzzing/: an AFL main reading a file
 // and a libFuzzer entry point. Corpus: src/fuzzing/YellowbackTag/input
 // (src/test/gen_yellowback_corpus.py).
@@ -35,7 +35,7 @@ int fuzz_YellowbackTag(const std::vector<unsigned char>& data)
         const CScript prefix = CScript() << nHeight;
         if (std::search(scriptSig.begin() + prefix.size(), scriptSig.end(), push.begin(), push.end()) == scriptSig.end()) return -2;
         if (!yellowback::IsValidTag(tag.value())) return -3;
-        if (yellowback::EncodeTag(tag.value()).size() != yellowback::TAG_SIZE) return -4;
+        if (yellowback::EncodeTag(tag.value()).size() != (tag->version == yellowback::TAG_VERSION ? yellowback::TAG_SIZE : yellowback::TAG_SIZE_V2)) return -4;
     }
     // The whole input as a scriptSig at a few fixed heights, and every prefix.
     for (int h : { 0, 1, 16, 17, 65535, 1234567 }) {

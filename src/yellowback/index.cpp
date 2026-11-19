@@ -783,7 +783,7 @@ MinerStatus YellowbackIndex::GetMinerStatus(int64_t now) const
     const int tip = TipHeight();
     if (tip >= params.startHeight) {
         s.registered = Registered(*db, params, miner.payoutKey.value(), tip);
-        for (const CKeyID& k : EligiblePayees(*db, params, tip)) {
+        for (const Payee& k : EligiblePayees(*db, params, tip)) {
             if (k == miner.payoutKey.value()) { s.eligible = true; break; }
         }
     }
@@ -825,8 +825,8 @@ UniValue YellowbackIndex::TemplateInfo(int64_t now, const CScript& coinbaseScrip
     o.pushKV("kind", !tag.has_value() ? "none" : tag->IsQuote() ? "quote" : "signal");
     o.pushKV("priceMicroUsd", tag.has_value() && tag->IsQuote() ? (int64_t)tag->priceMicroUsd : 0);
     o.pushKV("quoteAgeSeconds", ms.quoteAgeSeconds.has_value() ? UniValue(ms.quoteAgeSeconds.value()) : NullUniValue);
-    std::optional<CKeyID> payout = tag.has_value() ? std::optional<CKeyID>(CKeyID(tag->payoutKey)) : ms.payoutKey;
-    o.pushKV("payoutAddress", payout.has_value() ? UniValue(keyIO.EncodeDestination(CTxDestination(payout.value()))) : NullUniValue);
+    std::optional<Payee> payout = tag.has_value() ? std::optional<Payee>(tag->payee) : ms.payoutKey;
+    o.pushKV("payoutAddress", payout.has_value() ? UniValue(keyIO.EncodeDestination(payout->Destination())) : NullUniValue);
     o.pushKV("registered", ms.registered);
     o.pushKV("eligible", ms.eligible);
     o.pushKV("healthy", healthy);
@@ -1136,6 +1136,15 @@ int PQFalconHeightOf(const Consensus::Params& consensus)
     return std::max(vault, falcon);
 }
 
+namespace {
+std::optional<uint256> g_testFastSetIdOverride;   // unit tests only (SetTestFastAttestorSetIdForTesting)
+} // namespace
+
+void SetTestFastAttestorSetIdForTesting(const std::optional<uint256>& id)
+{
+    g_testFastSetIdOverride = id;
+}
+
 std::optional<std::string> ParamsFromArgs(const std::string& networkId, const std::string& testnetProfile,
                                           const Consensus::Params& consensus, Params& out)
 {
@@ -1161,6 +1170,7 @@ std::optional<std::string> ParamsFromArgs(const std::string& networkId, const st
         if (networkId == "test" && testnetProfile != "fast" && testnetProfile != "slow" && testnetProfile != "legacy")
             return "unknown testnet profile '" + testnetProfile + "' (fast, slow or legacy)";
         out = networkId == "test" && testnetProfile == "fast" ? TestFastParams() : ParamsForNetwork(networkId);
+        if (networkId == "test" && testnetProfile == "fast" && g_testFastSetIdOverride.has_value()) out.attestorSetId = g_testFastSetIdOverride.value();
         out.startHeight = out.attestorSetId.IsNull() ? 0 : startHeight;
         out.pqFalconHeight = PQFalconHeightOf(consensus);
         out.issuedBeforeStart = out.startHeight > 0 ? CirculatingSupplyAt(out.startHeight - 1, consensus) : 0;   // D-Q-25

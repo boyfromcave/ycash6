@@ -122,6 +122,15 @@ def tag_push(*a, **kw):
     return push(tag(*a, **kw))
 
 
+def tag_v2(price=50000, flags=0x01, version=2, source=0x0007, scheme=0x02, key=bytes([0xCD]) * 32):
+    """Tag v2 (docs/plans/beta4/price-feed.md section 4.3): 49 bytes, a post-quantum payout key."""
+    return TAG_MAGIC + bytes([version, flags]) + struct.pack("<Q", price) + struct.pack("<H", source) + bytes([scheme]) + key
+
+
+def tag_v2_push(*a, **kw):
+    return push(tag_v2(*a, **kw))
+
+
 def tag_seed(height, script_sig):
     return struct.pack("<I", height) + script_sig
 
@@ -157,6 +166,15 @@ def tag_corpus():
         ("height_16777216", tag_seed(16777216, push_num(16777216) + ex8 + tag_push())),
         ("height_0_genesis_shape", tag_seed(0, push_num(0) + tag_push())),
         ("height_negative_bits", tag_seed(0xFFFFFFFF, pre + tag_push())),
+        # tag v2 (beta4 D-T1): both schemes, a bad scheme, a truncation, the two orders, the 60-byte budget (D-6)
+        ("v2_fn_dsa_after_height", tag_seed(h, pre + tag_v2_push())),
+        ("v2_slh_dsa_after_extranonce", tag_seed(h, pre + ex8 + tag_v2_push(scheme=0x01))),
+        ("v2_bad_scheme", tag_seed(h, pre + tag_v2_push(scheme=0x03))),
+        ("v2_truncated_by_one", tag_seed(h, pre + tag_v2_push()[:-1])),
+        ("v2_version_1", tag_seed(h, pre + tag_v2_push(version=1))),
+        ("v1_then_v2", tag_seed(h, pre + tag_push() + tag_v2_push())),
+        ("v2_then_v1", tag_seed(h, pre + tag_v2_push() + tag_push())),
+        ("v2_height_8388607_60_bytes", tag_seed(8388607, push_num(8388607) + push(rnd("v2en", 5)) + tag_v2_push())),
     ]
     # Ten pool-shaped coinbase scriptSigs (synthetic: no mainnet node was available
     # when this corpus was made; the shapes are those real pools use — height push,

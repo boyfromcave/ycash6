@@ -48,6 +48,7 @@ JSON_TEST_FILES = \
   test/data/yellowback_pq_vectors.json \
   test/data/yellowback_math_cases.json \
   test/data/yellowback_attest_vectors.json \
+  test/data/yellowback_tag_vectors.json \
   test/data/vault_vectors.json \
   test/data/vault_v5_dormant_vectors.json \
   test/data/pq_acvp_slhdsa.json \

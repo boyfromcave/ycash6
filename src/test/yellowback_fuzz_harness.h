@@ -50,6 +50,7 @@
 #include "yellowback/state.h"
 #include "yellowback/view.h"
 
+#include "crypto/pq/scheme.h"
 #include "crypto/sha256.h"
 #include "primitives/block.h"
 #include "streams.h"
@@ -97,6 +98,14 @@ private:
 inline uint160 KeyOf(uint8_t idx)
 {
     return uint160(std::vector<unsigned char>(20, idx));
+}
+
+/** A payee for a fuzz byte (tag v2): idx % 8 in 0..3 a P2PKH key, 4..5 an FN-DSA-512 payee, 6..7 an SLH-DSA one. */
+inline yellowback::Payee PayeeOf(uint8_t idx)
+{
+    const uint8_t m = idx % 8;
+    if (m < 4) return yellowback::Payee::FromKeyID(CKeyID(KeyOf(idx)));
+    return yellowback::Payee::FromPQ(CPQKeyID(m < 6 ? pq::SCHEME_FN_DSA_512 : pq::SCHEME_SLH_DSA_SHA2_128S, uint256(std::vector<unsigned char>(32, idx))));
 }
 
 inline uint256 Fill(uint8_t b)
@@ -159,7 +168,7 @@ inline bool SeedEvaluate(const std::vector<unsigned char>& data, const yellowbac
         t.signal = (r.U8() & 1) != 0;
         t.priceMicroUsd = r.U64();
         t.sourceMask = r.U16();
-        t.payoutKey = KeyOf(r.U8());
+        t.payee = PayeeOf(r.U8());
         st.Put(keys::Tag((uint32_t)(P.startHeight + dh)), t);
     }
     Totals totals;
@@ -286,7 +295,7 @@ inline int RunPayee(const std::vector<unsigned char>& data)
         const uint8_t dh = r.U8();
         TagRecord t;
         t.priceMicroUsd = r.U64();
-        t.payoutKey = KeyOf(r.U8() % 8);
+        t.payee = PayeeOf(r.U8() % 8);
         t.signal = true;
         const uint8_t jb = r.U8();
         st.Put(keys::Tag((uint32_t)(P.startHeight + dh)), t);
@@ -305,17 +314,17 @@ inline int RunPayee(const std::vector<unsigned char>& data)
     policy.accuracyWindow = r.U8();
     policy.tiltBps = r.U16();
     const uint8_t pref = r.U8();
-    if (pref != 0xFF) policy.preferred = CKeyID(KeyOf(pref % 8));
+    if (pref != 0xFF) policy.preferred = PayeeOf(pref % 8);
     Snapshot s;
     s.blockHash = InputHash(data);
     st.Put(keys::Snapshot((uint32_t)R), s);
 
-    const std::vector<CKeyID> eligible = EligiblePayees(view, P, R);
-    std::optional<CKeyID> pick = DefaultPayee(view, P, R, selector, policy);
+    const std::vector<Payee> eligible = EligiblePayees(view, P, R);
+    std::optional<Payee> pick = DefaultPayee(view, P, R, selector, policy);
     if (pick.has_value() != !eligible.empty()) return -2;
     if (pick.has_value()) {
         bool found = false;
-        for (const CKeyID& k : eligible) found = found || k == pick.value();
+        for (const Payee& k : eligible) found = found || k == pick.value();
         if (!found) return -1;
     }
     return 0;

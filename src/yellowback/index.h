@@ -117,7 +117,7 @@ IndexAudit AuditIndexRecords(const StateView& view);
  *  the template policy and -yellowbackrequirehealthy left with the vault upgrade (§6). */
 struct MinerConfig
 {
-    std::optional<CKeyID> payoutKey;   //!< -yellowbackpayoutaddress or a P2PKH -mineraddress (MINER-2); none => no tag
+    std::optional<Payee> payoutKey;    //!< -yellowbackpayoutaddress or a P2PKH / post-quantum -mineraddress (MINER-2); none => no tag
     int64_t quoteMaxAge;               //!< -yellowbackquotemaxage, seconds
 
     MinerConfig() : quoteMaxAge(1800) {}
@@ -140,7 +140,7 @@ CScript CoinbaseFlagsOf(const CScript& coinbaseScriptSig);
 struct MinerStatus
 {
     std::string kind;                  //!< "quote" | "none" (the signal-only tag left with ACT-1, §6)
-    std::optional<CKeyID> payoutKey;
+    std::optional<Payee> payoutKey;    //!< v1 tag for P2PKH, v2 for a post-quantum payee
     std::optional<int64_t> quoteAgeSeconds;
     bool registered;                   //!< REG-1 at the tip
     bool eligible;                     //!< in E(tip)
@@ -535,6 +535,9 @@ extern bool g_yellowbackLive;
 /** -yellowbackfee (>= DEFAULT_YELLOWBACK_FEE) and -yellowbackmintlag (REF_LAG). */
 extern CAmount g_yellowbackFee;
 extern int g_yellowbackMintLag;
+
+/** Unit tests only: replaces TEST_FAST_ATTESTOR_SET_ID in ParamsFromArgs (nullopt restores it), to prove the C-T1 plumbing. */
+void SetTestFastAttestorSetIdForTesting(const std::optional<uint256>& id);
 
 /**
  * Build the parameters for the running network (U-22): startHeight is the UPGRADE_VAULT activation

@@ -187,7 +187,7 @@ struct Fixture
         s.ownerPath = ownerPath;
         s.withPayload = withPayload;
         s.refHeight = 250;
-        if (withPayee) s.payee = payeeKey.GetPubKey().GetID();
+        if (withPayee) s.payee = Payee::FromKeyID(payeeKey.GetPubKey().GetID());
         // FEE-1' / IT-9': a nominal $100 debt minted at $10: $1 protocol fee = 0.1 YEC, early fee 5 % of $100 = 0.5 YEC (judged at H = R + 3 < lockHeight 300)
         s.feeZat = ProtocolFeeZat(10000, 10000000, params).value() + (ownerPath ? EarlyRedeemFeeZat(10000, params.earlyRedeemFeeBps[0], 10000000) : 0);
         s.yedInputs = yed;
@@ -283,7 +283,7 @@ struct Armed
         for (int i = 0; i < n; i++) S.seated.push_back((uint16_t)i);
         st.Put(keys::Snapshot(R), S);
         TagRecord tag;
-        tag.payoutKey = payeeKey.GetPubKey().GetID();
+        tag.payee = Payee::FromKeyID(payeeKey.GetPubKey().GetID());
         tag.priceMicroUsd = x;
         tag.signal = true;
         st.Put(keys::Tag(R), tag);
@@ -419,7 +419,7 @@ BOOST_AUTO_TEST_CASE(mint_layout_matches_3_5)
     s.owner = f.owner.GetPubKey();
     s.vaultOwner = TestPQOwner(s.owner);
     s.collateralZat = 251 * COIN;
-    s.payee = f.payeeKey.GetPubKey().GetID();
+    s.payee = Payee::FromKeyID(f.payeeKey.GetPubKey().GetID());
     s.feeZat = ProtocolFeeZat(s.cents, 1000000, f.params).value();   // FEE-1' at a nominal $1
     s.vaultScript = f.vaultScript;
     int feeVout = -1;
@@ -477,7 +477,7 @@ BOOST_AUTO_TEST_CASE(mint_shape_passes_the_state_machine)
     S.haltMask = 0;
     st.Put(keys::Snapshot(R), S);
     TagRecord tag;
-    tag.payoutKey = f.payeeKey.GetPubKey().GetID();
+    tag.payee = Payee::FromKeyID(f.payeeKey.GetPubKey().GetID());
     tag.priceMicroUsd = pMint;
     tag.signal = true;
     st.Put(keys::Tag(R), tag);
@@ -739,7 +739,7 @@ BOOST_AUTO_TEST_CASE(vault_spend_shapes_pass_the_state_machine)
         S.pFast = S.pMid = S.pSlow = S.pMint = S.pClaim = pClaim;
         st.Put(keys::Snapshot(R), S);
         TagRecord tag;
-        tag.payoutKey = f.payeeKey.GetPubKey().GetID();
+        tag.payee = Payee::FromKeyID(f.payeeKey.GetPubKey().GetID());
         tag.priceMicroUsd = pClaim;
         st.Put(keys::Tag(R), tag);
         Totals totals;
@@ -870,7 +870,7 @@ BOOST_AUTO_TEST_CASE(v3_mint_layout_places_the_attestor_fee_after_the_pool_fee)
     s.owner = f.owner.GetPubKey();
     s.vaultOwner = TestPQOwner(s.owner);
     s.collateralZat = 251 * COIN;
-    s.payee = f.payeeKey.GetPubKey().GetID();
+    s.payee = Payee::FromKeyID(f.payeeKey.GetPubKey().GetID());
     s.feeZat = ProtocolFeeZat(s.cents, 1000000, f.params).value();   // FEE-1' at a nominal $1
     s.vaultScript = f.vaultScript;
     const CKey bondKey = NewKey();
@@ -1363,7 +1363,7 @@ BOOST_AUTO_TEST_CASE(p2_mint_fee_is_the_conventional_fee)
         m.vaultOwner = TestPQOwner(m.owner);                            // quantum plan §4.3: the owner is a PQ key
         m.vaultScript = YedVaultScript(a.P, m.vaultOwner, m.refHeight); // U-23, IT-1
         m.collateralZat = 251 * COIN;
-        m.payee = NewKey().GetPubKey().GetID();
+        m.payee = Payee::FromKeyID(NewKey().GetPubKey().GetID());
         m.feeZat = ProtocolFeeZat(m.cents, a.x, a.P).value();       // FEE-1' at the pools' price
         m.attestPayee = a.bond[0].GetPubKey().GetID();
         m.attestFeeZat = AttestFeeZat(m.feeZat, a.P.attestFeeBps);

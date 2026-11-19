@@ -26,6 +26,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -319,8 +320,15 @@ BOOST_AUTO_TEST_CASE(testnet_yed_columns)
         BOOST_CHECK(p->pqAddressVersions.at(2) == std::vector<unsigned char>({0x57, 0x21, 0xC9}));   // ytf… (D-9)
         BOOST_CHECK(p->pqAddressVersions.at(1) == std::vector<unsigned char>({0x57, 0x23, 0x30}));   // yts…
         BOOST_CHECK_EQUAL(p->startHeight, 0);
-        BOOST_CHECK(p->attestorSetId.IsNull());   // each Vault profile's own set, named by its rc1
     }
+    // each Vault profile's own set, named by its release: slow has none; fast reads the compiled slot (C-T1, C-8),
+    // TEST_FAST_ATTESTOR_SET_ID, null until the ceremony (C-T7) fills it in, and when set exactly 64 hex characters
+    BOOST_CHECK(slow.attestorSetId.IsNull());
+    const std::string slot(yellowback::TEST_FAST_ATTESTOR_SET_ID);
+    BOOST_CHECK(slot.empty() || (slot.size() == 64 && std::all_of(slot.begin(), slot.end(), [](char c) { return std::isxdigit((unsigned char)c) != 0; }) && !uint256S(slot).IsNull()));
+    BOOST_CHECK(fast.attestorSetId == yellowback::TestFastAttestorSetId());
+    BOOST_CHECK_EQUAL(fast.attestorSetId.IsNull(), slot.empty());
+    BOOST_CHECK(fast.attestorSetId.IsNull());   // this release: the ceremony has not run (price-feed.md §3.1: no network carries an id)
     BOOST_CHECK_EQUAL(slow.bondMaturity, main.bondMaturity);
     BOOST_CHECK_EQUAL(slow.dormancyBlocks, main.dormancyBlocks);
     BOOST_CHECK_EQUAL(slow.claimDelay, main.claimDelay);
@@ -400,6 +408,32 @@ BOOST_AUTO_TEST_CASE(testnet_yed_params_from_args)
     }
     yellowback::Params q;
     BOOST_CHECK(yellowback::ParamsFromArgs("test", "", TestNet("fast").GetConsensus(), q).has_value());
+    // C-T1: the slot's plumbing. A non-null fast set id starts YED at the UPGRADE_VAULT height (510,400), configured;
+    // slow and legacy never read it; null keeps it off.
+    const uint256 id = uint256S("5e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e75e7");
+    yellowback::SetTestFastAttestorSetIdForTesting(id);
+    for (const Profile& pr : PROFILES) {
+        yellowback::Params p;
+        BOOST_REQUIRE(!yellowback::ParamsFromArgs("test", pr.name, TestNet(pr.name).GetConsensus(), p).has_value());
+        if (pr.name == "fast") {
+            BOOST_CHECK(p.attestorSetId == id);
+            BOOST_CHECK_EQUAL(p.startHeight, VAULT);
+            BOOST_CHECK(p.IsConfigured());
+            BOOST_CHECK(p.issuedBeforeStart > 0);
+        } else {
+            BOOST_CHECK(p.attestorSetId.IsNull());
+            BOOST_CHECK_EQUAL(p.startHeight, 0);
+            BOOST_CHECK(!p.IsConfigured());
+        }
+    }
+    yellowback::SetTestFastAttestorSetIdForTesting(uint256());
+    {
+        yellowback::Params p;
+        BOOST_REQUIRE(!yellowback::ParamsFromArgs("test", "fast", TestNet("fast").GetConsensus(), p).has_value());
+        BOOST_CHECK_EQUAL(p.startHeight, 0);
+        BOOST_CHECK(!p.IsConfigured());
+    }
+    yellowback::SetTestFastAttestorSetIdForTesting(std::nullopt);
     BOOST_CHECK(yellowback::ParamsFromArgs("test", "medium", TestNet("fast").GetConsensus(), q).has_value());
 }
 

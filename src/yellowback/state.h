@@ -229,15 +229,15 @@ Snapshot ComputeSnapshot(State& st, const Params& params, int height, const uint
  */
 std::optional<Snapshot> SnapshotAt(const State& st, const Params& params, int64_t height);
 
-/** E(R) (FEE-2): the payoutKeys of the quote tags at h in (R - PAYEE_WINDOW, R], height order, deduplicated, minus Snapshots[R].pinnedKeys (PIN-1); empty => FEE-0. */
-std::vector<CKeyID> EligiblePayees(const StateView& view, const Params& params, int refHeight);
+/** E(R) (FEE-2): the payees (P2PKH or post-quantum, tag v1 or v2) of the quote tags at h in (R - PAYEE_WINDOW, R], height order, deduplicated, minus Snapshots[R].pinnedKeys (PIN-1); empty => FEE-0. */
+std::vector<Payee> EligiblePayees(const StateView& view, const Params& params, int refHeight);
 
-/** REG-1 (informational): some quote tag with this payoutKey exists in (R - N_REG, R]. */
-bool Registered(const StateView& view, const Params& params, const CKeyID& key, int refHeight);
+/** REG-1 (informational): some quote tag with this payee exists in (R - N_REG, R]. */
+bool Registered(const StateView& view, const Params& params, const Payee& key, int refHeight);
 /** REG-2 (wallet policy, L6): a penalised quote at t with t + PEER_LAG < R <= t + PEER_LAG + penaltyBlocks. */
-bool Penalized(const StateView& view, const Params& params, const CKeyID& key, int refHeight, int penaltyBlocks);
+bool Penalized(const StateView& view, const Params& params, const Payee& key, int refHeight, int penaltyBlocks);
 /** REG-3 (wallet policy, L6): 10^4 * inBand / quoted over the judged quotes in (R - PEER_LAG - window, R - PEER_LAG]; 0 if none. */
-int AccuracyBps(const StateView& view, const Params& params, const CKeyID& key, int refHeight, int accuracyWindow);
+int AccuracyBps(const StateView& view, const Params& params, const Payee& key, int refHeight, int accuracyWindow);
 
 /** The L6 knobs of FEE-W (node overrides of the §3.1 wallet defaults). */
 struct PayeePolicy
@@ -245,7 +245,7 @@ struct PayeePolicy
     int penaltyBlocks;               //!< N_PENALTY
     int accuracyWindow;              //!< ACCURACY_WINDOW
     int tiltBps;                     //!< PAYEE_TILT_BPS
-    std::optional<CKeyID> preferred; //!< -yellowbackpreferredpayee: replaces the pick when in E(R)
+    std::optional<Payee> preferred;  //!< -yellowbackpreferredpayee: replaces the pick when in E(R)
 
     PayeePolicy() : penaltyBlocks(0), accuracyWindow(0), tiltBps(0) {}
     /** The §3.1 defaults of a parameter set. */
@@ -268,8 +268,8 @@ struct PayeePolicy
  * All penalised => every key of E(R) with equal weights. blockHash(R) is
  * Snapshots[R].blockHash (zero if missing). nullopt iff E(R) is empty.
  */
-std::optional<CKeyID> DefaultPayee(const StateView& view, const Params& params, int refHeight,
-                                   const std::vector<unsigned char>& selector, const PayeePolicy& policy);
+std::optional<Payee> DefaultPayee(const StateView& view, const Params& params, int refHeight,
+                                  const std::vector<unsigned char>& selector, const PayeePolicy& policy);
 
 // ---------------------------------------------------------------------------
 // v3: attestors, arming, selection (v3 plan §3.7, W9)

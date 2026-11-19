@@ -59,7 +59,7 @@
 
 using namespace yellowback;
 
-static const int YELLOWBACK_RPC_VERSION = 10;  // 10: the beta3 additions to stock calls (B3-D5; no yed_* shape change): getcoinbasetemplatefor, transparentPools, post-quantum input addresses, gettransaction's fee, -ydf default 0; 9: scheme-visible post-quantum address prefixes (D-9): params.pqAddressVersion and params.pq.plainAddressVersion are objects keyed by scheme; 8: the fee structure (D-Q-23/24/25: params.fees, maxMintCents, supplyCap, vault.pMint, yed_estimatefee's signature; feeMinZat/feeBps gone); 7: post-quantum owners; 5: the vault upgrade (upgrade plan §15.10): no activation/enforcement fields, V vaults, claim intents;
+static const int YELLOWBACK_RPC_VERSION = 11;  // 11: tag v2 (beta4 D-T2): yed_gettag.version (1 or 2) and payoutScheme, every payee / payoutAddress may be a plain post-quantum address (D-9 form); 10: the beta3 additions to stock calls (B3-D5; no yed_* shape change): getcoinbasetemplatefor, transparentPools, post-quantum input addresses, gettransaction's fee, -ydf default 0; 9: scheme-visible post-quantum address prefixes (D-9): params.pqAddressVersion and params.pq.plainAddressVersion are objects keyed by scheme; 8: the fee structure (D-Q-23/24/25: params.fees, maxMintCents, supplyCap, vault.pMint, yed_estimatefee's signature; feeMinZat/feeBps gone); 7: post-quantum owners; 5: the vault upgrade (upgrade plan §15.10): no activation/enforcement fields, V vaults, claim intents;
                                                // 6: in-term claims (in-term plan IT-7): yed_listclaimable rows in term with `claimable`, the early-redeem fee;
                                                // 7: post-quantum owners (quantum spec §6.2): ownerScheme/ownerHash replace ownerPubKey/ownerKeyId,
                                                //    the v4 MINT, params.pq, PQ yb… addresses
@@ -112,9 +112,16 @@ std::string P2SHAddress(const CScript& redeemScript)
     return keyIO.EncodeDestination(CTxDestination(CScriptID(redeemScript)));
 }
 
-UniValue PayeeOrNull(bool has, const uint160& key)
+/** A payee as its address: P2PKH, or the plain post-quantum address of this network (D-9 form; tag v2, rpcversion 11). */
+std::string PayeeAddress(const Payee& payee)
 {
-    return has ? UniValue(P2PKHAddress(CKeyID(key))) : NullUniValue;
+    KeyIO keyIO(::Params());
+    return keyIO.EncodeDestination(payee.Destination());
+}
+
+UniValue PayeeOrNull(bool has, const Payee& payee)
+{
+    return has ? UniValue(PayeeAddress(payee)) : NullUniValue;
 }
 
 UniValue OutPointToJSON(const COutPoint& out)
@@ -495,10 +502,11 @@ UniValue TagToJSON(const std::optional<CoinbaseTag>& tag)
         return o;
     }
     o.pushKV("kind", tag->IsQuote() ? "quote" : "signal");
-    o.pushKV("version", (int)TAG_VERSION);
+    o.pushKV("version", (int)tag->version);                          // 1, or 2 for a post-quantum payee (rpcversion 11)
     o.pushKV("priceMicroUsd", (int64_t)tag->priceMicroUsd);
     o.pushKV("sourceMask", (int)tag->sourceMask);
-    o.pushKV("payoutAddress", P2PKHAddress(CKeyID(tag->payoutKey)));
+    o.pushKV("payoutScheme", tag->payee.SchemeName());               // "p2pkh" | "slh-dsa-sha2-128s" | "fn-dsa-512" (rpcversion 11)
+    o.pushKV("payoutAddress", PayeeAddress(tag->payee));
     return o;
 }
 
@@ -717,7 +725,7 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     }
 
     UniValue miner(UniValue::VOBJ);
-    miner.pushKV("payoutAddress", ms.payoutKey.has_value() ? UniValue(P2PKHAddress(ms.payoutKey.value())) : NullUniValue);
+    miner.pushKV("payoutAddress", ms.payoutKey.has_value() ? UniValue(PayeeAddress(ms.payoutKey.value())) : NullUniValue);
     miner.pushKV("quoteKind", ms.kind);
     miner.pushKV("quoteAgeSeconds", ms.quoteAgeSeconds.has_value() ? UniValue(ms.quoteAgeSeconds.value()) : NullUniValue);
     miner.pushKV("registered", ms.registered);
@@ -854,7 +862,7 @@ UniValue yed_getinfo(const UniValue& params, bool fHelp)
     policy.pushKV("penaltyBlocks", pp.penaltyBlocks);
     policy.pushKV("accuracyWindow", pp.accuracyWindow);
     policy.pushKV("tiltBps", pp.tiltBps);
-    policy.pushKV("preferredPayee", pp.preferred.has_value() ? UniValue(P2PKHAddress(pp.preferred.value())) : NullUniValue);
+    policy.pushKV("preferredPayee", pp.preferred.has_value() ? UniValue(PayeeAddress(pp.preferred.value())) : NullUniValue);
     policy.pushKV("preferredAttestor", index.GetAttestPolicy().preferred.has_value() ? UniValue((int)index.GetAttestPolicy().preferred.value()) : NullUniValue);
     prm.pushKV("policy", policy);
     // v3 §3.1 attestation parameters (contract: params.attest; armMin and carrierMode are hashed on regtest, M13)
@@ -1092,7 +1100,7 @@ UniValue yed_getprice(const UniValue& params, bool fHelp)
     o.pushKV("attestStatus", AttestStatusName(s.attest.Status()));
     o.pushKV("seated", SeqsToJSON(s.seated));
     UniValue pinnedKeys(UniValue::VARR);
-    for (const uint160& k : s.pinnedKeys) pinnedKeys.push_back(P2PKHAddress(CKeyID(k)));
+    for (const Payee& k : s.pinnedKeys) pinnedKeys.push_back(PayeeAddress(k));
     o.pushKV("pinnedKeys", pinnedKeys);
     o.pushKV("pinnedSeqs", SeqsToJSON(s.pinnedSeqs));
     UniValue fill(UniValue::VOBJ);
@@ -1134,7 +1142,7 @@ UniValue yed_listminers(const UniValue& params, bool fHelp)
     if (fHelp || params.size() > 2)
         throw std::runtime_error(
             "yed_listminers ( height window )\n"
-            "\nOne row per payoutKey with a quote tag in (height - window, height] (window defaults to PAYEE_WINDOW).\n");
+            "\nOne row per payee (P2PKH or post-quantum) with a quote tag in (height - window, height] (window defaults to PAYEE_WINDOW).\n");
 
     YellowbackIndex& index = EnsureIndex();
     LOCK(index.cs_yellowback);
@@ -1150,43 +1158,43 @@ UniValue yed_listminers(const UniValue& params, bool fHelp)
     if (window > MAX_LISTMINERS_WINDOW) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("window must be at most %d", MAX_LISTMINERS_WINDOW));   // C-6
 
     struct Row { int lastTagHeight; uint64_t lastQuote; int quoteTags; };
-    std::map<uint160, Row> rows;
+    std::map<Payee, Row> rows;
     int total = 0;
     for (int64_t t = std::max<int64_t>((int64_t)h - window + 1, p.startHeight); t <= h; t++) {
         std::optional<TagRecord> tag = st.GetTag((uint32_t)t);
         if (!tag.has_value() || !tag->IsQuote()) continue;
         total++;
-        Row& r = rows[tag->payoutKey];
+        Row& r = rows[tag->payee];
         r.lastTagHeight = (int)t;
         r.lastQuote = tag->priceMicroUsd;
         r.quoteTags++;
     }
-    std::vector<CKeyID> eligible = EligiblePayees(index.View(), p, h);
-    std::vector<std::pair<int, uint160>> order;
+    std::vector<Payee> eligible = EligiblePayees(index.View(), p, h);
+    std::vector<std::pair<int, Payee>> order;
     for (const auto& kv : rows) order.push_back(std::make_pair(kv.second.lastTagHeight, kv.first));
-    std::sort(order.begin(), order.end(), [](const std::pair<int, uint160>& a, const std::pair<int, uint160>& b) {
+    std::sort(order.begin(), order.end(), [](const std::pair<int, Payee>& a, const std::pair<int, Payee>& b) {
         return a.first != b.first ? a.first > b.first : a.second < b.second;
     });
     UniValue out(UniValue::VARR);
     for (const auto& e : order) {
-        const CKeyID key(e.second);
+        const Payee& key = e.second;
         const Row& r = rows[e.second];
         UniValue o(UniValue::VOBJ);
-        o.pushKV("payoutAddress", P2PKHAddress(key));
+        o.pushKV("payoutAddress", PayeeAddress(key));
         o.pushKV("lastTagHeight", r.lastTagHeight);
         o.pushKV("lastQuote", (int64_t)r.lastQuote);
         o.pushKV("quoteTags", r.quoteTags);
         o.pushKV("share", total > 0 ? (int64_t)(10000LL * r.quoteTags / total) : 0);
         o.pushKV("registered", Registered(index.View(), p, key, h));
         bool elig = false;
-        for (const CKeyID& k : eligible) if (k == key) { elig = true; break; }
+        for (const Payee& k : eligible) if (k == key) { elig = true; break; }
         o.pushKV("eligible", elig);
         // REG-2: the height the penalty of the latest penalised judgement ends (t + PEER_LAG + N_PENALTY).
         int64_t until = 0;
         if (Penalized(index.View(), p, key, h, pp.penaltyBlocks)) {
             for (int64_t t = (int64_t)h - p.peerLag - 1; t >= std::max<int64_t>((int64_t)h - p.peerLag - pp.penaltyBlocks, p.startHeight); t--) {
                 std::optional<TagRecord> tag = st.GetTag((uint32_t)t);
-                if (!tag.has_value() || !tag->IsQuote() || !(tag->payoutKey == key)) continue;
+                if (!tag.has_value() || !tag->IsQuote() || !(tag->payee == key)) continue;
                 std::optional<Judgement> j = st.GetJudgement((uint32_t)t);
                 if (j.has_value() && j->penalized) { until = t + p.peerLag + pp.penaltyBlocks; break; }
             }
@@ -1199,7 +1207,7 @@ UniValue yed_listminers(const UniValue& params, bool fHelp)
             const int64_t lo = hi - std::max(0, pp.accuracyWindow) + 1;
             for (int64_t t = std::max<int64_t>(lo, p.startHeight); t <= hi; t++) {
                 std::optional<TagRecord> tag = st.GetTag((uint32_t)t);
-                if (!tag.has_value() || !tag->IsQuote() || !(tag->payoutKey == key)) continue;
+                if (!tag.has_value() || !tag->IsQuote() || !(tag->payee == key)) continue;
                 std::optional<Judgement> j = st.GetJudgement((uint32_t)t);
                 if (!j.has_value() || !j->evaluated) continue;
                 quoted++;
@@ -1250,7 +1258,7 @@ UniValue yed_setquote(const UniValue& params, bool fHelp)
     }
     if (mask < 0 || mask > 0xFFFF) throw JSONRPCError(RPC_INVALID_PARAMETER, "sourceMask must be a 16-bit value");
     if (!index.GetMinerConfig().payoutKey.has_value()) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "no-payout-address: set -yellowbackpayoutaddress (or a P2PKH -mineraddress) so the node can emit a tag");
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "no-payout-address: set -yellowbackpayoutaddress (or a P2PKH or post-quantum -mineraddress) so the node can emit a tag");
     }
     const int64_t now = GetTime();      // the clock's one home (M11)
     index.SetQuote((uint64_t)price, (uint16_t)mask, now);
@@ -1264,7 +1272,7 @@ UniValue yed_setquote(const UniValue& params, bool fHelp)
     o.pushKV("receivedAt", now);
     UniValue next(UniValue::VOBJ);
     next.pushKV("kind", ms.kind);
-    next.pushKV("payoutAddress", ms.payoutKey.has_value() ? UniValue(P2PKHAddress(ms.payoutKey.value())) : NullUniValue);
+    next.pushKV("payoutAddress", ms.payoutKey.has_value() ? UniValue(PayeeAddress(ms.payoutKey.value())) : NullUniValue);
     o.pushKV("nextTag", next);
     return o;
 }
@@ -1291,25 +1299,25 @@ UniValue yed_getfeepayee(const UniValue& params, bool fHelp)
     const yellowback::Params& p = index.GetParams();
     const PayeePolicy& pp = index.GetPayeePolicy();
     if (refHeight < p.startHeight || refHeight > IndexHeight(index)) throw JSONRPCError(RPC_INVALID_PARAMETER, "refHeight out of range");
-    std::vector<CKeyID> eligible = EligiblePayees(index.View(), p, refHeight);
+    std::vector<Payee> eligible = EligiblePayees(index.View(), p, refHeight);
     if (eligible.empty()) throw JSONRPCError(RPC_VERIFY_REJECTED, "fee-no-eligible-payee: no pool quoted in the payee window (FEE-0)");
     UniValue o(UniValue::VOBJ);
     UniValue el(UniValue::VARR);
-    for (const CKeyID& k : eligible) el.push_back(P2PKHAddress(k));
+    for (const Payee& k : eligible) el.push_back(PayeeAddress(k));   // P2PKH (tag v1) and post-quantum (tag v2) payees
     o.pushKV("eligible", el);
     PayeePolicy noPref = pp;
     noPref.preferred = std::nullopt;
-    std::optional<CKeyID> pick = DefaultPayee(index.View(), p, refHeight, selector, noPref);
+    std::optional<Payee> pick = DefaultPayee(index.View(), p, refHeight, selector, noPref);
     UniValue def(UniValue::VOBJ);
     if (pick.has_value()) {
-        def.pushKV("payoutAddress", P2PKHAddress(pick.value()));
+        def.pushKV("payoutAddress", PayeeAddress(pick.value()));
         const int acc = AccuracyBps(index.View(), p, pick.value(), refHeight, pp.accuracyWindow);
         def.pushKV("weight", (int64_t)(10000 + (int64_t)pp.tiltBps * acc / 10000));
     }
     o.pushKV("default", def);
     if (pp.preferred.has_value()) {
-        for (const CKeyID& k : eligible) {
-            if (k == pp.preferred.value()) { o.pushKV("preferred", P2PKHAddress(k)); break; }
+        for (const Payee& k : eligible) {
+            if (k == pp.preferred.value()) { o.pushKV("preferred", PayeeAddress(k)); break; }
         }
     }
     UniValue policy(UniValue::VOBJ);
