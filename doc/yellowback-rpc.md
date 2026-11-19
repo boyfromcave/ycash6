@@ -91,9 +91,9 @@ post-quantum address of the network (the D-9 form, `sqf…`/`sqs…`, `tqf…`/`
 `yed_getinfo.miner.payoutAddress` and `policy.preferredPayee`, `yed_listminers[].payoutAddress`, `yed_setquote.next.payoutAddress`,
 `yed_getfeepayee` `eligible[]` / `default.payoutAddress` / `preferred`, `yed_getprice.pinnedKeys[]`, and every `payee` field
 (`yed_gettxinfo`, `yed_validaterawtransaction`, `yed_getblockverdict`, `yed_listtransactions`, `yed_estimateredeem`, and the
-results of the wallet's mint, redeem and claim calls). Field names are unchanged. `-yellowbackpayoutaddress`, `-yellowbackpreferredpayee` and the
-`-mineraddress` default accept a plain post-quantum address of the network as well as P2PKH; a Sapling or YED address still
-gives no tag. A post-quantum fee output is an ordinary TX_PQPKH output: spendable at one confirmation, to any destination
+results of the wallet's mint, redeem and claim calls). Field names are unchanged. `-yellowbackpayoutaddress` and `-yellowbackpreferredpayee` accept a plain post-quantum address of the network as well as
+P2PKH. The `-mineraddress` default still applies only to a P2PKH `-mineraddress`: the internal miner refuses a post-quantum
+`-mineraddress`, so a post-quantum payout is set with `-yellowbackpayoutaddress`. A Sapling or YED address gives no tag. A post-quantum fee output is an ordinary TX_PQPKH output: spendable at one confirmation, to any destination
 (the post-quantum coinbase rule applies to block rewards only). The attestor fee (AFEE-1) stays P2PKH. The index's
 `SCHEMA_VERSION` goes to 16, so the index is rebuilt on upgrade.
 

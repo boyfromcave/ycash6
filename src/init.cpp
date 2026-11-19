@@ -442,7 +442,7 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-valuepoolsseed", _("Start the transparent pools-by-type index from the compiled seed at the chain-supply checkpoint when it is empty; 0 fills it from genesis and checks the seed (default: 1)"));
     strUsage += HelpMessageOpt("-yellowbackfee=<zat>", strprintf(_("Flat fee for Yellowback transactions in zatoshi (default and minimum: %d)"), yellowback::DEFAULT_YELLOWBACK_FEE));
     strUsage += HelpMessageOpt("-yellowbackmintlag=<n>", strprintf(_("Blocks below the index tip at which a mint is evaluated (default: %d, max %d)"), yellowback::DEFAULT_REF_LAG, yellowback::MAX_REF_LAG));
-    strUsage += HelpMessageOpt("-yellowbackpayoutaddress=<addr>", _("P2PKH or post-quantum address the coinbase tag names for pool fees (tag v1 for P2PKH, v2 for post-quantum; default: -mineraddress when that is a P2PKH or post-quantum address)"));
+    strUsage += HelpMessageOpt("-yellowbackpayoutaddress=<addr>", _("P2PKH or post-quantum address the coinbase tag names for pool fees (tag v1 for P2PKH, v2 for post-quantum; default: -mineraddress when that is a P2PKH address)"));
     strUsage += HelpMessageOpt("-yellowbackpayoutdefault", _("Take -mineraddress as the payout address when -yellowbackpayoutaddress is not set; with -yellowbackpayoutdefault=0 a node without -yellowbackpayoutaddress names no payout key and emits no tag (default: 1)"));
     strUsage += HelpMessageOpt("-yellowbackquotemaxage=<sec>", strprintf(_("Age past which a stored quote is no longer put in the tag (default: %d)"), 1800));
     strUsage += HelpMessageOpt("-yellowbackpreferredpayee=<addr>", _("P2PKH or post-quantum address the wallet pays pool fees to when it is eligible"));
