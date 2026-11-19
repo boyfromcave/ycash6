@@ -403,7 +403,7 @@ the requests a pool has in flight and set `-rpcthreads` to that cap plus two or 
   phrase in yewd (`-mnemonicfile=<file>`, a new wallet, which then scans from genesis), `z_sendmany`
   the exact amount from the post-quantum address to a Sapling address of that wallet, as below, and
   then send it on from the Sapling address. The full procedure is in the yewd README
-  ([`yew/yewd/README.md`](https://github.com/boyfromcave/yew/blob/upgrade/vault/yewd/README.md)).
+  ([`yew/yewd/README.md`](https://github.com/boyfromcave/yew/blob/upgrade/vault/yewd/README.md#recovering-a-mining-reward-paid-to-a-yew-address)).
 - **Move it with `z_sendmany` from the address to a shielded address**, once it has 101
   confirmations (`listunspent` and `balance_pq` show it from then on). The wallet takes the
   address's largest coins first, and a selection that holds a coinbase allows no change, so name an
@@ -427,8 +427,10 @@ the requests a pool has in flight and set `-rpcthreads` to that cap plus two or 
   ```
 
   Sending 6.249935 instead moves the one reward and leaves the other for the next call.
-- **`z_shieldcoinbase` and `z_mergetoaddress` do not move it**: `z_shieldcoinbase` refuses a
-  post-quantum source and `z_mergetoaddress` leaves its coinbase out. A transparent (ECC or
+- **ycashd's `z_shieldcoinbase` and `z_mergetoaddress` do not move it**: ycashd's `z_shieldcoinbase`
+  refuses a post-quantum source and `z_mergetoaddress` leaves its coinbase out. (yewd's
+  `z_shieldcoinbase` does move a post-quantum reward, at the exact amount with no change: a
+  yewd-only extension.) A transparent (ECC or
   post-quantum) recipient never receives it; the refusal names the mining rewards the address holds
   and the exact amount that sends them to one Sapling address, for example (beta4):
 

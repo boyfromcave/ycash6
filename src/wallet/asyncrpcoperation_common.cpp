@@ -449,7 +449,7 @@ std::string PQInsufficientFunds(const std::string& message, bool noCoins, const 
 std::string PQCoinbaseShieldNote(CAmount pqCoinbase)
 {
     if (pqCoinbase <= 0) return "";
-    return strprintf(" The wallet holds %s YEC of mining rewards (coinbase) at post-quantum addresses, which z_shieldcoinbase "
+    return strprintf(" The wallet holds %s YEC of mining rewards (coinbase) at post-quantum addresses, which ycashd's z_shieldcoinbase "
                      "does not spend: send them with z_sendmany from the address that holds them to a Sapling address, with "
                      "no change; z_sendmany names the exact amount to send.", FormatMoney(pqCoinbase));
 }

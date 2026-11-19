@@ -83,7 +83,7 @@ MINCONF_NOTE = (' The address holds %s YEC with fewer than the %d confirmation%s
 SEND_PQ_COINBASE = ('this wallet also holds %s YEC of mining rewards (coinbase) at post-quantum addresses, which can only be '
                     'sent to a shielded (Sapling) address, with no change: send them with z_sendmany from the address that '
                     'holds them, which names the exact amount to send')
-SHIELD_PQ_COINBASE = (' The wallet holds %s YEC of mining rewards (coinbase) at post-quantum addresses, which z_shieldcoinbase '
+SHIELD_PQ_COINBASE = (' The wallet holds %s YEC of mining rewards (coinbase) at post-quantum addresses, which ycashd\'s z_shieldcoinbase '
                       'does not spend: send them with z_sendmany from the address that holds them to a Sapling address, with '
                       'no change; z_sendmany names the exact amount to send.')
 CHANGE_REFUSAL = re.compile(

@@ -89,7 +89,7 @@ transparent, Sapling or post-quantum address for a named template, with `fund` a
 (a YEW app or web address is not suitable: the coinbase must be shielded first, at the exact amount, which those
 wallets cannot do; a miner already paid at one restores the YEW recovery phrase in yewd with `-mnemonicfile`,
 `z_sendmany`s the exact amount to a Sapling address and sends it on from there, as the yewd README describes,
-[`yew/yewd/README.md`](https://github.com/boyfromcave/yew/blob/upgrade/vault/yewd/README.md)):
+[`yew/yewd/README.md`](https://github.com/boyfromcave/yew/blob/upgrade/vault/yewd/README.md#recovering-a-mining-reward-paid-to-a-yew-address)):
 "A post-quantum miner shields its coinbase" below); `getblocktemplate.coinbasetxn.foundersreward` derived from the
 coinbase's rule, so a Sapling miner address reports it too (3; ycash-dd, where it read `vout[1]`);
 `transparentPools` in `getblockchaininfo` and `getblock` (2; below,
@@ -295,15 +295,16 @@ YED form): what node operators and clients should know.**
      addresses, which can only be sent to a shielded (Sapling) address, with no change: send them with z_sendmany from
      the address that holds them, which names the exact amount to send` to their insufficient-funds refusal where
      coinbase must be shielded, and `z_shieldcoinbase` (`"*"`) adds ` The wallet holds <v> YEC of mining rewards
-     (coinbase) at post-quantum addresses, which z_shieldcoinbase does not spend: send them with z_sendmany from the
+     (coinbase) at post-quantum addresses, which ycashd's z_shieldcoinbase does not spend: send them with z_sendmany from the
      address that holds them to a Sapling address, with no change; z_sendmany names the exact amount to send.` Error
      codes are unchanged.
   So a miner names a shielded amount, reads the exact amount in the refusal and sends that. Coins are taken largest
   first, so an amount within the largest reward moves that one reward; an amount above it brings in the next coin
   (and so on, up to the input limit above), and the refusal then names the amount for all of them (a worked example:
   `doc/yellowback-mining.md` §13, "A reward paid to a post-quantum address"). Every refusal is the wallet's: nothing
-  reaches the mempool. `z_shieldcoinbase` and `z_mergetoaddress` do not move such a reward (the first refuses a
-  post-quantum source, the second leaves coinbase out); there is no one-call sweep. **The payout address must be held
+  reaches the mempool. ycashd's `z_shieldcoinbase` and `z_mergetoaddress` do not move such a reward (yewd's
+  `z_shieldcoinbase` does, at the exact amount with no change: a yewd-only extension; ycashd's refuses a
+  post-quantum source and `z_mergetoaddress` leaves coinbase out); ycashd has no one-call sweep. **The payout address must be held
   in a ycashd or yewd wallet:** the YEW app and the web wallet cannot tell that a coin is a coinbase (lightwalletd's
   `GetAddressUtxos` carries no such flag), so they show the reward as spendable and the node refuses their sends
   until the coin is 100 blocks deep and the send has only shielded recipients and no change. A transparent (ECC) or
