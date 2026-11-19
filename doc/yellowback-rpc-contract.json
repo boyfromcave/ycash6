@@ -510,7 +510,7 @@
       "when": "the index is unhealthy (unhealthyReason follows); provoke with -yellowbacktestfault=storage:commit then any non-allow-listed command. Also the storage boundary of yed_addattestation and yed_buildbundle (audit A-3): a storage exception under either marks the index unhealthy and the call fails with yellowback-unhealthy: storage failure in AddAttestation: … / … in BuildBundle: …"
     }
   },
-  "rpcversion": 10,
+  "rpcversion": 11,
   "source": {
     "plan": "docs/plans/yellowback-v2-development-plan.md",
     "planInTerm": "docs/plans/yellowback-in-term-claims-plan.md",
@@ -1023,7 +1023,7 @@
       },
       "protectedByIndex": true,
       "rebuilt": false,
-      "rpcversion": 10,
+      "rpcversion": 11,
       "startHeight": 103,
       "supplyCapReached": false,
       "unhealthyReason": "",
@@ -1178,6 +1178,7 @@
       "found": true,
       "kind": "quote",
       "payoutAddress": "smQvTmAz2ExamplePayoutAddress1111111",
+      "payoutScheme": "p2pkh",
       "priceMicroUsd": 2000000,
       "sourceMask": 3,
       "version": 1
