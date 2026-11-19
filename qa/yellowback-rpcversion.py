@@ -41,6 +41,7 @@ ALLOW = {
     'contrib/yellowback/devnet/upgrade-walk-transcript.txt': 'a recorded run (history)',
     'qa/yellowback-rpcversion.py': 'this checker (its patterns)',
     'qa/test_yellowback_rpcversion.py': 'this checker\'s unit test (its samples)',
+    'contrib/yellowback/attest/proto/yellowback.proto': 'a byte copy of lightwalletd-dd\'s proto: a field number, not a check',
 }
 ALLOW_PREFIXES = (
     'doc/release-notes',           # release notes (doc/release-notes.md, doc/release-notes/): what a release told clients
