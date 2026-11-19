@@ -294,6 +294,8 @@ KOGANYD_KEY_TABLE = [
      'script passes it'),
     ('-yellowbacksignal', 'ignored', None, 'retired with the vault upgrade; ycashd logs and ignores it (init.cpp)'),
     ('-feepolicy=<p>', 'ignored', None, 'wallet funding policy only (no relay or mempool meaning)'),
+    ('-yellowbackpreferredpayee=<addr>', 'ignored', None,
+     'FEE-W wallet payee preference (policy, never a validity rule); a follower holds no wallet'),
     ('-blockunpaidactionlimit=<n>', 'live', 'mining.block_unpaid_action_limit',
      'int: the template\'s unpaid-action limit (zakura-rpc config/mining.rs; a pair backend mines, '
      'yellowback_fee\'s pools run 0 for the PQ owner spend); a follower never mines (K-16)'),
@@ -327,7 +329,7 @@ _IGNORED_PREFIXES = ('-exportdir', '-keypool', '-discover', '-rest', '-i-am-awar
                      '-noonion', '-nolisten', '-rpcallowip', '-rpcbind', '-rpccookiefile', '-rpcconnect',
                      '-bdbcache', '-anchorconfirmations', '-txexpirydelta', '-preferredtxversion',
                      '-printpriority', '-maxorphantx', '-regtestwalletsetbestchaineveryblock',
-                     '-disablewallet', '-yellowbacksignal', '-feepolicy')
+                     '-disablewallet', '-yellowbacksignal', '-feepolicy', '-yellowbackpreferredpayee')
 # -yellowbacksignal is retired (ycashd logs and ignores it).
 # Deliberately absent (UnmappedArgument when KOGANY_BIN is set, so a kogany run never silently
 # drops a rule): -nurejectoldversions, -regtestshieldcoinbase, -regtestprotectcoinbase,
