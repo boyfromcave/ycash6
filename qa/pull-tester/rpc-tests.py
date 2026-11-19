@@ -320,6 +320,7 @@ EXTENDED_SCRIPTS = [
     # The cancel-limit design's safety brake automated (CAN-2 + C4b, owner 2026-10-13): four agents cancel a
     # wrong-price claim twice (1, then 2 co-signatures, a leader takeover) and leave an honest one alone; same binary.
     'yellowback_cancel_agent.py',
+    'yellowback_cancel_agent_light.py',
     # The devnet's role presets end to end (~30 minutes; SKIPs without the attestor binary).
     'yellowback_devnet_roles.py',
     # The devnet on the vault upgrade (upgrade plan §4, §5): upgrade-walk's core and the WYEC bridge

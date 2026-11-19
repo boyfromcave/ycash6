@@ -62,7 +62,8 @@ license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 multiple-versions = "warn"
 wildcards = "deny"
 highlight = "all"
-# The agent holds no key and signs nothing: a crate that would let it must not appear silently.
+# With the node backend the agent holds no key; a light seat signs with k256 (already here for the co-signature
+# checks) and nothing else: a crate that would add another signer must not appear silently.
 deny = []
 
 [sources]

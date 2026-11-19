@@ -717,13 +717,24 @@ pub struct CancelAgent {
 }
 
 impl CancelAgent {
+    #[cfg(test)]
     pub fn new(
         cfg: CancelConfig,
         node_cfg: &crate::config::NodeConfig,
         seq: u16,
         path: PathBuf,
     ) -> anyhow::Result<Self> {
-        let node = Node::new(node_cfg)?;
+        Self::with_node(cfg, Node::new(node_cfg)?, node_cfg, seq, path)
+    }
+
+    /// With the attest loop's own backend (a light seat's signer and guard are one per process).
+    pub fn with_node(
+        cfg: CancelConfig,
+        node: Node,
+        node_cfg: &crate::config::NodeConfig,
+        seq: u16,
+        path: PathBuf,
+    ) -> anyhow::Result<Self> {
         let mut peers = Vec::new();
         for u in &cfg.broadcast_rpc {
             let mut c = node_cfg.clone();
@@ -1997,6 +2008,10 @@ impl CancelAgent {
     /// output inserted, signed, sent. The fee is exactly `fallback_fee_zat`.
     async fn post_onchain(&mut self, txid: &[u8; 32], n: u32, e: &Entry) -> anyhow::Result<String> {
         let fee = self.cfg.fallback_fee_zat;
+        // a light seat has no wallet: yew-attestor builds the same transaction from the seat's own coins
+        if let Some(light) = self.node.light() {
+            return Ok(light.op_return(&crate::onchain::encode(txid, n, e), fee).await?);
+        }
         // the YED index's token outpoints of this wallet are never spent here (review L-1); without the list, no post
         let toks = self.node.call("yed_listunspent", vec![]).await?;
         let tokens: std::collections::HashSet<(String, u64)> = toks

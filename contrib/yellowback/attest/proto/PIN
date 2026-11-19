@@ -1,0 +1,4 @@
+# The lightwalletd-dd protos this directory holds (byte copies of walletrpc/*.proto) and src/light/proto.rs is
+# generated from (regen.sh). Re-copy and regenerate when lightwalletd-dd's YellowbackStreamer changes.
+lightwalletd-dd 4cb5fcb (branch up/b4-light-attestor: SubmitAttestation, GetTag, GetTxOut, GetMempoolTxids; B-T1;
+DecodePayload of a raw transaction returns the carrier bundle)
