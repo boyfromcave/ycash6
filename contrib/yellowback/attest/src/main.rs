@@ -5,7 +5,10 @@
 //! `yellowback-attest`: the Ycash Yellowback attestor agent (plan §5, W13).
 //!
 //! Two modes, one binary: `attest` (beside an attestor's node) and `subscribe` (beside any
-//! minting node). The agent never holds a key: signing is the node's `yed_signattestation`.
+//! minting node). With the default `[backend] kind = "node"` the agent never holds a key: signing
+//! is the node's `yed_signattestation`. With `kind = "lightwalletd"` (beta4 item 3d) the seat runs
+//! no node: it reads lightwalletd-dd endpoints and signs with its own seat key file behind its own
+//! guard file (`light/`).
 //! Exit codes: 2 for a bad configuration; otherwise the loops run until a signal.
 
 mod attest;
@@ -17,10 +20,13 @@ mod direct;
 mod fixtures;
 mod framing;
 mod gossip;
+mod guard;
 mod http;
+mod light;
 mod onchain;
 mod price;
 mod rpc;
+mod signer;
 mod subscribe;
 mod tls;
 mod transport;
@@ -158,7 +164,8 @@ async fn main() {
         }
         Command::CheckConfig => {
             println!(
-                "ok: {} source(s), {} BTC/USD reference(s), transport {}",
+                "ok: backend {}, {} source(s), {} BTC/USD reference(s), transport {}",
+                cfg.backend.name(),
                 cfg.sources.len(),
                 cfg.btc_usd_sources.len(),
                 match &cfg.transport {

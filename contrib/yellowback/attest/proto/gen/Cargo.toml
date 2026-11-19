@@ -1,0 +1,12 @@
+# The code generator for src/light/proto.rs (run ../regen.sh); not part of the agent's build.
+[package]
+name = "yellowback-attest-protogen"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+tonic-prost-build = "=0.14.6"
+prost-build = "=0.14.4"

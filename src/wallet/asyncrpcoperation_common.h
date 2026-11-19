@@ -67,10 +67,16 @@ UniValue SendTransaction(
  */
 std::pair<CTransaction, UniValue> SignSendRawTransaction(UniValue obj, std::optional<std::reference_wrapper<CReserveKey>> reservekey, bool testmode);
 
+/**
+ * Beta4 (REPORT item 7): `fundsNote` (MinconfNote, PQCoinbaseShieldNote; "" for none) ends an insufficient-funds
+ * message, and the coinbase sentence appears only where the selector selects transparent coins (a Sapling source's
+ * shortfall is never coinbase's).
+ */
 void ThrowInputSelectionError(
         const InputSelectionError& err,
         const ZTXOSelector& selector,
-        const TransactionStrategy& strategy);
+        const TransactionStrategy& strategy,
+        const std::string& fundsNote = "");
 
 /*
  * Post-quantum (TX_PQPKH) inputs of z_sendmany / z_mergetoaddress (beta2 D-2, D-6; reverses quantum spec A-15).
@@ -169,16 +175,53 @@ bool SpendsPQCoin(const SpendableInputs& spendable);
 /**
  * Beta3 (a post-quantum miner shields its coinbase): the value of the immature coinbase outputs of this wallet that
  * pay `script` (in the main chain, GetBlocksToMaturity() > 0). AvailableCoins never returns them; z_sendmany names the
- * sum when it refuses a send from the address. cs_main and wallet.cs_wallet held.
+ * sum when it refuses a send from the address. Beta4: *nextMaturesIn (when given) is set to the confirmations the
+ * soonest of them still needs (0 when there is none). cs_main and wallet.cs_wallet held.
  */
-CAmount PQImmatureCoinbase(const CWallet& wallet, const CScript& script);
+CAmount PQImmatureCoinbase(const CWallet& wallet, const CScript& script, int* nextMaturesIn = nullptr);
 
 /**
- * Beta3: the "Insufficient transparent funds" message of z_sendmany from a post-quantum address, `message` followed
- * by what the address holds in coinbase that this send could not use: `coinbaseExcluded`, mature coinbase left out
- * because a recipient is not shielded, and `immatureCoinbase`. `message` is returned unchanged when both are zero.
+ * Beta4 (REPORT item 7): the value of the unspent non-coinbase outputs of this wallet that pay `script` with fewer
+ * than `minDepth` confirmations (unconfirmed included, conflicted not): what minconf left out of a send.
+ * cs_main and wallet.cs_wallet held.
  */
-std::string PQInsufficientFunds(const std::string& message, CAmount coinbaseExcluded, CAmount immatureCoinbase);
+CAmount PQBelowMinconf(const CWallet& wallet, const CScript& script, int minDepth);
+
+/**
+ * Beta4: the sentence z_sendmany adds to an insufficient-funds refusal when minconf left `belowMinconf` of the source's
+ * funds out (" The address holds <v> YEC with fewer than the <n> confirmations this send requires (minconf): ...");
+ * "" when nothing was left out. Character-identical on both C++ lines.
+ */
+std::string MinconfNote(CAmount belowMinconf, int minDepth);
+
+/** Beta4: what a z_sendmany from a post-quantum address could not use, for its insufficient-funds refusal. */
+struct PQFundsLeftOut {
+    CAmount coinbase{0};                //!< mature coinbase left out because a recipient is transparent
+    size_t coinbaseCoins{0};            //!< how many outputs that is
+    CAmount coinbaseSend{0};            //!< the one amount that moves the largest of them to one Sapling address (0: none)
+    CAmount coinbaseSelected{0};        //!< the rewards that amount spends
+    CAmount coinbaseFee{0};             //!< and its fee
+    size_t coinbaseSelectedCoins{0};    //!< how many rewards that amount spends
+    CAmount immature{0};                //!< immature coinbase of the address
+    int immatureBlocks{0};              //!< the confirmations the soonest of them still needs
+    CAmount belowMinconf{0};            //!< ordinary coins of the address that minconf left out
+    int minDepth{0};                    //!< the send's minconf
+};
+
+/**
+ * Beta3, reworded in beta4 (REPORT item 7): the "Insufficient transparent funds" message of z_sendmany from a
+ * post-quantum address. `message` is returned unchanged when nothing was left out. Otherwise, when `noCoins` (the
+ * address had no ordinary coin to spend) the lead becomes "Insufficient transparent funds: this address has no coins
+ * this send can spend.", and the message names the mining rewards (with the exact amount that sends them to Sapling),
+ * the immature rewards (with the confirmations still needed) and the coins minconf left out.
+ */
+std::string PQInsufficientFunds(const std::string& message, bool noCoins, const PQFundsLeftOut& left);
+
+/**
+ * Beta4 (REPORT item 7): the sentence z_shieldcoinbase adds to its insufficient-funds refusal when the wallet holds
+ * `pqCoinbase` of mature coinbase at post-quantum addresses, which it never spends; "" when that is 0.
+ */
+std::string PQCoinbaseShieldNote(CAmount pqCoinbase);
 
 /**
  * Beta3: the refusal of a z_sendmany from a post-quantum address whose selected coins include coinbase and would

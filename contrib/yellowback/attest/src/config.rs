@@ -113,9 +113,24 @@ pub struct CancelToml {
     pub gossip_refill_seconds: Option<u64>,
 }
 
+/// `[backend]` (beta4 item 3d): where the agent's node RPCs are answered.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackendToml {
+    pub kind: Option<String>,
+    pub lightwalletd: Option<Vec<String>>,
+    pub allow_insecure: Option<bool>,
+    pub key_file: Option<String>,
+    pub guard_file: Option<String>,
+    pub yew_attestor: Option<String>,
+    pub timeout: Option<u64>,
+    pub cosign_endpoints: Option<usize>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
+    backend: Option<BackendToml>,
     node: Option<NodeToml>,
     attest: Option<AttestToml>,
     sources: Option<Vec<SourceToml>>,
@@ -267,8 +282,43 @@ pub const DEFAULT_PRICE_TOLERANCE_BLOCKS: u32 = 24;
 pub const DEFAULT_GOSSIP_BURST: u32 = 16;
 pub const DEFAULT_GOSSIP_REFILL_SECONDS: u64 = 10;
 
+/// The light seat (`[backend] kind = "lightwalletd"`): lightwalletd-dd endpoints, the seat key file, its guard file
+/// and the `yew-attestor` CLI for the seat's transactions (light attestor contract §4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LightConfig {
+    /// 1..n endpoints; two in different regions are recommended (B-6, B-7, B-10).
+    pub endpoints: Vec<String>,
+    pub key_file: PathBuf,
+    /// Default `<key_file>.guard`.
+    pub guard_file: PathBuf,
+    /// Heartbeat, the cancel driver and the on-chain fallback; without it the seat only signs and co-signs.
+    pub yew_attestor: Option<PathBuf>,
+    pub timeout_seconds: u64,
+    /// How many endpoints must show a claim before the seat co-signs its cancel (B-10); default min(2, endpoints).
+    pub cosign_endpoints: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Backend {
+    /// Today's agent: every RPC to `[node]`, whose wallet holds the seat key.
+    Node,
+    /// No node: lightwalletd-dd and a local signer (`light.rs`).
+    Lightwalletd(LightConfig),
+}
+
+impl Backend {
+    pub fn name(&self) -> String {
+        match self {
+            Backend::Node => "node".into(),
+            Backend::Lightwalletd(l) => format!("lightwalletd ({} endpoint(s))", l.endpoints.len()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub backend: Backend,
+    /// With `[backend] kind = "lightwalletd"` there is no `[node]`; this holds only the RPC timeout then.
     pub node: NodeConfig,
     pub attest: AttestConfig,
     pub sources: Vec<Source>,
@@ -369,7 +419,26 @@ fn file_mode(_path: &Path) -> Option<u32> {
 pub fn parse(text: &str) -> Result<Config, ConfigError> {
     let raw: RawConfig = toml::from_str(text).map_err(|e| ConfigError(e.to_string()))?;
 
-    let n = raw.node.unwrap_or_default();
+    let backend = parse_backend(raw.backend.clone().unwrap_or_default())?;
+    if let Backend::Lightwalletd(l) = &backend {
+        if raw.node.is_some() {
+            return Err(
+                "[backend] kind = \"lightwalletd\" runs with no node: remove [node] (or use kind = \"node\")"
+                    .to_string()
+                    .into(),
+            );
+        }
+        let node = NodeConfig {
+            rpc_url: String::new(),
+            cookie: None,
+            user: None,
+            password: None,
+            timeout_seconds: l.timeout_seconds,
+        };
+        return parse_rest(raw, backend, node);
+    }
+
+    let n = raw.node.clone().unwrap_or_default();
     if n.rpc_cookie.is_some() && (n.rpc_user.is_some() || n.rpc_password.is_some()) {
         return Err("[node]: give rpc_cookie or rpc_user/rpc_password, not both"
             .to_string()
@@ -409,7 +478,91 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         password: n.rpc_password,
         timeout_seconds: n.rpc_timeout.unwrap_or(30),
     };
+    parse_rest(raw, backend, node)
+}
 
+fn parse_backend(b: BackendToml) -> Result<Backend, ConfigError> {
+    match b.kind.as_deref().unwrap_or("node") {
+        "node" => {
+            if b.lightwalletd.is_some()
+                || b.key_file.is_some()
+                || b.guard_file.is_some()
+                || b.yew_attestor.is_some()
+                || b.allow_insecure.is_some()
+                || b.cosign_endpoints.is_some()
+            {
+                return Err(
+                    "[backend]: kind = \"node\" takes no lightwalletd settings (set kind = \"lightwalletd\")"
+                        .to_string()
+                        .into(),
+                );
+            }
+            Ok(Backend::Node)
+        }
+        "lightwalletd" => {
+            let endpoints = b.lightwalletd.unwrap_or_default();
+            if endpoints.is_empty() {
+                return Err(
+                    "[backend] lightwalletd: at least one endpoint URL (two in different regions recommended)"
+                        .to_string()
+                        .into(),
+                );
+            }
+            let allow_insecure = b.allow_insecure.unwrap_or(false);
+            for e in &endpoints {
+                if e.starts_with("https://") {
+                    continue;
+                }
+                if e.starts_with("http://") {
+                    if is_loopback_url(e) || allow_insecure {
+                        continue;
+                    }
+                    return Err(format!(
+                        "[backend] lightwalletd: {e:?} is plain http:// to a host that is not loopback; use https:// \
+                         (or set allow_insecure = true)"
+                    )
+                    .into());
+                }
+                return Err(format!("[backend] lightwalletd: {e:?} is not an http(s) URL").into());
+            }
+            let key_file = b
+                .key_file
+                .filter(|k| !k.is_empty())
+                .map(|k| expand_user(&k))
+                .ok_or_else(|| "[backend] key_file is required with kind = \"lightwalletd\"".to_string())?;
+            let guard_file = match b.guard_file.filter(|g| !g.is_empty()) {
+                Some(g) => expand_user(&g),
+                None => {
+                    let mut g = key_file.clone().into_os_string();
+                    g.push(".guard");
+                    PathBuf::from(g)
+                }
+            };
+            if guard_file == key_file {
+                return Err("[backend] guard_file must not be key_file".to_string().into());
+            }
+            let cosign_endpoints = b.cosign_endpoints.unwrap_or(endpoints.len().min(2));
+            if cosign_endpoints < 1 || cosign_endpoints > endpoints.len() {
+                return Err(format!(
+                    "[backend] cosign_endpoints must be between 1 and the number of endpoints ({})",
+                    endpoints.len()
+                )
+                .into());
+            }
+            Ok(Backend::Lightwalletd(LightConfig {
+                endpoints,
+                key_file,
+                guard_file,
+                yew_attestor: b.yew_attestor.filter(|y| !y.is_empty()).map(|y| expand_user(&y)),
+                timeout_seconds: b.timeout.unwrap_or(30).max(1),
+                cosign_endpoints,
+            }))
+        }
+        other => Err(format!("[backend]: unknown kind {other:?} (node or lightwalletd)").into()),
+    }
+}
+
+fn parse_rest(raw: RawConfig, backend: Backend, node: NodeConfig) -> Result<Config, ConfigError> {
     let a = raw.attest.unwrap_or_default();
     let attest = AttestConfig {
         seq: a.seq,
@@ -577,6 +730,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
     }
 
     Ok(Config {
+        backend,
         node,
         attest,
         sources,
@@ -816,5 +970,65 @@ endpoints = ["https://attestor.example/att"]
         for text in bad {
             assert!(parse(text).is_err(), "accepted: {text:?}");
         }
+    }
+
+    const LIGHT: &str = r#"
+[backend]
+kind = "lightwalletd"
+lightwalletd = ["https://a.example:9067", "http://127.0.0.1:39067"]
+key_file = "/etc/yellowback/seat.key"
+yew_attestor = "/usr/local/bin/yew-attestor"
+
+[attest]
+seq = 4
+"#;
+
+    #[test]
+    fn the_light_backend() {
+        let c = parse(LIGHT).unwrap();
+        let Backend::Lightwalletd(l) = &c.backend else {
+            panic!("not light")
+        };
+        assert_eq!(l.endpoints.len(), 2);
+        assert_eq!(l.key_file, PathBuf::from("/etc/yellowback/seat.key"));
+        assert_eq!(l.guard_file, PathBuf::from("/etc/yellowback/seat.key.guard"));
+        assert_eq!(l.yew_attestor, Some(PathBuf::from("/usr/local/bin/yew-attestor")));
+        assert_eq!((l.cosign_endpoints, l.timeout_seconds), (2, 30));
+        assert_eq!(c.attest.seq, Some(4));
+        // the default backend is the node, and [node] is then required
+        assert_eq!(parse(SAMPLE).unwrap().backend, Backend::Node);
+        assert!(parse("[attest]\nseq = 1\n").is_err());
+        let one = LIGHT.replace(", \"http://127.0.0.1:39067\"", "");
+        let Backend::Lightwalletd(l) = parse(&one).unwrap().backend else {
+            panic!()
+        };
+        assert_eq!(l.cosign_endpoints, 1);
+        let guard = LIGHT.replace("key_file =", "guard_file = \"~/g\"\nkey_file =");
+        let Backend::Lightwalletd(l) = parse(&guard).unwrap().backend else {
+            panic!()
+        };
+        assert!(l.guard_file.ends_with("g") && l.guard_file.is_absolute());
+        let bad = [
+            LIGHT.replace("[attest]", "[node]\nrpc_url = \"http://127.0.0.1:1\"\n[attest]"),
+            LIGHT.replace("https://a.example:9067", "http://a.example:9067"),
+            LIGHT.replace("https://a.example:9067", "grpc://a"),
+            LIGHT.replace(
+                "lightwalletd = [\"https://a.example:9067\", \"http://127.0.0.1:39067\"]",
+                "lightwalletd = []",
+            ),
+            LIGHT.replace("key_file = \"/etc/yellowback/seat.key\"", ""),
+            LIGHT.replace("kind = \"lightwalletd\"", "kind = \"other\""),
+            LIGHT.replace("kind = \"lightwalletd\"", "kind = \"node\""),
+            LIGHT.replace("[attest]", "cosign_endpoints = 3\n[attest]"),
+            LIGHT.replace("[attest]", "guard_file = \"/etc/yellowback/seat.key\"\n[attest]"),
+            LIGHT.replace("[attest]", "surprise = 1\n[attest]"),
+        ];
+        for text in &bad {
+            assert!(parse(text).is_err(), "accepted: {text}");
+        }
+        let insecure = LIGHT
+            .replace("https://a.example:9067", "http://a.example:9067")
+            .replace("[attest]", "allow_insecure = true\n[attest]");
+        assert!(parse(&insecure).is_ok());
     }
 }

@@ -22,7 +22,7 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 toml = "=1.1.6"
 clap = { version = "=4.6.6", features = ["derive"] }
-tokio = { version = "=1.53.3", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "fs"] }
+tokio = { version = "=1.53.3", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "fs", "process"] }
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt"] }
 sha2 = "=0.10.9"
@@ -34,6 +34,13 @@ bytes = "=1.12.1"
 # The cancel co-signatures (cancel-limit design CAN-2 + C4b) are verified locally before they are gossiped on or used:
 # secp256k1 public-key recovery of the node's 65-byte compact signatures. Pure Rust (no C toolchain), RustCrypto.
 k256 = { version = "=0.14.0", default-features = false, features = ["ecdsa", "std"] }
+# The light backend ([backend] kind = "lightwalletd", beta4 item 3d): a gRPC client of lightwalletd-dd's
+# CompactTxStreamer and YellowbackStreamer, at the versions YEW core uses. The stubs are generated and checked in
+# (src/light/proto.rs, proto/regen.sh), so the build needs no protoc. TLS: rustls with ring (the provider tls.rs
+# installs) and the Mozilla roots.
+tonic = { version = "=0.14.6", default-features = false, features = ["codegen", "channel", "tls-ring", "tls-webpki-roots"] }
+tonic-prost = "=0.14.6"
+prost = "=0.14.4"
 
 [dev-dependencies]
 tiny_http = "=0.12.0"

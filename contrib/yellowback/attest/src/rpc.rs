@@ -2,9 +2,13 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-//! Minimal JSON-RPC 1.0 client over HTTP, a port of `Node` in `yellowback_price.py`: basic auth
-//! from `rpc_user`/`rpc_password` or the node's `.cookie` file (re-read on every call, so a node
-//! restart with a fresh cookie needs no agent restart).
+//! The agent's one way to its chain: [`Node::call`] with a node RPC method name and its params.
+//!
+//! Two backends behind it (`[backend]`, beta4 item 3d): [`RpcClient`], a minimal JSON-RPC 1.0 client over HTTP (a
+//! port of `Node` in `yellowback_price.py`: basic auth from `rpc_user`/`rpc_password` or the node's `.cookie` file,
+//! re-read on every call, so a node restart with a fresh cookie needs no agent restart), and the light backend
+//! ([`crate::light::Light`]), which answers the same methods with the same JSON from lightwalletd-dd endpoints and a
+//! local signer. `attest.rs`, `cancel.rs` and `subscribe.rs` do not know which one they talk to.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -14,7 +18,7 @@ use std::time::Duration;
 use base64::Engine;
 use serde_json::{json, Value};
 
-use crate::config::NodeConfig;
+use crate::config::{Backend, Config, NodeConfig};
 
 #[derive(Debug)]
 pub enum RpcError {
@@ -35,8 +39,47 @@ impl fmt::Display for RpcError {
 
 impl std::error::Error for RpcError {}
 
+/// The node RPC, or the light backend answering as the node would.
 #[derive(Clone)]
-pub struct Node {
+pub enum Node {
+    Rpc(RpcClient),
+    Light(std::sync::Arc<crate::light::Light>),
+}
+
+impl Node {
+    /// A JSON-RPC client of `cfg` (the node backend; also every `broadcast_rpc` peer).
+    pub fn new(cfg: &NodeConfig) -> Result<Self, RpcError> {
+        Ok(Node::Rpc(RpcClient::new(cfg)?))
+    }
+
+    /// The configured backend. A light backend's key or guard file that cannot be read is an error here.
+    pub fn for_config(cfg: &Config) -> Result<Self, RpcError> {
+        match &cfg.backend {
+            Backend::Node => Self::new(&cfg.node),
+            Backend::Lightwalletd(l) => crate::light::Light::open(l)
+                .map(|l| Node::Light(std::sync::Arc::new(l)))
+                .map_err(RpcError::Transport),
+        }
+    }
+
+    pub async fn call(&self, method: &str, params: Vec<Value>) -> Result<Value, RpcError> {
+        match self {
+            Node::Rpc(c) => c.call(method, params).await,
+            Node::Light(l) => l.call(method, params).await,
+        }
+    }
+
+    /// The light backend, when this is one.
+    pub fn light(&self) -> Option<&crate::light::Light> {
+        match self {
+            Node::Light(l) => Some(l),
+            Node::Rpc(_) => None,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct RpcClient {
     url: String,
     cookie: Option<PathBuf>,
     static_auth: Option<String>,
@@ -44,7 +87,7 @@ pub struct Node {
     id: std::sync::Arc<AtomicU64>,
 }
 
-impl Node {
+impl RpcClient {
     pub fn new(cfg: &NodeConfig) -> Result<Self, RpcError> {
         let client = crate::http::client(Duration::from_secs(cfg.timeout_seconds))
             .map_err(|e| RpcError::Transport(e.to_string()))?;
@@ -60,7 +103,7 @@ impl Node {
         if let Some(u) = &cfg.user {
             static_auth = Some(format!("{u}:{}", cfg.password.clone().unwrap_or_default()));
         }
-        Ok(Node {
+        Ok(RpcClient {
             url,
             cookie: cfg.cookie.clone(),
             static_auth,

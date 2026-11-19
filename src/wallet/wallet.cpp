@@ -7411,6 +7411,18 @@ CAmount CWallet::PQSelectableValue(std::string* yedRefusal) const
     return value;
 }
 
+CAmount CWallet::PQCoinbaseLeftOut() const
+{
+    if (!Params().GetConsensus().fCoinbaseMustBeShielded) return 0;     // PQSelectableValue counts it there
+    vector<COutput> coins;
+    AvailableCoins(coins, std::nullopt, true, nullptr, false, true);
+    CAmount value = 0;
+    for (const COutput& o : coins) {
+        if (o.fSpendable && o.tx->IsCoinBase() && IsPQInputScript(o.tx->vout[o.i].scriptPubKey)) value += o.tx->vout[o.i].nValue;
+    }
+    return value;
+}
+
 std::string CWallet::YedLeftOutOfSelection(const CCoinControl* coinControl) const
 {
     if (yellowback::g_yellowbackWallet || (coinControl && !coinControl->fAllowOtherInputs)) return "";
@@ -7744,6 +7756,15 @@ bool CWallet::CreateTransaction(const vector<CRecipient>& vecSend, CWalletTx& wt
                         // review WALLET-FOLLOW-REVIEW-2 LOW-4: say why getbalance and listunspent count more
                         const std::string yed = YedLeftOutOfSelection(coinControl);
                         if (!yed.empty()) strFailReason += "; " + yed;
+                    }
+                    // Beta4 (REPORT item 7): getbalance counts mining rewards paid to a post-quantum address, which no
+                    // transparent send can spend; say what moves them.
+                    const CAmount pqCoinbase = (!coinControl || coinControl->fAllowOtherInputs) ? PQCoinbaseLeftOut() : 0;
+                    if (pqCoinbase > 0) {
+                        strFailReason += strprintf("; this wallet also holds %s YEC of mining rewards (coinbase) at post-quantum "
+                                                   "addresses, which can only be sent to a shielded (Sapling) address, with no "
+                                                   "change: send them with z_sendmany from the address that holds them, which "
+                                                   "names the exact amount to send", FormatMoney(pqCoinbase));
                     }
                     return false;
                 }

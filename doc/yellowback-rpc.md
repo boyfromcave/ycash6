@@ -102,7 +102,11 @@ by decision as `3` and `4` were.** No `yed_*` field changes shape: every change 
 call, and the one step tells a client that the node has all of them (check `rpcversion >= 10` rather than probing
 each call). The additions, by beta3 item: `getcoinbasetemplatefor` (3; new call: a coinbase that pays a miner's own
 transparent, Sapling or post-quantum address for a named template, with `fund` and `fundrule`; `doc/yellowback-mining.md`
-§13; a post-quantum payout address must be held in a ycashd or yewd wallet, which moves the reward with `z_sendmany`:
+§13; a post-quantum payout address must be held in a ycashd or yewd wallet, which moves the reward with `z_sendmany`
+(a YEW app or web address is not suitable: the coinbase must be shielded first, at the exact amount, which those
+wallets cannot do; a miner already paid at one restores the YEW recovery phrase in yewd with `-mnemonicfile`,
+`z_sendmany`s the exact amount to a Sapling address and sends it on from there, as the yewd README describes,
+[`yew/yewd/README.md`](https://github.com/boyfromcave/yew/blob/upgrade/vault/yewd/README.md#recovering-a-mining-reward-paid-to-a-yew-address)):
 "A post-quantum miner shields its coinbase" below); `getblocktemplate.coinbasetxn.foundersreward` derived from the
 coinbase's rule, so a Sapling miner address reports it too (3; ycash-dd, where it read `vout[1]`);
 `transparentPools` in `getblockchaininfo` and `getblock` (2; below,
@@ -287,18 +291,37 @@ YED form): what node operators and clients should know.**
      transaction would result in <c> in change. To spend the selected coins, send exactly <a> to shielded recipients
      (the <s> selected less the fee <f>).`: send `<a>` (with the same `fee` argument, if one was given) and the
      transaction is `vin` = the selected coins, `vout` empty, Sapling outputs only;
-  4. with a transparent (ECC or post-quantum) recipient the coinbase is never selected, and the -6 refusal
-     (`Insufficient transparent funds, no UTXOs found for taddr from address.` or `Insufficient transparent funds, have
-     <x>, need <y>.`) is followed by ` The address holds <v> of coinbase funds, which can only be sent to shielded
-     recipients, with no change.`; immature coinbase at the address is named the same way in every such refusal:
-     ` The address holds <v> of immature coinbase funds, which can be sent to shielded recipients only, with no change,
-     after 101 confirmations.`
+  4. with a transparent (ECC or post-quantum) recipient the coinbase is never selected, and the -6 refusal names it.
+     Beta4 (clearer refusals, the same text on both C++ lines): when the address had no ordinary coin to
+     spend, the lead `Insufficient transparent funds, no UTXOs found for taddr from address.` becomes `Insufficient
+     transparent funds: this address has no coins this send can spend.` (an address holding nothing at all keeps the
+     old lead, byte for byte); `Insufficient transparent funds, have <x>, need <y>.` keeps its lead. Then, each when it
+     applies:
+     - ` The address holds <v> YEC of mining rewards (coinbase), which can only be sent to a shielded (Sapling)
+       address, with no change: send exactly <a> to one Sapling address (the <v> of rewards less the fee <f>).`
+       (`<a>` is the amount that moves every mature reward of the address, largest first, in one transaction to one
+       Sapling address; when they are more than one transaction carries: `(the largest <n> of the <m> rewards, <s>,
+       less the fee <f>), then send again for the rest.`);
+     - ` The address holds <v> YEC of mining rewards that are not spendable yet: a reward needs 101 confirmations, and
+       the next one needs <k> more; it can then only be sent to a shielded (Sapling) address, with no change.`;
+     - ` The address holds <v> YEC with fewer than the <n> confirmations this send requires (minconf): wait for them,
+       or pass a lower minconf.` (ordinary coins that `minconf` left out; the same sentence ends the insufficient-funds
+       refusal of an ECC or Sapling source, where on the 6.20.0 line it replaces the inherited note on coinbase, which
+       no longer appears for a source that has no transparent coins).
+     `sendtoaddress` and `sendmany` add `; this wallet also holds <v> YEC of mining rewards (coinbase) at post-quantum
+     addresses, which can only be sent to a shielded (Sapling) address, with no change: send them with z_sendmany from
+     the address that holds them, which names the exact amount to send` to their insufficient-funds refusal where
+     coinbase must be shielded, and `z_shieldcoinbase` (`"*"`) adds ` The wallet holds <v> YEC of mining rewards
+     (coinbase) at post-quantum addresses, which ycashd's z_shieldcoinbase does not spend: send them with z_sendmany from the
+     address that holds them to a Sapling address, with no change; z_sendmany names the exact amount to send.` Error
+     codes are unchanged.
   So a miner names a shielded amount, reads the exact amount in the refusal and sends that. Coins are taken largest
   first, so an amount within the largest reward moves that one reward; an amount above it brings in the next coin
   (and so on, up to the input limit above), and the refusal then names the amount for all of them (a worked example:
   `doc/yellowback-mining.md` §13, "A reward paid to a post-quantum address"). Every refusal is the wallet's: nothing
-  reaches the mempool. `z_shieldcoinbase` and `z_mergetoaddress` do not move such a reward (the first refuses a
-  post-quantum source, the second leaves coinbase out); there is no one-call sweep. **The payout address must be held
+  reaches the mempool. ycashd's `z_shieldcoinbase` and `z_mergetoaddress` do not move such a reward (yewd's
+  `z_shieldcoinbase` does, at the exact amount with no change: a yewd-only extension; ycashd's refuses a
+  post-quantum source and `z_mergetoaddress` leaves coinbase out); ycashd has no one-call sweep. **The payout address must be held
   in a ycashd or yewd wallet:** the YEW app and the web wallet cannot tell that a coin is a coinbase (lightwalletd's
   `GetAddressUtxos` carries no such flag), so they show the reward as spendable and the node refuses their sends
   until the coin is 100 blocks deep and the send has only shielded recipients and no change. A transparent (ECC) or

@@ -5,9 +5,22 @@
 #   yellowback-attest sources --conf attest.toml      # check what every source resolves to
 #   yellowback-attest check-config --conf attest.toml
 #
-# The agent holds no key. `attest` asks its own node to sign (`yed_signattestation`, RPC-auth
+# With the node backend the agent holds no key. `attest` asks its own node to sign (`yed_signattestation`, RPC-auth
 # only) and publishes the returned 74 bytes; `subscribe` pushes what it hears into its own
 # node's pool. Nothing inbound: no listening socket, no TLS server, no domain.
+
+# Where the agent's node RPCs go. The default, kind = "node", is the [node] table below: the node's wallet holds the
+# seat key. kind = "lightwalletd" is a light seat (beta4 item 3d; README "The light seat"): no node, no [node] table;
+# lightwalletd-dd endpoints, the seat key file and its guard file, and yew-attestor for the seat's transactions.
+# [backend]
+# kind = "lightwalletd"
+# lightwalletd = ["https://lwd-a.example:9067", "https://lwd-b.example:9067"]   # two, in different regions
+# key_file = "~/.yellowback/seat.key"           # mode 0600; the WIF `ycash-cli dumpprivkey <bondKeyAddress>` prints
+# guard_file = "~/.yellowback/seat.key.guard"   # default <key_file>.guard; ycashd's attest-signed.dat layout
+# yew_attestor = "/usr/local/bin/yew-attestor"  # heartbeat, the cancel driver, the on-chain fallback
+# cosign_endpoints = 2                          # endpoints that must show a claim before co-signing (default min(2, n))
+# allow_insecure = false                        # plain http:// only to loopback unless true
+# timeout = 30
 
 # This file is read by the agent only. If it holds rpc_password, keep it mode 0600
 # (`chmod 600 attest.toml`): the agent refuses a group/world-readable one
