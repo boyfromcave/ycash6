@@ -359,7 +359,9 @@ UniValue SpendResult(const uint256& txid, const BuiltTx& built)
 CAmount EarlyRedeemFeeAt(const YellowbackIndex& index, const COutPoint& out, const VaultRecord& v, int tip, std::optional<yellowback::Payee>& payee)
 {
     const yellowback::Params& p = index.GetParams();
-    payee = DefaultPayee(index.View(), p, tip, OutPointSelector(out), index.GetPayeePolicy());
+    PayeePolicy pp = index.GetPayeePolicy();
+    pp.txHeight = (int64_t)tip + 1;   // the wallet's draw for a spend at tip + 1: no FN-DSA payee before Falcon (policy)
+    payee = DefaultPayee(index.View(), p, tip, OutPointSelector(out), pp);
     if (v.Status() != VaultStatus::ACTIVE || !payee.has_value() || !p.IsValidClass(v.termClass)) return 0;
     if ((int64_t)tip + 1 >= (int64_t)v.lockHeight) return 0;
     return EarlyRedeemFeeZat(v.mintedCents, p.earlyRedeemFeeBps[v.termClass], v.pMint);   // IT-9': of the debt at the mint price

@@ -92,8 +92,13 @@ post-quantum address of the network (the D-9 form, `sqf…`/`sqs…`, `tqf…`/`
 `yed_getfeepayee` `eligible[]` / `default.payoutAddress` / `preferred`, `yed_getprice.pinnedKeys[]`, and every `payee` field
 (`yed_gettxinfo`, `yed_validaterawtransaction`, `yed_getblockverdict`, `yed_listtransactions`, `yed_estimateredeem`, and the
 results of the wallet's mint, redeem and claim calls). Field names are unchanged. `-yellowbackpayoutaddress` and `-yellowbackpreferredpayee` accept a plain post-quantum address of the network as well as
-P2PKH. The `-mineraddress` default still applies only to a P2PKH `-mineraddress`: the internal miner refuses a post-quantum
-`-mineraddress`, so a post-quantum payout is set with `-yellowbackpayoutaddress`. A Sapling or YED address gives no tag. A post-quantum fee output is an ordinary TX_PQPKH output: spendable at one confirmation, to any destination
+P2PKH. A post-quantum `-mineraddress` is not supported: the internal miner refuses it at init, and the `-mineraddress`
+default applies only to a P2PKH `-mineraddress`, so a post-quantum payout is set with `-yellowbackpayoutaddress`. An FN-DSA-512
+(`sqf…`/`tqf…`/`rqf…`) `-yellowbackpayoutaddress` or `-yellowbackpreferredpayee` is refused at init while Falcon is not active at
+the next block (the node's Falcon height, `yed_getinfo.params.pq.falconHeight`; under `-reindex` the check is skipped), and the
+miner emits no FN-DSA tag for a block before Falcon; SLH-DSA is unaffected. Policy only: a v2 FN-DSA tag and an FN-DSA fee
+output stay valid at every height. The wallet's fee-payee draw (FEE-W, and `yed_getfeepayee`'s `default`) skips FN-DSA payees
+while Falcon is not active at the next block, unless E(R) holds no other payee. A Sapling or YED address gives no tag. A post-quantum fee output is an ordinary TX_PQPKH output: spendable at one confirmation, to any destination
 (the post-quantum coinbase rule applies to block rewards only). The attestor fee (AFEE-1) stays P2PKH. The index's
 `SCHEMA_VERSION` goes to 16, so the index is rebuilt on upgrade.
 
@@ -3144,8 +3149,8 @@ yet. `-yellowback` and `-experimentalfeatures` no longer gate anything (`-yellow
 accepted, as the H6 acknowledgement); `-yellowbackenforce`, `-yellowbacksignal`,
 `-yellowbacktemplatepolicy` and `-yellowbackrequirehealthy` are retired (logged and ignored),
 and `-yellowbackstartheight` and `-yellowbackenforceuntil` are refused at init (the start height
-is the activation height). `-yellowbackpayoutaddress=<s1…>` (P2PKH; defaults
-to a P2PKH `-mineraddress`); `-yellowbackquotemaxage=<sec>` (default
+is the activation height). `-yellowbackpayoutaddress=<s1…|sqf…|sqs…>` (P2PKH or post-quantum,
+FN-DSA-512 refused before Falcon; defaults to a P2PKH `-mineraddress`, a post-quantum `-mineraddress` is not supported); `-yellowbackquotemaxage=<sec>` (default
 1800); `-yellowbackpreferredpayee=<s1…>`; `-yellowbackpayeepenaltyblocks`, `-yellowbackpayeeaccuracywindow`,
 `-yellowbackpayeetiltbps` (FEE-W overrides, L6; reported in `yed_getinfo.params.policy` and
 `yed_getfeepayee.policy`); `-reindex-yellowback`; `-yellowbackfee`

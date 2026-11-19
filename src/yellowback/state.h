@@ -246,6 +246,10 @@ struct PayeePolicy
     int accuracyWindow;              //!< ACCURACY_WINDOW
     int tiltBps;                     //!< PAYEE_TILT_BPS
     std::optional<Payee> preferred;  //!< -yellowbackpreferredpayee: replaces the pick when in E(R)
+    /** The height of the transaction the draw is for (beta4 P1 follow-up, policy only): while Falcon is not active
+     *  there (Params::IsPQFalconActive) the draw skips FN-DSA (scheme 0x02) payees, the preference included, unless
+     *  E(R) holds nothing else. Unset: no skip (the RPC views of E(R)). Validity rules are unchanged. */
+    std::optional<int64_t> txHeight;
 
     PayeePolicy() : penaltyBlocks(0), accuracyWindow(0), tiltBps(0) {}
     /** The §3.1 defaults of a parameter set. */
@@ -267,6 +271,8 @@ struct PayeePolicy
  * pick = seed mod Σw, the first tag whose cumulative weight exceeds pick.
  * All penalised => every key of E(R) with equal weights. blockHash(R) is
  * Snapshots[R].blockHash (zero if missing). nullopt iff E(R) is empty.
+ * With policy.txHeight set and Falcon not active at it, the draw runs over
+ * E(R) without its FN-DSA payees when any other payee remains.
  */
 std::optional<Payee> DefaultPayee(const StateView& view, const Params& params, int refHeight,
                                   const std::vector<unsigned char>& selector, const PayeePolicy& policy);

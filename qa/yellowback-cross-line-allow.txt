@@ -33,8 +33,8 @@ src/vault/node.h 5ab9e85217a0d6cef5b19a8d6f195323c31aaec18bcd37acda15a4ebae3c1e7
 # re-derives openDebtCents (HALT-2, 2026-10-28) on both lines; pins updated then.
 # ParamsFromArgs takes the testnet profile (testnet plan Revision 3, 2026-10-29)
 # on both lines; pins updated then.
-src/yellowback/index.cpp 8b1f37e337bdeaa82af5a84e058a3bb732c48e330167b089a732aadfc603034f 58cf3ac88fa5fa0b8794900085909b35bd3b535d87832d9435a2001f66049447
-src/yellowback/index.h aa07e6290f06f61057fcc6c98e03b8b82a102e23e91debba857ffe1a6ba8e642 9b40aed43078bc09452bba11fd2873d77b82048410b614f991ebc210e0c25d8a
+src/yellowback/index.cpp 996754238cfd57fcc97456d3fd9f7ba52376604ed5e700d43c69da908322246c 2147fff4db7f22d9047de93ffc47cd0c7f88d74a56dfa2f00bc1b1112b1bf0f6
+src/yellowback/index.h 201780ca78cbabd2c6e74e6a338b66602b683b1f9cad8b11985c23d9a7bc0135 41c8096c20b9b856098ad2a645f9fff72d146f8129524ace9bc176ccbef63634
 
 # Comment only: DEFAULT_YELLOWBACK_FEE still 1000; the note names the 6.20.0
 # P-2 rule max(-yellowbackfee, ZIP-317 conventional fee). TestFastParams is
@@ -50,7 +50,7 @@ src/yellowback/policy.cpp e13b97ea99a66e48d8dab025b0626162ac3714e17646157e07282d
 # is held by unique_ptr (move drops firstSaplingSpendAddr), constructed in
 # place with a Sapling anchor, and dust is a fixed threshold. ycash-dd prices
 # with YedConventionalFeeEstimate instead. zip317.h and the header split.
-src/yellowback/txbuilder.cpp 782c43fe556ce77fad4840d1bbe4d14bbd1316437f54b41b716850fbc852bb9c f75a4ed34d5764f9362c158a08ab5aeb2441c5d1927aff6ea12c3aad51310e0a
+src/yellowback/txbuilder.cpp a40a3de5241ea8c3478eb0ef83eb294ec8185062af74f284bb66962e9ef042c5 cc2192887e5537eba837ba23aef06069a6f82b47e0fcb870ff26b7102d52b7ff
 src/yellowback/txbuilder.h 1c4c979cc33a0dd9b7404fd76a519d30e2e06491dcf08242c9dcf02dade5b9a5 174cd371a238aafa74853b67b248b5dc89273b7bc0c93e3dc1154dab4c217b5c
 
 # util/system.h and util/moneystr.h. CommitTransaction and AcceptToMemoryPool

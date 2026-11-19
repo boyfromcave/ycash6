@@ -2161,6 +2161,46 @@ BOOST_AUTO_TEST_CASE(tag_v2_fee_payees)
       BOOST_CHECK_EQUAL(r.vault.status, (uint8_t)VaultStatus::CLAIMING); }
 }
 
+// beta4 P1 follow-up (policy only, the rules unchanged): the wallet's FEE-W draw for a transaction at a height where
+// Falcon is not active skips FN-DSA payees (the preference too) unless E(R) holds no other payee; with txHeight unset
+// or Falcon active there, the draw is FEE-W over all of E(R).
+// Rule: FEE-W
+BOOST_AUTO_TEST_CASE(feew_skips_fn_dsa_before_falcon)
+{
+    Fixture f;
+    f.Activate();
+    const Payee fn = PQPayee(pq::SCHEME_FN_DSA_512), slh = PQPayee(pq::SCHEME_SLH_DSA_SHA2_128S);
+    for (int i = 0; i <= f.P.payeeWindow; i++) f.Mine(Fixture::QuoteV2(50000, i % 2 ? pq::SCHEME_SLH_DSA_SHA2_128S : pq::SCHEME_FN_DSA_512));
+    const int R = f.tip;
+    yellowback::Params P = f.P;
+    P.pqFalconHeight = R + 5;
+    auto count = [&](const PayeePolicy& pp, const Payee& want) {
+        int n = 0;
+        for (int i = 0; i < 200; i++) {
+            std::optional<Payee> k = DefaultPayee(f.view, P, R, Selector(i), pp);
+            BOOST_REQUIRE(k.has_value());
+            BOOST_REQUIRE(k.value() == fn || k.value() == slh);
+            if (k.value() == want) n++;
+        }
+        return n;
+    };
+    PayeePolicy pp = PayeePolicy::Defaults(P);
+    BOOST_CHECK(count(pp, fn) > 0);                       // txHeight unset: FEE-W over all of E(R)
+    pp.txHeight = R + 1;                                  // before Falcon: never FN-DSA
+    BOOST_CHECK_EQUAL(count(pp, fn), 0);
+    pp.preferred = fn;                                    // the preference is skipped too
+    BOOST_CHECK_EQUAL(count(pp, fn), 0);
+    pp.preferred = std::nullopt;
+    pp.txHeight = R + 5;                                  // Falcon active at the transaction's height
+    BOOST_CHECK(count(pp, fn) > 0);
+    P.pqFalconHeight = -1;                                // no Falcon height: never FN-DSA
+    BOOST_CHECK_EQUAL(count(pp, fn), 0);
+    // E(R) holds only FN-DSA payees: the draw falls back to them (a fee to E(R) is what the rules accept)
+    for (int i = 0; i <= f.P.payeeWindow; i++) f.Mine(Fixture::QuoteV2(50000, pq::SCHEME_FN_DSA_512));
+    pp.txHeight = f.tip + 1;
+    BOOST_CHECK(DefaultPayee(f.view, P, f.tip, Selector(1), pp).value() == fn);
+}
+
 // D-7 (price-feed.md §4.5): a v2 tag with an unknown scheme (0x03) or a truncated one is no tag, and the block stays
 // valid (TAG-4): applied, nothing recorded at its height.
 // Rule: TAG-2

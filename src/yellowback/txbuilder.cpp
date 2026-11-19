@@ -728,10 +728,13 @@ struct Context
         return pq.has_value() ? GetScriptForDestination(pq.value()) : GetScriptForDestination(keyOut.GetID());
     }
 
-    /** The payee of §3.7 FEE-W (or the configured preference, the index's L6 values) for `selector` at `r`; nullopt under FEE-0. */
+    /** The payee of §3.7 FEE-W (or the configured preference, the index's L6 values) for `selector` at `r`; nullopt under FEE-0.
+     *  Drawn for a transaction at the next block: no FN-DSA payee before Falcon while another is eligible (policy). */
     std::optional<yellowback::Payee> FeePayee(int r, const std::vector<unsigned char>& selector) const
     {
-        return DefaultPayee(st.View(), params, r, selector, index.GetPayeePolicy());
+        PayeePolicy pp = index.GetPayeePolicy();
+        pp.txHeight = (int64_t)chainHeight + 1;
+        return DefaultPayee(st.View(), params, r, selector, pp);
     }
 
     // ---- v3

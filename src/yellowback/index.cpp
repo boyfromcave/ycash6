@@ -18,6 +18,7 @@
 #include "util/system.h"
 #include "util/strencodings.h"
 #include "warnings.h"
+#include "crypto/pq/scheme.h"
 #include "yellowback/payload.h"
 #include "yellowback/script.h"
 #include "yellowback/state.h"
@@ -778,9 +779,12 @@ MinerStatus YellowbackIndex::GetMinerStatus(int64_t now) const
         s.kind = "none";
         return s;
     }
+    const int tip = TipHeight();
     // MINER-1: a quote tag iff a fresh quote is held (the signal-only tag left with ACT-1, §6)
     s.kind = quote.priceMicroUsd != 0 && now - quote.receivedAt <= miner.quoteMaxAge ? "quote" : "none";
-    const int tip = TipHeight();
+    // policy (beta4 P1 follow-up): no v2 FN-DSA tag for a block before Falcon (init refuses such a payout key then;
+    // this covers a node started past the Falcon height whose chain is reorganised below it)
+    if (miner.payoutKey->kind == pq::SCHEME_FN_DSA_512 && !params.IsPQFalconActive((int64_t)tip + 1)) s.kind = "none";
     if (tip >= params.startHeight) {
         s.registered = Registered(*db, params, miner.payoutKey.value(), tip);
         for (const Payee& k : EligiblePayees(*db, params, tip)) {

@@ -1258,7 +1258,7 @@ UniValue yed_setquote(const UniValue& params, bool fHelp)
     }
     if (mask < 0 || mask > 0xFFFF) throw JSONRPCError(RPC_INVALID_PARAMETER, "sourceMask must be a 16-bit value");
     if (!index.GetMinerConfig().payoutKey.has_value()) {
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "no-payout-address: set -yellowbackpayoutaddress (or a P2PKH or post-quantum -mineraddress) so the node can emit a tag");
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "no-payout-address: set -yellowbackpayoutaddress (P2PKH or post-quantum) or a P2PKH -mineraddress so the node can emit a tag (a post-quantum -mineraddress is not supported)");
     }
     const int64_t now = GetTime();      // the clock's one home (M11)
     index.SetQuote((uint64_t)price, (uint16_t)mask, now);
@@ -1307,6 +1307,7 @@ UniValue yed_getfeepayee(const UniValue& params, bool fHelp)
     o.pushKV("eligible", el);
     PayeePolicy noPref = pp;
     noPref.preferred = std::nullopt;
+    noPref.txHeight = (int64_t)IndexHeight(index) + 1;   // the wallet's draw for the next block: no FN-DSA payee before Falcon
     std::optional<Payee> pick = DefaultPayee(index.View(), p, refHeight, selector, noPref);
     UniValue def(UniValue::VOBJ);
     if (pick.has_value()) {

@@ -117,7 +117,7 @@ IndexAudit AuditIndexRecords(const StateView& view);
  *  the template policy and -yellowbackrequirehealthy left with the vault upgrade (§6). */
 struct MinerConfig
 {
-    std::optional<Payee> payoutKey;    //!< -yellowbackpayoutaddress or a P2PKH / post-quantum -mineraddress (MINER-2); none => no tag
+    std::optional<Payee> payoutKey;    //!< -yellowbackpayoutaddress (P2PKH or post-quantum) or a P2PKH -mineraddress (MINER-2); none => no tag
     int64_t quoteMaxAge;               //!< -yellowbackquotemaxage, seconds
 
     MinerConfig() : quoteMaxAge(1800) {}

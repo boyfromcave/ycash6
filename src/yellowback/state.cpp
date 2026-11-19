@@ -1613,8 +1613,16 @@ int AccuracyBps(const StateView& view, const Params& P, const Payee& key, int re
 std::optional<Payee> DefaultPayee(const StateView& view, const Params& P, int refHeight,
                                   const std::vector<unsigned char>& selector, const PayeePolicy& policy)
 {
-    const std::vector<Payee> eligible = EligiblePayees(view, P, refHeight);
+    std::vector<Payee> eligible = EligiblePayees(view, P, refHeight);
     if (eligible.empty()) return std::nullopt;
+    if (policy.txHeight.has_value() && !P.IsPQFalconActive(policy.txHeight.value())) {
+        // policy only: no FN-DSA payee before Falcon while another payee is eligible (the rules still accept one)
+        std::vector<Payee> preFalcon;
+        for (const Payee& k : eligible) {
+            if (k.kind != pq::SCHEME_FN_DSA_512) preFalcon.push_back(k);
+        }
+        if (!preFalcon.empty()) eligible = preFalcon;
+    }
     if (policy.preferred.has_value() && ContainsKey(eligible, policy.preferred.value())) return policy.preferred;
 
     std::vector<std::pair<Payee, int64_t>> candidates;
