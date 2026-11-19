@@ -202,8 +202,13 @@ class WalletPQAddressTest(BitcoinTestFramework):
         assert_equal(n0.z_listaddresses(), [])
         zaddr = n0.z_getnewaddress('sapling')   # node 0's first Sapling key (m/32'/coin'/0'): restored by B-1
         # z_sendmany and z_mergetoaddress spend from a PQ address (beta2 D-2, D-6: wallet_address_matrix.py);
-        # z_shieldcoinbase still refuses one (D-7).
-        assert_raises_rpc('z_shieldcoinbase cannot spend from a post-quantum address', n0.z_shieldcoinbase, a, zaddr)
+        # z_shieldcoinbase shields its mature coinbase (beta4 item 7a, as yewd: wallet_pq_shieldcoinbase.py), so an
+        # address with none gets yewd's -6.
+        try:
+            n0.z_shieldcoinbase(a, zaddr)
+            raise AssertionError('z_shieldcoinbase from an empty post-quantum address did not fail')
+        except JSONRPCException as e:
+            assert_equal((e.error['code'], e.error['message']), (-6, 'Could not find any coinbase funds to shield.'))
 
         print('pay to rq…: sendtoaddress, sendmany, z_sendmany')
         t1 = n1.getnewaddress()

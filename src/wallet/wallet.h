@@ -2142,13 +2142,28 @@ public:
      * start-up scan would begin near the tip and skip the history. The "restorescan" record (the height the scan starts
      * from) is written when the restore creates the wallet; while it is set, every start scans from that height
      * (InitLoadWallet), and only a start-up scan that completed, every re-pass included, with the node out of initial
-     * block download, erases it. An older binary ignores the record (ReadKeyValue skips an unknown type).
+     * block download (beta4: or at its header tip on a chain no block extends, MaybeCompleteRestore), erases it. An
+     * older binary ignores the record (ReadKeyValue skips an unknown type).
      */
     int nRestoreScanFrom = -1;
     void LoadRestoreScan(int nFromHeight) { nRestoreScanFrom = nFromHeight; }
     bool RestoreInProgress() const { return nRestoreScanFrom >= 0; }
     //! Review 3 (M-c LOW): the pending restore was announced in the node's warnings (SetWalletRestorePending).
     bool fWalletRestoreWarned = false;
+    /**
+     * Beta4 (item 2b, as yewd, yew #58): a restore whose start-up scan reached the tip, every re-pass included, while
+     * the node was in initial block download (a chain no block extends stays there once its tip is older than
+     * -maxtipage). It completes once the node is at its header tip (blocks >= headers) with that tip unchanged and
+     * with peers for RESTORE_SETTLE seconds; on regtest at once, no peers needed. A node still downloading (headers
+     * ahead of blocks), or a block connected after the scan, keeps the marker: the next start scans again.
+     */
+    static constexpr int64_t RESTORE_SETTLE = 60;
+    const CBlockIndex* pindexRestoreScanned = nullptr;  //!< the tip that scan reached (null: none pending)
+    int64_t nRestoreAtHeaderTipSince = 0;               //!< since when the node has been at that tip with peers
+    //! Erase the restore marker (the scan is complete); false if the write failed. cs_wallet held.
+    bool CompleteRestoreScan(int nFromHeight, const std::string& why);
+    //! The check above; called by the scheduler and by getwalletinfo. Takes cs_main and cs_wallet.
+    void MaybeCompleteRestore();
     //! Keys added by the transparent and PQ lookaheads since load (ScanForWalletTransactions' re-pass test).
     uint64_t nKeyLookaheadGrowth = 0;
     //! The keypool's keys by pool index and pool index by key (kept beside setKeyPool, for the mark-used path).

@@ -218,10 +218,18 @@ struct PQFundsLeftOut {
 std::string PQInsufficientFunds(const std::string& message, bool noCoins, const PQFundsLeftOut& left);
 
 /**
- * Beta4 (REPORT item 7): the sentence z_shieldcoinbase adds to its insufficient-funds refusal when the wallet holds
- * `pqCoinbase` of mature coinbase at post-quantum addresses, which it never spends; "" when that is 0.
+ * Beta4 (REPORT item 7; reworded with item 7a): the sentence z_shieldcoinbase adds to its insufficient-funds refusal
+ * when the wallet holds `pqCoinbase` of mature coinbase at post-quantum addresses that this call did not take ("*"
+ * takes ECC coins only): it shields them when the post-quantum address is named. "" when that is 0.
  */
 std::string PQCoinbaseShieldNote(CAmount pqCoinbase);
+
+/**
+ * Beta4 (item 7a): the tail of z_shieldcoinbase's "Could not find any coinbase funds to shield." from a post-quantum
+ * address that holds only immature coinbase: its value and the blocks the first of it still needs (yewd's
+ * `immature_tail`, character for character); "" when there is none.
+ */
+std::string PQShieldImmatureTail(CAmount immature, int blocksToGo);
 
 /**
  * Beta3: the refusal of a z_sendmany from a post-quantum address whose selected coins include coinbase and would
