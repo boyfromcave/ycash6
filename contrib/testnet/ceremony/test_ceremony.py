@@ -57,6 +57,7 @@ class FakeNode:
         self.txs = {}
         self.keys = 0
         self.sets = {}
+        self.mine_keys, self.builds, self.locked, self.host_builds = set(), {}, set(), {}
 
     def add_block(self):
         self.height += 1
@@ -110,13 +111,39 @@ class FakeNode:
             self.keys += 1
             return "tmSeat%d" % self.keys
         if method == "validateaddress":
-            return {"pubkey": "02" + hhash("pk", params[0])}
+            pub = "02" + hhash("pk", params[0])
+            self.mine_keys.add(pub)
+            return {"pubkey": pub, "ismine": True}
         if method == "set_join":
             assert self.height + 1 <= int(params[2]) < 500_000_000, "bondlocktime must be a height from the next block (set_join, rpc/vault.cpp)"
+            if params[3] not in self.mine_keys:
+                raise cm.CeremonyError("set_join: memberkey is not a key in this wallet")
             txid = hhash("join", len(self.txs))
             self.txs[txid] = {"height": None, "join": params[0], "bond": params[1]}
             self.balance -= Decimal(params[1])
             return {"txid": txid, "memberkey": params[3], "bondoutpoint": txid + ":0", "complete": True}
+        if method == "set_buildact":                         # any member key: the join funded, unsigned
+            assert params[0] == "join"
+            p = params[1]
+            n = len(self.builds)
+            self.builds["unsigned%d" % n] = {"join": p["setid"], "bond": p["bondamount"], "key": p["memberkey"], "coin": "c%d" % n}
+            return {"hex": "unsigned%d" % n, "type": "join", "complete": False, "signatures": 0, "required": 1}
+        if method == "decoderawtransaction":
+            return {"vin": [{"txid": self.builds[params[0].replace("signed-", "")]["coin"], "vout": 0}]}
+        if method == "lockunspent":
+            self.locked.update(i["txid"] for i in params[1])
+            return True
+        if method == "set_signact":                          # on a seat host: its own member keys only
+            b = self.host_builds[params[0]]
+            if b["key"] not in self.mine_keys:
+                return {"hex": params[0], "complete": False, "signatures": 0, "required": 1}
+            return {"hex": "signed-" + params[0], "complete": False, "signatures": 1, "required": 1}
+        if method == "set_sendact":
+            assert params[0].startswith("signed-") and Decimal(str(params[1]["allowoutflow"])) >= Decimal(self.builds[params[0][7:]]["bond"])
+            txid = hhash("join", len(self.txs))
+            self.txs[txid] = {"height": None, "join": self.builds[params[0][7:]]["join"], "bond": self.builds[params[0][7:]]["bond"]}
+            self.balance -= Decimal(self.builds[params[0][7:]]["bond"])
+            return txid
         if method == "dumpprivkey":
             return "cWIF-" + params[0]
         raise AssertionError("unexpected RPC %s" % method)
@@ -154,17 +181,17 @@ class CeremonyTest(unittest.TestCase):
         self.assertEqual(release["UPGRADE_VAULT.nActivationHeight"], 510400)
         setid = release["attestorSetId"]
         self.assertEqual(node.sets[setid], {"seats": 15, "unlockthreshold": 1, "cancelthreshold": 1, "slashthreshold": 1, "open": True,
-                                            "ratelimitbps": 0, "livenesswindow": 1152, "maturity": 48, "bondmin": 10, "bondlockmin": 0})
+                                            "ratelimitbps": 0, "livenesswindow": 1152, "maturity": 48, "bondmin": 20, "bondlockmin": 0})
         self.assertEqual(record["attestor_set"]["height"], 510400)                 # created in the activation block
-        self.assertEqual(release["houseSeats"], 7)                                   # T-5
+        self.assertEqual(release["houseSeats"], 9)                                   # beta4 D-1
         last_join = max(s["height"] for s in record["house_seats"])
         self.assertGreaterEqual(record["checkpoint"]["height"], last_join + 48)
         self.assertEqual(release["checkpoint"], "%d:%s" % (record["checkpoint"]["height"], record["checkpoint"]["hash"]))
-        self.assertEqual(release["checkpointChainTx"], 717489 + (record["checkpoint"]["height"] - 510247) + 8)   # coinbases + set + 7 joins
+        self.assertEqual(release["checkpointChainTx"], 717489 + (record["checkpoint"]["height"] - 510247) + 10)   # coinbases + set + 9 joins
         self.assertEqual(node.calls.count("setgenerate") % 2, 0)                    # every start is matched by a stop
         self.assertNotIn("gettransaction", node.calls)                              # acts are not wallet transactions (CI, both lines)
         files = sorted(os.listdir(self.secrets))
-        self.assertEqual(len(files), 7)
+        self.assertEqual(len(files), 9)
         for name in files:
             self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.secrets, name)).st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(os.stat(self.secrets).st_mode), 0o700)
@@ -177,7 +204,7 @@ class CeremonyTest(unittest.TestCase):
         again = self.run_ceremony("testnet-yb-fast", node)
         self.assertEqual(node.calls.count("set_create"), creates)
         self.assertEqual(again["release"]["attestorSetId"], setid)
-        self.assertEqual(len(os.listdir(self.secrets)), 7)
+        self.assertEqual(len(os.listdir(self.secrets)), 9)
 
     def test_legacy_is_fork_only(self):
         profile = cm.ybprofile.load("testnet-legacy")
@@ -215,7 +242,7 @@ class CeremonyTest(unittest.TestCase):
         node.heights["ab" * 32] = 510247
         with self.assertRaisesRegex(cm.CeremonyError, "compiled checkpoint"):
             self.run_ceremony("testnet-yb-fast", node)
-        poor = FakeNode(fast, vault=510400, balance=Decimal("25"))       # 7 seats x 10 YEC need ~70
+        poor = FakeNode(fast, vault=510400, balance=Decimal("25"))       # 9 seats x 20 YEC need ~180
         with self.assertRaisesRegex(cm.CeremonyError, "fund it and re-run"):
             self.run_ceremony("testnet-yb-fast", poor)
         self.assertIn("set_create", poor.calls)                                       # the set exists; the record kept it
@@ -224,7 +251,7 @@ class CeremonyTest(unittest.TestCase):
         poor.balance = Decimal("100000")
         record = self.run_ceremony("testnet-yb-fast", poor)
         self.assertEqual(poor.calls.count("set_create"), 1)
-        self.assertEqual(record["release"]["houseSeats"], 7)
+        self.assertEqual(record["release"]["houseSeats"], 9)
 
     def test_no_mine_waits(self):
         fast = cm.ybprofile.load("testnet-yb-fast")
@@ -232,6 +259,72 @@ class CeremonyTest(unittest.TestCase):
         node.generating = True                       # another operator's blocks arrive
         self.run_ceremony("testnet-yb-fast", node, steps=("fork", "record"), mine=False)
         self.assertNotIn("setgenerate", node.calls)
+
+    def member_keys(self, hosts):
+        path = os.path.join(self.tmp, "member-keys.json")
+        with open(path, "w") as f:
+            json.dump({"hosts": hosts}, f)
+        return path
+
+    def test_member_keys_born_on_hosts(self):
+        """C-T7 (D-1): nine seats, three hosts, the keys born there; no private key reaches the ceremony."""
+        fast = cm.ybprofile.load("testnet-yb-fast")
+        node = FakeNode(fast, vault=510400)
+        hosts = {h: FakeNode(fast) for h in "abc"}
+        for i, h in enumerate("abc"):
+            hosts[h].keys = 100 * (i + 1)                                             # distinct wallets, distinct addresses
+        keys = {h: [cm.host_key(hosts[h])["memberkey"] for _ in range(3)] for h in "abc"}
+        for h in "abc":
+            hosts[h].mine_keys = set(keys[h])
+        path = self.member_keys(keys)
+        handoff = os.path.join(self.tmp, "joins")
+        with self.assertRaisesRegex(cm.CeremonyError, "9 join\\(s\\) wait for their host"):
+            self.run_ceremony("testnet-yb-fast", node, member_keys=path, handoff=handoff, keydir=None)
+        self.assertNotIn("dumpprivkey", node.calls)
+        self.assertNotIn("getnewaddress", node.calls)
+        self.assertEqual(len(node.locked), 9)                                         # each build's coins kept out of the next
+        joins = sorted(n for n in os.listdir(handoff) if n.endswith(".join.json"))
+        self.assertEqual(len(joins), 9)
+        # a re-run before the hosts sign builds nothing new
+        with self.assertRaisesRegex(cm.CeremonyError, "wait for their host"):
+            self.run_ceremony("testnet-yb-fast", node, steps=("seats",), member_keys=path, handoff=handoff, keydir=None)
+        self.assertEqual(len(node.builds), 9)
+        for name in joins:
+            with open(os.path.join(handoff, name)) as f:
+                join = json.load(f)
+            host = hosts[join["host"]]
+            for other in "abc":                                                       # every host refuses another host's seat
+                hosts[other].host_builds[join["hex"]] = node.builds[join["hex"]]
+            wrong = hosts["b" if join["host"] != "b" else "a"]
+            with self.assertRaisesRegex(cm.CeremonyError, "not a key of this wallet"):
+                cm.host_sign(wrong, "testnet-yb-fast", os.path.join(handoff, name))
+            cm.host_sign(host, "testnet-yb-fast", os.path.join(handoff, name))
+        record = self.run_ceremony("testnet-yb-fast", node, steps=("seats", "mature", "record"), member_keys=path, handoff=handoff, keydir=None)
+        self.assertEqual(record["release"]["houseSeats"], 9)
+        self.assertNotIn("pending_joins", record)
+        seats = record["house_seats"]
+        self.assertEqual([s["seat"] for s in seats], list(range(1, 10)))
+        self.assertEqual([s["host"] for s in seats], list("abc" * 3))               # round robin: host a holds seats 1, 4, 7
+        self.assertEqual(sorted(s["memberkey"] for s in seats), sorted(sum(keys.values(), [])))
+        self.assertFalse(os.path.exists(self.secrets))                               # no key file anywhere on the ceremony host
+        self.assertNotIn("dumpprivkey", node.calls)
+
+    def test_member_keys_refusals(self):
+        fast = cm.ybprofile.load("testnet-yb-fast")
+        k = lambda i: "02" + "%064x" % i
+        good = {"a": [k(1), k(2), k(3)], "b": [k(4), k(5), k(6)], "c": [k(7), k(8), k(9)]}
+        self.assertEqual(len(cm.load_member_keys(self.member_keys(good), 9)), 9)
+        for hosts, why in ((dict(good, c=[k(7), k(8), k(1)]), "listed twice"),
+                           (dict(good, c=[k(7), k(8)]), "same number"),
+                           (dict(good, c=[k(7), k(8), "04" + "00" * 32]), "compressed public key"),
+                           ({"a": good["a"], "b": good["b"]}, "lists 6 member keys")):
+            with self.assertRaisesRegex(cm.CeremonyError, why):
+                cm.load_member_keys(self.member_keys(hosts), 9)
+        with self.assertRaisesRegex(cm.CeremonyError, "not a .* join of"):
+            path = os.path.join(self.tmp, "x.join.json")
+            with open(path, "w") as f:
+                json.dump({"format": "ycash-ceremony/1-join", "network": "testnet-yb-slow"}, f)
+            cm.host_sign(FakeNode(fast), "testnet-yb-fast", path)
 
     def test_secrets_never_inside_a_repository(self):
         repo = os.path.join(self.tmp, "repo")
@@ -250,6 +343,61 @@ class CeremonyTest(unittest.TestCase):
         self.assertEqual([cm.CliRPC.arg(v) for v in ("abc", 7, Decimal("10.5"), True, {"a": 1})], ["abc", "7", "10.5", "true", '{"a": 1}'])
         rpc = cm.CliRPC("ycash-cli", "/d", cm.ybprofile.load("testnet-yb-slow"), conf="/d/c.conf", rpcport=5)
         self.assertEqual(rpc.argv, ["ycash-cli", "-datadir=/d", "-conf=/d/c.conf", "-testnet", "-testnetprofile=slow", "-rpcport=5"])
+
+
+
+class GapScanTest(unittest.TestCase):
+    """C-T6: the gap scan's block reader (no node)."""
+
+    SETID = "ab" * 31 + "cd"
+
+    @staticmethod
+    def act(kind, setid):
+        body = bytes.fromhex(setid)[::-1] + bytes(33)
+        payload = b"YV\x01" + bytes([kind]) + body
+        return {"scriptPubKey": {"hex": "6a" + ("4c%02x" % len(payload) if len(payload) > 75 else "%02x" % len(payload)) + payload.hex()}}
+
+    def block(self, height, coinbase="03aabbcc", txs=()):
+        tx = [{"txid": hhash("cb", height), "vin": [{"coinbase": coinbase}], "vout": []}]
+        return {"height": height, "tx": tx + list(txs)}
+
+    def test_acts_and_tags(self):
+        own_create = {"txid": self.SETID, "vin": [], "vout": [{"scriptPubKey": {"hex": "6a4c44" + (b"YV\x01\x01" + bytes(64)).hex()}}]}
+        join = {"txid": hhash("join"), "vin": [], "vout": [{"scriptPubKey": {"hex": "76a914" + "00" * 20 + "88ac"}}, self.act(0x02, self.SETID)]}
+        other = {"txid": hhash("other"), "vin": [], "vout": [self.act(0x06, "11" * 32)]}
+        remove = {"txid": hhash("remove"), "vin": [], "vout": [self.act(0x04, self.SETID)]}
+        self.assertEqual([f["kind"] for f in cm.scan_block(self.block(5, txs=[own_create, join, other]), self.SETID)], ["SET_CREATE", "SET_JOIN"])
+        self.assertEqual(cm.scan_block(self.block(6, txs=[remove]), self.SETID)[0]["kind"], "SET_REMOVE")
+        self.assertEqual([f["kind"] for f in cm.scan_block(self.block(7, coinbase="03aabbcc24594544210100"), self.SETID)], ["tag-v1"])
+        self.assertEqual([f["kind"] for f in cm.scan_block(self.block(8, coinbase="03aabbcc31594544210200"), self.SETID)], ["tag-v2"])
+        self.assertEqual(cm.scan_block(self.block(9, coinbase="0359454421"), self.SETID), [])   # "YED!" without the push byte
+
+    def test_known_txids_and_scan(self):
+        join = {"txid": hhash("join"), "vin": [], "vout": [self.act(0x02, self.SETID)]}
+        foreign = {"txid": hhash("foreign"), "vin": [], "vout": [self.act(0x02, self.SETID)]}
+        blocks = {10: self.block(10, txs=[join]), 11: self.block(11, txs=[foreign]), 12: self.block(12)}
+
+        class Rpc:
+            def call(self, method, *p):
+                return ("h%d" % p[0]) if method == "getblockhash" else blocks[int(p[0][1:])]
+        known = cm.record_txids({"release": {"attestorSetId": self.SETID}, "seats": [{"txid": join["txid"]}]})
+        own, findings = cm.gap_scan(Rpc(), self.SETID, 10, 12, known, log=lambda m: None)
+        self.assertEqual([f["txid"] for f in own], [join["txid"]])
+        self.assertEqual([(f["height"], f["kind"]) for f in findings], [(11, "SET_JOIN")])
+
+    def test_every_act_kind(self):
+        # the module refuses SET_WINDDOWN, a foreign SET_REMOVE (state.cpp RefusedAttestorSetAct) and a SET_JOIN below
+        # BondMinZat or displacing into a full set (state.cpp ACT_SET_JOIN); HEARTBEAT and EQUIVOCATION change seats too
+        self.assertEqual(sorted(cm.ACT_NAMES), [1, 2, 3, 4, 5, 6])   # src/vault/act.h ActType
+        for kind in range(2, 7):
+            tx = {"txid": hhash("act", kind), "vin": [], "vout": [self.act(kind, self.SETID)]}
+            self.assertEqual([f["kind"] for f in cm.scan_block(self.block(20, txs=[tx]), self.SETID)], [cm.ACT_NAMES[kind]])
+
+    def test_first_push(self):
+        self.assertEqual(cm.first_push("6a03aabbcc"), bytes.fromhex("aabbcc"))
+        self.assertEqual(cm.first_push("6a4c03aabbcc"), bytes.fromhex("aabbcc"))
+        self.assertIsNone(cm.first_push("76a9"))
+        self.assertIsNone(cm.first_push("6a05aa"))
 
 
 if __name__ == "__main__":

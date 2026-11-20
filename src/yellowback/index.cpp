@@ -193,6 +193,7 @@ bool YellowbackIndex::ApplyOne(const CBlock& block, int height, const uint256& h
     if (err.has_value()) {
         db->Discard();
         error = err.value();
+        refusedBlock = true;            // ApplyBlock fails only on a block the module refuses
         return false;
     }
     if (height < params.startHeight) return true; // nothing happened

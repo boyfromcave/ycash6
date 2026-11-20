@@ -8,7 +8,7 @@ The launch ceremony's regtest rehearsal (testnet plan §2.2, §3.2), the same on
 
 `contrib/testnet/ceremony/ceremony rehearse` mines a regtest prefix, bundles it with
 ycash-bootstrap, restores it into two operator nodes, runs the ceremony on them (the fork block,
-the vault upgrade, the YED attestor set, seven house seats, their maturity, the record) and syncs
+the vault upgrade, the YED attestor set, nine house seats (keys born on node 2), their maturity, the record) and syncs
 a fresh rc1-like node that starts with the recorded set. This test runs it for the fast profile
 and for legacy (the fork alone) and checks the machine-readable record.
 """
@@ -56,14 +56,17 @@ class TestnetCeremonyTest(BitcoinTestFramework):
         assert_equal(record["fork"]["height"], 51)
         assert_equal(release["UPGRADE_YCASH.hashActivationBlock"], record["fork"]["hash"])
         assert_equal(release["UPGRADE_VAULT.nActivationHeight"], 51 + 152)
-        assert_equal(release["houseSeats"], 7)
+        assert_equal(release["houseSeats"], 9)   # beta4 D-1
         assert_equal(record["attestor_set"]["params"]["ratelimitbps"], 0)
         assert_equal(record["attestor_set"]["height"], 51 + 152)
         assert record["checkpoint"]["height"] >= max(s["height"] for s in record["house_seats"]) + record["attestor_set"]["params"]["maturity"]
         checks = record["rehearsal"]["rc1_node"]["checks"]
         assert all(checks.values()), checks
-        secrets = os.listdir(os.path.join(out, "secrets"))
-        assert_equal(len(secrets), 7)
+        # C-T7: the seat keys are born on the hosts, so the ceremony writes no key file; it holds only public keys
+        secrets = os.path.join(out, "secrets")
+        assert_equal(os.listdir(secrets) if os.path.isdir(secrets) else [], [])
+        with open(os.path.join(out, "member-keys.json")) as f:
+            assert_equal(sum(len(v) for v in json.load(f)["hosts"].values()), 9)
         with open(os.path.join(out, "ceremony-rehearsal.json")) as f:
             assert "wif" not in f.read()
 

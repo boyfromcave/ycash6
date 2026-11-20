@@ -32,9 +32,10 @@ src/vault/node.h 5ab9e85217a0d6cef5b19a8d6f195323c31aaec18bcd37acda15a4ebae3c1e7
 # Header split: util/system.h, util/strencodings.h. The invariant audit also
 # re-derives openDebtCents (HALT-2, 2026-10-28) on both lines; pins updated then.
 # ParamsFromArgs takes the testnet profile (testnet plan Revision 3, 2026-10-29)
-# on both lines; pins updated then.
-src/yellowback/index.cpp 996754238cfd57fcc97456d3fd9f7ba52376604ed5e700d43c69da908322246c 2147fff4db7f22d9047de93ffc47cd0c7f88d74a56dfa2f00bc1b1112b1bf0f6
-src/yellowback/index.h 201780ca78cbabd2c6e74e6a338b66602b683b1f9cad8b11985c23d9a7bc0135 41c8096c20b9b856098ad2a645f9fff72d146f8129524ace9bc176ccbef63634
+# on both lines; pins updated then. RefusedBlock() (beta4 C-T5, the fail-closed startup
+# replay) on both lines; pins updated then.
+src/yellowback/index.cpp c3d613c09bc5692e7a7b69ec7305a8952a497ddaba23020099ae157791487c94 f7e2b9bb43dd1f2db1b5c3fbb15aea425e280d29c4c9eab3c55a06939ab25080
+src/yellowback/index.h 6cabf3b89600cb741c8f96ffb1e3b3e274dd3bbe894b01bdfbb79dfd3c66fc45 5fe6cbb8e9242160a30cfba96a054aedca851fbc2d450a2aa94b1811a7c27aeb
 
 # Comment only: DEFAULT_YELLOWBACK_FEE still 1000; the note names the 6.20.0
 # P-2 rule max(-yellowbackfee, ZIP-317 conventional fee). TestFastParams is

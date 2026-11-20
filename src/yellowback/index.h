@@ -313,6 +313,8 @@ public:
     IndexAudit VerifyIndex();
     /** True for the rest of the session when SyncToChain was interrupted (shutdown requested mid-replay). */
     bool WasInterrupted() const { return interrupted; }
+    /** True when SyncToChain stopped at a block the module refuses (ApplyBlock): a reindex replays the same block. */
+    bool RefusedBlock() const { return refusedBlock; }
 
     /**
      * Shutdown: every later hook returns at once without touching the state. Fail closed: a
@@ -515,6 +517,7 @@ private:
     std::atomic<bool> stopped;   //!< read without cs_yellowback by the notifier hooks and the YED wallet thread
     bool rebuilt;
     bool interrupted;
+    bool refusedBlock = false;
 
     MinerConfig miner;
     PayeePolicy payeePolicy;

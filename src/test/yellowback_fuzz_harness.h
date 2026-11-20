@@ -267,9 +267,15 @@ inline int RunEvaluate(const std::vector<unsigned char>& data)
         overlay.Commit();
     }
     UndoRecord undo;
-    ApplyBlock(base, P, block, height, blockHash, 625000000, undo);
-    if (!(viaOverlay == base)) return -2;
-    if (!(SerializeRecord(undo) == SerializeRecord(ev.undo))) return -2;
+    const bool refused = ApplyBlock(base, P, block, height, blockHash, 625000000, undo).has_value();
+    if (refused != ev.blockInvalid) return -2;
+    if (ev.blockInvalid) {
+        // an invalid block is never applied, not even in part (U-21, BLK-1): base untouched, no undo
+        if (!(base == before) || !undo.entries.empty()) return -2;
+    } else {
+        if (!(viaOverlay == base)) return -2;
+        if (!(SerializeRecord(undo) == SerializeRecord(ev.undo))) return -2;
+    }
     // (iii) an invalid block names its verdict (U-21; -3 was the retired enforcement-flag property)
     if (ev.blockInvalid && (ev.verdict.empty() || ev.reason.empty())) return -3;
     // (iv), given a consistent seed
