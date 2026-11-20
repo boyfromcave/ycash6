@@ -1973,6 +1973,13 @@ std::optional<std::string> ApplyBlock(StateView& view, const Params& params, con
 {
     OverlayStateView overlay(view);
     BlockEvaluation ev = EvaluateBlock(overlay, params, block, height, blockHash, subsidyZat, cache);
+    if (ev.blockInvalid) {
+        // BLK-1: a block the module refuses is never applied, not even in part. The startup replay meets one when
+        // the chain holds a block accepted while YED was inert (a set act in the gap before a release names the
+        // set, beta4 price-feed plan C-T5): it fails closed instead of stopping the index below the tip as healthy.
+        overlay.Discard();
+        return "block " + std::to_string(height) + " " + blockHash.ToString() + " is invalid under the Yellowback module (bad-yellowback-" + ev.reason + ")";
+    }
     overlay.Commit();
     undo = ev.undo;
     return std::nullopt;

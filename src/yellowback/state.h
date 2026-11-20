@@ -189,9 +189,9 @@ BlockEvaluation EvaluateBlock(OverlayStateView& overlay, const Params& params, c
 
 /**
  * EvaluateBlock over an overlay of `view`, then Commit(): the block is
- * applied to `view` and `undo` receives the inverse. Returns nullopt (the
- * v2 machine has no failure mode; the optional is kept for the index's
- * storage layer, which reports its own errors).
+ * applied to `view` and `undo` receives the inverse. Returns nullopt, or,
+ * for a block the module refuses (BlockEvaluation::blockInvalid), the reason,
+ * with `view` untouched.
  */
 std::optional<std::string> ApplyBlock(StateView& view, const Params& params, const CBlock& block, int height,
                                       const uint256& blockHash, CAmount subsidyZat, UndoRecord& undo, SigCache* cache = nullptr);

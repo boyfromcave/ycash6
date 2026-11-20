@@ -25,10 +25,11 @@ node 3, still without the id, mines:
   - join:     a SET_JOIN with a 1 YEC bond (below the module's BondMinZat; state.cpp SET_JOIN refusal);
   - remove:   a SET_REMOVE of a member signed by another member (the module refuses a foreign remove);
   - winddown: a SET_WINDDOWN of the set (the module refuses it).
-Node 3 accepts each block, and after a restart with the id (in place) still holds it at its chain tip, while
-its YED index, rebuilt from H_V with the module live, stops one block below it. Node 4 (the fresh-sync
-verdict) refuses it (submitblock), so the chain splits; node 3 then invalidates the block and the
-next case starts from the same tip. A gap scan that finds any such act reruns the ceremony with a new set.
+Node 3 accepts each block; restarted with the id (in place), it refuses to start: its YED index, rebuilt
+from H_V with the module live, cannot apply the block at its chain tip (state.cpp ApplyBlock fails closed;
+before that fix the index stopped one block below the tip and yed_getinfo still said healthy). Node 4 (the
+fresh-sync verdict) refuses the block (submitblock), so the chain splits; node 3 then invalidates the block
+and the next case starts from the same tip. A gap scan that finds any such act reruns the ceremony with a new set.
 
     ZCASHD=<ycashd> (BITCOIND=<ycashd> on v4.5.0) .venv/bin/python -u qa/rpc-tests/yellowback_set_gap.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
@@ -39,6 +40,7 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     VAULT_BRANCH_ID,
     assert_equal,
+    assert_start_raises_init_error,
     connect_nodes_bi,
     nuparams,
     start_node,
@@ -186,17 +188,15 @@ class YellowbackSetGapTest(BitcoinTestFramework):
             gap = miner.getbestblockhash()
             height = miner.getblockcount()
             raw = miner.getblock(gap, False)
-            # the in-place verdict: node 3 restarted with the id keeps the block it accepted while YED was inert
-            # at its chain tip; its YED index, rebuilt from H_V with the module live, stops below that block
+            # the in-place verdict: node 3 restarted with the id holds the block it accepted while YED was inert at
+            # its chain tip; its YED index, rebuilt from H_V with the module live, cannot apply it, so it does not start
             self.stop(GAP_MINER)
-            self.start(GAP_MINER, setid)
-            assert_equal(self.nodes[GAP_MINER].getbestblockhash(), gap)
-            info = self.wait_index_settled(GAP_MINER)
-            assert_equal((info['chainHeight'], info['height']), (height, height - 1))
+            assert_start_raises_init_error(GAP_MINER, self.options.tmpdir, self.node_args(GAP_MINER, setid),
+                                           'is invalid under the Yellowback module (bad-yellowback-')
             # the fresh-sync verdict: node 4, live from the set's creation, refuses it
             verdict = self.nodes[GAP_FRESH].submitblock(raw)
-            print('    in place: block %d kept at the chain tip, YED index at %d (healthy %s); fresh sync: submitblock -> %r'
-                  % (height, info['height'], info['healthy'], verdict))
+            print('    in place: block %d at the chain tip, the node refuses to start with the id; fresh sync: submitblock -> %r'
+                  % (height, verdict))
             assert verdict not in (None, 'duplicate', 'inconclusive'), verdict
             assert_equal(self.nodes[GAP_FRESH].getbestblockhash(), base)
             assert_equal(self.nodes[GAP_FRESH].getblock(gap)['confirmations'], -1)
@@ -205,23 +205,12 @@ class YellowbackSetGapTest(BitcoinTestFramework):
             # back to the shared tip for the next case: node 3 without the set again (-yellowback=0: its datadir now
             # holds a YED index), the gap block invalidated, and a restart that drops the act from its wallet and
             # mempool (-zapwallettxes=2: the join pays this wallet, which would otherwise rebroadcast it)
-            self.stop(GAP_MINER)
             self.start(GAP_MINER, off=True)
+            assert_equal(self.nodes[GAP_MINER].getbestblockhash(), gap)
             self.nodes[GAP_MINER].invalidateblock(gap)
             self.stop(GAP_MINER)
             self.start(GAP_MINER, off=True, extra=['-zapwallettxes=2'])
             assert_equal(self.nodes[GAP_MINER].getrawmempool(), [])
-
-    def wait_index_settled(self, i, timeout=120):
-        """yed_getinfo once the index has stopped moving (two equal reads a second apart)."""
-        deadline, last = time.time() + timeout, None
-        while True:
-            info = self.nodes[i].yed_getinfo()
-            if last is not None and (info['height'], info['blockhash']) == (last['height'], last['blockhash']):
-                return info
-            assert time.time() < deadline, 'index still moving: %r' % info
-            last = info
-            time.sleep(1)
 
     def gap_act(self, case, setid, keys):
         n = self.nodes[GAP_MINER]
