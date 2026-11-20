@@ -345,5 +345,52 @@ class CeremonyTest(unittest.TestCase):
         self.assertEqual(rpc.argv, ["ycash-cli", "-datadir=/d", "-conf=/d/c.conf", "-testnet", "-testnetprofile=slow", "-rpcport=5"])
 
 
+
+class GapScanTest(unittest.TestCase):
+    """C-T6: the gap scan's block reader (no node)."""
+
+    SETID = "ab" * 31 + "cd"
+
+    @staticmethod
+    def act(kind, setid):
+        body = bytes.fromhex(setid)[::-1] + bytes(33)
+        payload = b"YV\x01" + bytes([kind]) + body
+        return {"scriptPubKey": {"hex": "6a" + ("4c%02x" % len(payload) if len(payload) > 75 else "%02x" % len(payload)) + payload.hex()}}
+
+    def block(self, height, coinbase="03aabbcc", txs=()):
+        tx = [{"txid": hhash("cb", height), "vin": [{"coinbase": coinbase}], "vout": []}]
+        return {"height": height, "tx": tx + list(txs)}
+
+    def test_acts_and_tags(self):
+        own_create = {"txid": self.SETID, "vin": [], "vout": [{"scriptPubKey": {"hex": "6a4c44" + (b"YV\x01\x01" + bytes(64)).hex()}}]}
+        join = {"txid": hhash("join"), "vin": [], "vout": [{"scriptPubKey": {"hex": "76a914" + "00" * 20 + "88ac"}}, self.act(0x02, self.SETID)]}
+        other = {"txid": hhash("other"), "vin": [], "vout": [self.act(0x06, "11" * 32)]}
+        remove = {"txid": hhash("remove"), "vin": [], "vout": [self.act(0x04, self.SETID)]}
+        self.assertEqual([f["kind"] for f in cm.scan_block(self.block(5, txs=[own_create, join, other]), self.SETID)], ["SET_CREATE", "SET_JOIN"])
+        self.assertEqual(cm.scan_block(self.block(6, txs=[remove]), self.SETID)[0]["kind"], "SET_REMOVE")
+        self.assertEqual([f["kind"] for f in cm.scan_block(self.block(7, coinbase="03aabbcc24594544210100"), self.SETID)], ["tag-v1"])
+        self.assertEqual([f["kind"] for f in cm.scan_block(self.block(8, coinbase="03aabbcc31594544210200"), self.SETID)], ["tag-v2"])
+        self.assertEqual(cm.scan_block(self.block(9, coinbase="0359454421"), self.SETID), [])   # "YED!" without the push byte
+
+    def test_known_txids_and_scan(self):
+        join = {"txid": hhash("join"), "vin": [], "vout": [self.act(0x02, self.SETID)]}
+        foreign = {"txid": hhash("foreign"), "vin": [], "vout": [self.act(0x02, self.SETID)]}
+        blocks = {10: self.block(10, txs=[join]), 11: self.block(11, txs=[foreign]), 12: self.block(12)}
+
+        class Rpc:
+            def call(self, method, *p):
+                return ("h%d" % p[0]) if method == "getblockhash" else blocks[int(p[0][1:])]
+        known = cm.record_txids({"release": {"attestorSetId": self.SETID}, "seats": [{"txid": join["txid"]}]})
+        own, findings = cm.gap_scan(Rpc(), self.SETID, 10, 12, known, log=lambda m: None)
+        self.assertEqual([f["txid"] for f in own], [join["txid"]])
+        self.assertEqual([(f["height"], f["kind"]) for f in findings], [(11, "SET_JOIN")])
+
+    def test_first_push(self):
+        self.assertEqual(cm.first_push("6a03aabbcc"), bytes.fromhex("aabbcc"))
+        self.assertEqual(cm.first_push("6a4c03aabbcc"), bytes.fromhex("aabbcc"))
+        self.assertIsNone(cm.first_push("76a9"))
+        self.assertIsNone(cm.first_push("6a05aa"))
+
+
 if __name__ == "__main__":
     unittest.main()

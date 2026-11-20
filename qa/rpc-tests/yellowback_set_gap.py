@@ -31,9 +31,15 @@ before that fix the index stopped one block below the tip and yed_getinfo still 
 fresh-sync verdict) refuses the block (submitblock), so the chain splits; node 3 then invalidates the block
 and the next case starts from the same tip. A gap scan that finds any such act reruns the ceremony with a new set.
 
+The gap scan (C-T6, contrib/testnet/ceremony/ceremony gap-scan) runs over both chains: on part 1's it finds the
+set's creation and joins (the ceremony's own acts) and nothing else; on part 2's it reports each gap act.
+
     ZCASHD=<ycashd> (BITCOIND=<ycashd> on v4.5.0) .venv/bin/python -u qa/rpc-tests/yellowback_set_gap.py --srcdir=<src> --tmpdir=<dir> --portseed=<n>
 """
 
+import importlib.machinery
+import importlib.util
+import os
 import time
 
 from test_framework.test_framework import BitcoinTestFramework
@@ -60,6 +66,18 @@ LOW_BOND = 1                   # YEC: below the module's minimum (regtest bondMi
 MEMBERS = 3
 MINER, INPLACE, FRESH = 0, 1, 2
 GAP_MINER, GAP_FRESH = 3, 4
+GAP_KINDS = {'join': 'SET_JOIN', 'remove': 'SET_REMOVE', 'winddown': 'SET_WINDDOWN'}
+
+
+def load_ceremony():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'contrib', 'testnet', 'ceremony', 'ceremony')
+    loader = importlib.machinery.SourceFileLoader('ceremony', path)
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(module)
+    return module
+
+
+ceremony = load_ceremony()
 
 
 class YellowbackSetGapTest(BitcoinTestFramework):
@@ -117,13 +135,20 @@ class YellowbackSetGapTest(BitcoinTestFramework):
         created = n.set_create(dict(ATTESTOR_SET_SPEC, **params))
         self.mine_tx(i, created['txid'], peers)
         keys = []
+        self.acts = {created['txid']}
         for _ in range(MEMBERS):
             joined = n.set_join(created['setid'], BOND, n.getblockcount() + 1)
             assert_equal(joined['complete'], True)
             keys.append(joined['memberkey'])
+            self.acts.add(joined['txid'])
             self.mine_tx(i, joined['txid'], peers)
         self.mine(i, BOND_MATURITY + 2, peers)
         return created['setid'], keys
+
+    def gap_scan(self, i, setid):
+        """C-T6 over node i's chain from H_V: (the ceremony's own acts, findings)."""
+        return ceremony.gap_scan(ceremony.ProxyRPC(self.nodes[i]), setid, ACT, self.nodes[i].getblockcount(),
+                                 frozenset(self.acts), log=lambda m: None)
 
     def views(self, i):
         n = self.nodes[i]
@@ -142,6 +167,10 @@ class YellowbackSetGapTest(BitcoinTestFramework):
         assert_equal(self.nodes[INPLACE].vault_getinfo().get('attestorsetid'), None)
         setid, keys = self.create_set(MINER, (INPLACE,))
         assert setid not in (None, '')
+        own, findings = self.gap_scan(MINER, setid)
+        assert_equal(findings, [])
+        assert_equal(sorted(f['kind'] for f in own), ['SET_CREATE'] + ['SET_JOIN'] * MEMBERS)
+        print('    gap scan %d..%d: %d ceremony acts, clean' % (ACT, self.nodes[MINER].getblockcount(), len(own)))
 
         print('C-T4 2. nodes 0 and 1 restart with the id (in place); node 2 syncs fresh with it')
         for i in (MINER, INPLACE):
@@ -188,6 +217,9 @@ class YellowbackSetGapTest(BitcoinTestFramework):
             gap = miner.getbestblockhash()
             height = miner.getblockcount()
             raw = miner.getblock(gap, False)
+            own, findings = self.gap_scan(GAP_MINER, setid)
+            assert_equal(findings, [{'height': height, 'txid': txid, 'kind': GAP_KINDS[case]}])
+            assert_equal(len(own), 1 + MEMBERS)
             # the in-place verdict: node 3 restarted with the id holds the block it accepted while YED was inert at
             # its chain tip; its YED index, rebuilt from H_V with the module live, cannot apply it, so it does not start
             self.stop(GAP_MINER)

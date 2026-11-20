@@ -9,6 +9,7 @@
     ceremony rehearse --profile fast|slow|legacy --dir DIR [--bitcoind src/ycashd] [--cli src/ycash-cli]
     ceremony host-key --network N --datadir DIR                     (on a seat host: a member key born there)
     ceremony host-sign --network N --datadir DIR --join FILE        (on a seat host: sign that seat's join)
+    ceremony gap-scan --network N --datadir DIR --setid ID [--record FILE] [--from H] [--to H]   (C-T6)
 
 A new testnet needs values that only exist after it has started: the hash of its fork block
 (UPGRADE_YCASH's hashActivationBlock), the txid of its YED attestor set's SET_CREATE (the
@@ -35,6 +36,15 @@ Steps (`--steps`, default all that apply; every step is safe to re-run, the reco
   mature  mine until every house seat is past the set maturity
   record  pick the checkpoint (the tip) and write the release values: the fork hash, the attestor
           set id, the checkpoint with its time, chain work and transaction count
+
+gap-scan (beta4 price-feed plan §3.3, C-T6, done-criterion C-5): the set is created before the release that
+names it, and nodes upgraded in place keep every block of that gap while a node that syncs fresh judges them
+with the module live. The scan reads every block from --from (default the profile's Vault height, 510,400 on
+the fast testnet) to --to (default the tip) and reports each `YV` act naming --setid (SET_JOIN, HEARTBEAT,
+REMOVE, EQUIVOCATION, WINDDOWN; and the SET_CREATE itself) and each coinbase scriptSig carrying a v1
+(`24 59 45 44 21`) or v2 (`31 59 45 44 21`) tag pattern. With --record, the acts whose txids the ceremony
+record holds (the set's creation and the house seats' joins) are the ceremony's own; any other act, or any
+tag pattern, is a finding: exit 1, and the ceremony is rerun with a new set. Exit 0 = a clean gap.
 
 testnet-legacy has no Yellowback: check, fork, record. testnet-yb-slow launches the same way
 (its Vault height comes with a later rc, T-15); once a build sets it, the set steps run.
@@ -728,8 +738,133 @@ def rehearse_argv(argv):
     return out
 
 
+# ---------------------------------------------------------------------------------- the gap scan (C-T6)
+
+ACT_NAMES = {0x01: "SET_CREATE", 0x02: "SET_JOIN", 0x03: "SET_HEARTBEAT", 0x04: "SET_REMOVE", 0x05: "SET_EQUIVOCATION",
+             0x06: "SET_WINDDOWN"}                     # src/vault/act.h ActType
+TAG_PATTERNS = {"v1": "2459454421", "v2": "3159454421"}   # push 36 / push 49 + "YED!" (yellowback/tag.cpp FindTag)
+
+
+def first_push(script_hex):
+    """The data of the first push after OP_RETURN in a scriptPubKey (hex), or None."""
+    try:
+        b = bytes.fromhex(script_hex)
+    except ValueError:
+        return None
+    if len(b) < 2 or b[0] != 0x6a:
+        return None
+    op, i = b[1], 2
+    if op <= 0x4b:
+        n = op
+    elif op == 0x4c and len(b) >= 3:
+        n, i = b[2], 3
+    elif op == 0x4d and len(b) >= 4:
+        n, i = int.from_bytes(b[2:4], "little"), 4
+    else:
+        return None
+    return b[i:i + n] if len(b) >= i + n else None
+
+
+def scan_block(block, setid):
+    """The findings of one verbose block (getblock <hash> 2): acts naming `setid` and coinbase tag patterns."""
+    target = bytes.fromhex(setid)[::-1]   # a SetId is pushed as its 32 internal bytes (vault/template.h)
+    found = []
+    for n, tx in enumerate(block.get("tx", [])):
+        if n == 0:
+            for vin in tx.get("vin", []):
+                sig = vin.get("coinbase", "")
+                for version, pattern in sorted(TAG_PATTERNS.items()):
+                    if pattern in sig.lower():
+                        found.append({"height": block["height"], "txid": tx["txid"], "kind": "tag-" + version})
+            continue
+        for vout in tx.get("vout", []):
+            data = first_push(vout.get("scriptPubKey", {}).get("hex", ""))
+            if data is None or len(data) < 4 or data[:3] != b"YV\x01" or data[3] not in ACT_NAMES:
+                continue
+            names = tx["txid"] == setid if data[3] == 0x01 else data[4:36] == target
+            if names:
+                found.append({"height": block["height"], "txid": tx["txid"], "kind": ACT_NAMES[data[3]]})
+    return found
+
+
+def record_txids(record):
+    """Every 64-hex string a ceremony record holds (the set's creation and the seats' joins)."""
+    out = set()
+
+    def walk(v):
+        if isinstance(v, dict):
+            for x in v.values():
+                walk(x)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x)
+        elif isinstance(v, str) and len(v) == 64 and all(c in HEX_DIGITS for c in v):
+            out.add(v)
+    walk(record)
+    return out
+
+
+def gap_scan(rpc, setid, start, stop, known=frozenset(), log=print):
+    """Scan blocks start..stop; return (the ceremony's own acts, findings)."""
+    own, findings = [], []
+    for h in range(start, stop + 1):
+        block = rpc.call("getblock", rpc.call("getblockhash", h), 2)
+        for f in scan_block(block, setid):
+            (own if f["kind"].startswith("SET_") and f["txid"] in known else findings).append(f)
+        if (h - start) % 5000 == 0:
+            log("gap-scan: height %d of %d" % (h, stop))
+    return own, findings
+
+
+def gap_scan_main(argv):
+    ap = argparse.ArgumentParser(prog="ceremony gap-scan")
+    ap.add_argument("--network", required=True, choices=list(ybprofile.NETWORKS))
+    ap.add_argument("--datadir", required=True)
+    ap.add_argument("--conf")
+    ap.add_argument("--rpcport", type=int)
+    ap.add_argument("--cli")
+    ap.add_argument("--setid", help="the attestor set id (default: the --record's release.attestorSetId)")
+    ap.add_argument("--record", help="the ceremony record: its txids are the ceremony's own acts")
+    ap.add_argument("--from", dest="start", type=int, help="first height (default: the profile's Vault height)")
+    ap.add_argument("--to", dest="stop", type=int, help="last height (default: the tip)")
+    ap.add_argument("--json", action="store_true", help="print the result as JSON")
+    a = ap.parse_args(argv)
+    profile = ybprofile.load(a.network)
+    rpc = CliRPC(a.cli or shutil.which("ycash-cli") or os.path.join(REPO, "src", "ycash-cli"), a.datadir, profile, a.conf, a.rpcport)
+    record = {}
+    if a.record:
+        with open(a.record) as f:
+            record = json.load(f)
+    setid = a.setid or (record.get("release") or {}).get("attestorSetId")
+    start = a.start if a.start is not None else profile["vault_height"]
+    try:
+        if not setid or len(setid) != 64 or any(c not in HEX_DIGITS for c in setid):
+            raise CeremonyError("no set id (--setid, or a --record with release.attestorSetId)")
+        if start is None:
+            raise CeremonyError("%s has no Vault height: pass --from" % a.network)
+        stop = a.stop if a.stop is not None else rpc.call("getblockcount")
+        own, findings = gap_scan(rpc, setid, start, stop, record_txids(record),
+                                 log=lambda m: print(m, file=sys.stderr))
+    except CeremonyError as e:
+        print("ceremony gap-scan: stopped: %s" % e, file=sys.stderr)
+        return 2
+    result = {"setid": setid, "from": start, "to": stop, "ceremony": own, "findings": findings, "clean": not findings}
+    if a.json:
+        print(canonical(result), end="")
+    else:
+        for f in own:
+            print("ceremony %-16s %d %s" % (f["kind"], f["height"], f["txid"]))
+        for f in findings:
+            print("FINDING  %-16s %d %s" % (f["kind"], f["height"], f["txid"]))
+        print("gap-scan %d..%d: %d ceremony act(s), %d finding(s): %s" % (start, stop, len(own), len(findings),
+              "clean" if not findings else "rerun the ceremony with a new set"))
+    return 0 if not findings else 1
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["gap-scan"]:
+        return gap_scan_main(argv[1:])
     if argv[:1] == ["rehearse"]:
         argv = rehearse_argv(argv[1:])
     if argv[:1] in (["host-key"], ["host-sign"]):

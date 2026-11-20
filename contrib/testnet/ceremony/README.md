@@ -78,6 +78,22 @@ the proof of work is Equihash 192,7 at minimum difficulty for the fork block; a 
 slowly, so the operators may instead point a GPU miner at yolo beside the node and run the
 script with `--no-mine`, which only waits. Every wait counts blocks, never seconds.
 
+### The gap scan (beta4, C-T6)
+
+The set exists before the release that names it. Nodes upgraded in place keep the blocks of that gap; a
+node that syncs fresh judges them with the module live, so a foreign `SET_REMOVE`, a `SET_WINDDOWN` or a
+below-minimum `SET_JOIN` in the gap splits the chain (and an upgraded node refuses to start on it), and a
+coinbase tag pattern there becomes a tag record. Before tagging the release:
+
+```sh
+contrib/testnet/ceremony/ceremony gap-scan --network testnet-yb-fast --datadir DIR --record ceremony-testnet-yb-fast.json
+```
+
+It reads every block from the profile's Vault height (510,400; `--from`, `--to` to narrow) and lists each
+`YV` act naming the set and each coinbase carrying `24 59 45 44 21` (tag v1) or `31 59 45 44 21` (tag v2).
+Acts whose txids the record holds are the ceremony's own; anything else is a finding (exit 1): rerun the
+ceremony with a new set. Exit 0 is done-criterion C-5. `--json` prints the result as JSON.
+
 ### The record (`ycash-ceremony/1`)
 
 Canonical JSON (sorted keys, two-space indent). The `release` object is what the rc compiles:
