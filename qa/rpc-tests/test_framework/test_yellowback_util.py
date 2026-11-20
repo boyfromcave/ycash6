@@ -142,6 +142,20 @@ class MintLayoutTests(unittest.TestCase):
         self.assertEqual(tx.lock_time, 0)
         self.assertEqual(len(node.signed), 1)
 
+    def test_layout_with_a_post_quantum_fee_payee(self):
+        # tag v2 (rpcversion 11): a plain post-quantum payee is paid to its TX_PQPKH, 20 <hash> OP_1|OP_2 OP_CHECKPQSIG
+        for version, scheme in ((bytes.fromhex('4c54ef'), 2), (bytes.fromhex('4c5655'), 1)):   # regtest rqf / rqs
+            key_hash = bytes(range(32))
+            addr = ym.base58check_encode(version + key_hash)
+            spk = yu._spk_of_address(addr)
+            self.assertEqual(spk, ym.pqpkh_script(bytes([scheme]) + key_hash))
+            self.assertEqual(ym.payee_of_script(spk), bytes([scheme]) + key_hash)
+            node, collateral, tx, owner = self.build(addr)
+            self.assertEqual(tx.vout[3].script, spk)
+        # a P2PKH address keeps its P2PKH script
+        p2pkh = yu.address_of(yu.POOL_WIFS[0])
+        self.assertEqual(yu._spk_of_address(p2pkh), ym.p2pkh_script(ym.address_key_hash(p2pkh)))
+
     def test_layout_without_fee(self):
         node, collateral, tx, owner = self.build(None)
         self.assertEqual(len(tx.vout), 4)
