@@ -62,8 +62,11 @@ class TestnetCeremonyTest(BitcoinTestFramework):
         assert record["checkpoint"]["height"] >= max(s["height"] for s in record["house_seats"]) + record["attestor_set"]["params"]["maturity"]
         checks = record["rehearsal"]["rc1_node"]["checks"]
         assert all(checks.values()), checks
-        secrets = os.listdir(os.path.join(out, "secrets"))
-        assert_equal(len(secrets), 7)
+        # C-T7: the seat keys are born on the hosts, so the ceremony writes no key file; it holds only public keys
+        secrets = os.path.join(out, "secrets")
+        assert_equal(os.listdir(secrets) if os.path.isdir(secrets) else [], [])
+        with open(os.path.join(out, "member-keys.json")) as f:
+            assert_equal(sum(len(v) for v in json.load(f)["hosts"].values()), 9)
         with open(os.path.join(out, "ceremony-rehearsal.json")) as f:
             assert "wif" not in f.read()
 
