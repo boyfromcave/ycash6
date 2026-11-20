@@ -7,6 +7,8 @@
 
     ceremony --network testnet-yb-fast --datadir DIR [--conf FILE] --secrets DIR [--out FILE] [--steps ...]
     ceremony rehearse --profile fast|slow|legacy --dir DIR [--bitcoind src/ycashd] [--cli src/ycash-cli]
+    ceremony host-key --network N --datadir DIR                     (on a seat host: a member key born there)
+    ceremony host-sign --network N --datadir DIR --join FILE        (on a seat host: sign that seat's join)
 
 A new testnet needs values that only exist after it has started: the hash of its fork block
 (UPGRADE_YCASH's hashActivationBlock), the txid of its YED attestor set's SET_CREATE (the
@@ -24,8 +26,12 @@ Steps (`--steps`, default all that apply; every step is safe to re-run, the reco
   set     create the YED attestor set: OPEN, 15 seats, unlock/cancel/slash 1, ratelimitbps 0
           (P8 checklist), maturity = the network's BOND_MATURITY (the module adopts no other), the
           profile's livenesswindow; once only: a recorded set is verified, never created again
-  seats   join the house seats (T-5: fast 7, slow 3) with fresh wallet keys; each seat's key goes
-          to --secrets (outside any git repository, mode 0600), never into the record
+  seats   join the house seats (fast 9 on 3 hosts, D-1; slow 3). With --member-keys (the beta4
+          ceremony, C-T7) each seat's key is born on the host that will hold it (`host-key`): the
+          ceremony builds each SET_JOIN unsigned (set_buildact) into --handoff, the host adds the member's
+          signature (`host-sign`), and a re-run of this step funds and sends it, so no private key
+          ever leaves its host. Without --member-keys the ceremony wallet makes the keys and writes
+          each to --secrets (outside any git repository, mode 0600), never into the record
   mature  mine until every house seat is past the set maturity
   record  pick the checkpoint (the tip) and write the release values: the fork hash, the attestor
           set id, the checkpoint with its time, chain work and transaction count
@@ -72,6 +78,7 @@ STEPS = ("check", "fork", "vault", "set", "seats", "mature", "record")
 FAST_VAULT_DISTANCE = 510400 - 510248   # testnet-yb-fast's fork-to-Vault distance, which slow's rehearsal borrows
 SET_SEATS = 15                 # the module adopts only an OPEN set of 15 seats (yellowback/module.cpp AdoptedSet)
 FEE_MARGIN = Decimal("0.01")   # per join, on top of the bond, when checking the balance
+MEMBER_KEY_HEX = "0123456789abcdef"
 
 
 class CeremonyError(Exception):
@@ -110,6 +117,43 @@ def write_secret(path, value):
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(canonical(value))
+
+
+def is_member_key(key):
+    """A compressed secp256k1 public key, 66 lowercase hex (the attestor hosts' seats.json form)."""
+    return isinstance(key, str) and len(key) == 66 and key[:2] in ("02", "03") and all(c in MEMBER_KEY_HEX for c in key)
+
+
+def load_member_keys(path, seats):
+    """The public member keys born on the seat hosts (C-T7, D-1): {"hosts": {"a": [key, ...], ...}}.
+    Every key a compressed public key, no key twice (one key per seat, never a key on two hosts), the
+    same number on every host, `seats` in all. Returns the seats in join order: round robin over the
+    hosts (a, b, c, a, ...), so host a holds seats 1, 4, 7 (seq 0, 3, 6)."""
+    with open(path, encoding="utf-8") as f:
+        doc = json.load(f)
+    hosts = doc.get("hosts") if isinstance(doc, dict) else None
+    if not isinstance(hosts, dict) or not hosts:
+        raise CeremonyError("%s: expected {\"hosts\": {\"<host>\": [\"<member key>\", ...]}}" % path)
+    seen = {}
+    for host, keys in sorted(hosts.items()):
+        if not isinstance(keys, list):
+            raise CeremonyError("%s: host %s: expected a list of member keys" % (path, host))
+        for key in keys:
+            if not is_member_key(key):
+                raise CeremonyError("%s: host %s: %r is not a compressed public key (66 hex)" % (path, host, key))
+            if key in seen:
+                raise CeremonyError("%s: member key %s is listed twice (hosts %s and %s): one key per seat, held by one host" % (path, key, seen[key], host))
+            seen[key] = host
+    counts = sorted(set(len(k) for k in hosts.values()))
+    if len(counts) != 1:
+        raise CeremonyError("%s: the hosts hold %s keys: every host holds the same number of seats" % (path, {h: len(k) for h, k in sorted(hosts.items())}))
+    if len(seen) != seats:
+        raise CeremonyError("%s lists %d member keys; the ceremony joins %d house seats" % (path, len(seen), seats))
+    order = []
+    for i in range(counts[0]):
+        for host in sorted(hosts):
+            order.append({"seat": len(order) + 1, "host": host, "memberkey": hosts[host][i]})
+    return order
 
 
 # ---------------------------------------------------------------------------------- rpc
@@ -318,16 +362,15 @@ class Ceremony:
         say("set: the YED attestor set %s, created at %d" % (created["setid"], self.record["attestor_set"]["height"]))
 
     def step_seats(self):
+        if getattr(self.opts, "member_keys", None):
+            return self.step_seats_born()
         setid = self.record["attestor_set"]["setid"]
         joined = self.record.setdefault("house_seats", [])
         need = self.seats - len(joined)
         if need <= 0:
             say("seats: %d house seats already joined" % len(joined))
             return
-        balance = Decimal(str(self.call("getbalance")))
-        if balance < need * (self.bond + FEE_MARGIN):
-            raise CeremonyError("the wallet holds %s YEC; %d more house seats need %s (bond %s each): fund it and re-run --steps seats,mature,record"
-                                % (balance, need, need * (self.bond + FEE_MARGIN), self.bond))
+        self.check_balance(need)
         keydir = prepare_secrets(self.opts.keydir)
         for _ in range(need):
             seat = len(joined) + 1
@@ -343,10 +386,104 @@ class Ceremony:
                           "wif": self.call("dumpprivkey", address), "bondoutpoint": joined_tx.get("bondoutpoint")})
             joined.append({"seat": seat, "memberkey": pubkey, "txid": joined_tx["txid"], "height": None})
             self.save()
+        self.confirm_seats(joined)
+        say("seats: %d house seats joined (their key files: see --secrets)" % len(joined))
+
+    def check_balance(self, need):
+        balance = Decimal(str(self.call("getbalance")))
+        if balance < need * (self.bond + FEE_MARGIN):
+            raise CeremonyError("the wallet holds %s YEC; %d more house seats need %s (bond %s each): fund it and re-run --steps seats,mature,record"
+                                % (balance, need, need * (self.bond + FEE_MARGIN), self.bond))
+
+    def confirm_seats(self, joined):
         for record in joined:
             if record["height"] is None:
                 record["height"] = self.confirmed_height(record["txid"])
-        say("seats: %d house seats joined (their key files: see --secrets)" % len(joined))
+
+    def handoff_dir(self):
+        path = self.opts.handoff or os.path.join(os.path.dirname(self.out), "%s-joins" % self.p["name"])
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def step_seats_born(self):
+        """C-T7: the seats' member keys were born on their hosts; only the public keys reach the ceremony.
+        Per seat: build the SET_JOIN unsigned (the member's signature missing) into --handoff; once the
+        host's signed copy is there, fund and send it from the ceremony wallet. Re-run until all are sent."""
+        setid = self.record["attestor_set"]["setid"]
+        order = load_member_keys(self.opts.member_keys, self.seats)
+        joined = self.record.setdefault("house_seats", [])
+        pending = self.record.setdefault("pending_joins", {})
+        recorded = {s["memberkey"]: s for s in joined}
+        for want in order:
+            have = recorded.get(want["memberkey"])
+            if have and (have["seat"], have.get("host")) != (want["seat"], want["host"]):
+                raise CeremonyError("member key %s joined as seat %d (host %s); --member-keys now names it seat %d (host %s)"
+                                    % (want["memberkey"], have["seat"], have.get("host"), want["seat"], want["host"]))
+        if len(joined) >= self.seats:
+            say("seats: %d house seats already joined" % len(joined))
+            return
+        handoff = self.handoff_dir()
+        self.check_balance(sum(1 for w in order if w["memberkey"] not in recorded))
+        waiting = []
+        for want in order:
+            if want["memberkey"] in recorded:
+                continue
+            seat, key = want["seat"], want["memberkey"]
+            base = os.path.join(handoff, "%s-seat-%d-%s" % (self.p["name"], seat, want["host"]))
+            entry = pending.get(str(seat))
+            if entry and os.path.exists(base + ".signed.json"):
+                with open(base + ".signed.json", encoding="utf-8") as f:
+                    signed = json.load(f)
+                if (signed.get("setid"), signed.get("seat"), signed.get("memberkey")) != (setid, seat, key):
+                    raise CeremonyError("%s.signed.json is not seat %d's join (set %s, key %s)" % (base, seat, setid, key))
+                txid = self.call("set_sendact", signed["hex"], {"allowoutflow": self.bond + FEE_MARGIN})
+                if not isinstance(txid, str) or len(txid) != 64:
+                    raise CeremonyError("set_sendact for seat %d: %s" % (seat, txid))
+                joined.append({"seat": seat, "host": want["host"], "memberkey": key, "txid": txid,
+                               "bondoutpoint": "%s:0" % txid, "height": None})
+                del pending[str(seat)]
+                self.save()
+                say("seats: seat %d (host %s) sent, %s" % (seat, want["host"], txid))
+                continue
+            if not entry:
+                # set_buildact (set_join refuses a key its wallet lacks): the funded, unsigned join, remembered
+                # by this wallet so that set_sendact signs exactly its coins; the bond is vout 0
+                built = self.call("set_buildact", "join", {"setid": setid, "bondamount": self.bond,
+                                                             "bondlocktime": self.tip() + 1, "memberkey": key})
+                if built.get("complete") or not built.get("hex") or int(built.get("signatures", 0)) != 0:
+                    raise CeremonyError("set_buildact join for seat %d: expected an unsigned join, got %s" % (seat, built))
+                self.lock_inputs(built["hex"])
+                entry = {"host": want["host"], "memberkey": key, "file": base + ".join.json"}
+                with open(base + ".join.json", "w", encoding="utf-8") as f:
+                    f.write(canonical({"format": FORMAT + "-join", "network": self.p["name"], "setid": setid, "seat": seat,
+                                       "host": want["host"], "memberkey": key, "bond": self.bond, "hex": built["hex"]}))
+                pending[str(seat)] = entry
+                self.save()
+            else:
+                self.lock_inputs(None, entry)
+            waiting.append("seat %d -> host %s: %s" % (seat, want["host"], entry["file"]))
+        if waiting:
+            raise CeremonyError("%d join(s) wait for their host's signature: on each host run `ceremony host-sign --network %s "
+                                "--datadir <its datadir> --join <file>`, bring <file minus .join.json>.signed.json back to %s and "
+                                "re-run --steps seats,mature,record:\n  %s" % (len(waiting), self.p["name"], handoff, "\n  ".join(waiting)))
+        self.record.pop("pending_joins", None)
+        self.confirm_seats(joined)
+        say("seats: %d house seats joined, keys born on %d hosts; no seat key was ever on this host"
+            % (len(joined), len(set(s["host"] for s in joined))))
+
+    def lock_inputs(self, hexstr, entry=None):
+        """Keep a pending join's coins out of the next build (the wallet's coin locks live in memory, so a
+        restart of the ceremony node forgets them; a pending join whose coin was spent fails at set_sendact
+        and is rebuilt after its entry is dropped)."""
+        if entry is not None:
+            with open(entry["file"], encoding="utf-8") as f:
+                hexstr = json.load(f)["hex"]
+        vin = [{"txid": i["txid"], "vout": i["vout"]} for i in self.call("decoderawtransaction", hexstr)["vin"] if "txid" in i]
+        if vin:
+            try:
+                self.call("lockunspent", False, vin)
+            except CeremonyError:
+                pass                    # already locked
 
     def step_mature(self):
         heights = [self.record["attestor_set"]["height"]] + [s["height"] for s in self.record.get("house_seats", [])]
@@ -394,6 +531,37 @@ class Ceremony:
         self.save()
         say("wrote %s" % self.out)
         return self.record
+
+
+# ---------------------------------------------------------------------------------- on a seat host (C-T7)
+
+def host_key(rpc):
+    """A fresh key of the seat host's own node wallet: its address and member key (public). The private key
+    never leaves that wallet; the host's operator sends the member key to the ceremony (--member-keys)."""
+    address = rpc.call("getnewaddress")
+    info = rpc.call("validateaddress", address)
+    if not info.get("ismine") or not is_member_key(info.get("pubkey")):
+        raise CeremonyError("validateaddress %s: not a wallet key with a compressed public key: %s" % (address, info))
+    return {"address": address, "memberkey": info["pubkey"]}
+
+
+def host_sign(rpc, network, path):
+    """Add the member's signature to the ceremony's unsigned SET_JOIN for this host's seat (set_signact: this
+    wallet's act signatures only, the inputs stay unsigned) and write <path minus .join.json>.signed.json.
+    Refused unless the join names this network and its member key is a key of this wallet."""
+    with open(path, encoding="utf-8") as f:
+        join = json.load(f)
+    if join.get("format") != FORMAT + "-join" or join.get("network") != network:
+        raise CeremonyError("%s is not a %s join of %s" % (path, FORMAT, network))
+    signed = rpc.call("set_signact", join["hex"], join["setid"])
+    if not isinstance(signed, dict) or not signed.get("hex") or signed["hex"] == join["hex"] or int(signed.get("signatures", 0)) < 1:
+        raise CeremonyError("set_signact added no signature: member key %s is not a key of this wallet (%s)" % (join["memberkey"], signed))
+    out = (path[:-len(".join.json")] if path.endswith(".join.json") else path) + ".signed.json"
+    value = dict(join, format=FORMAT + "-signed", hex=signed["hex"], signatures=int(signed["signatures"]))
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(canonical(value))
+    say("host-sign: seat %d (member key %s): the member's signature added; wrote %s" % (join["seat"], join["memberkey"][:16], out))
+    return out
 
 
 # ---------------------------------------------------------------------------------- the regtest rehearsal
@@ -466,7 +634,32 @@ def rehearse(opts):
         nodes = [a, b]
         ceremony = Ceremony(ProxyRPC(a), profile, opts, out, fork_height=fork, prefix_last=prefix_last, prefix_hash=prefix_hash,
                             sync=lambda: sync_blocks(nodes), rehearsal={"like": opts.like, "prefix_height": prefix_last})
-        record = ceremony.run()
+        seats = profile["yellowback"]["house_seats"] if like["yellowback"]["enabled"] else 0
+        if seats:
+            # C-T7: the seat keys are born on the seat hosts (here node2's wallet stands in for hosts a, b, c);
+            # only their public keys reach the ceremony on node1
+            hosts = ("a", "b", "c")
+            if seats % len(hosts):
+                raise CeremonyError("%d house seats do not split evenly over hosts %s" % (seats, ", ".join(hosts)))
+            keys = {h: [host_key(ProxyRPC(b))["memberkey"] for _ in range(seats // len(hosts))] for h in hosts}
+            opts.member_keys = os.path.join(base, "member-keys.json")
+            with open(opts.member_keys, "w", encoding="utf-8") as f:
+                f.write(canonical({"hosts": keys}))
+            opts.handoff = os.path.join(base, "joins")
+            try:
+                ceremony.run()
+                raise CeremonyError("the seats step did not wait for the hosts' signatures")
+            except CeremonyError as e:
+                if "wait for their host" not in str(e):
+                    raise
+                say("seats: %s" % str(e).split(":")[0])
+            sync_blocks(nodes)
+            for name in sorted(os.listdir(opts.handoff)):
+                if name.endswith(".join.json"):
+                    host_sign(ProxyRPC(b), profile["name"], os.path.join(opts.handoff, name))
+            record = ceremony.run(("set", "seats", "mature", "record"))
+        else:
+            record = ceremony.run()
         sync_blocks(nodes)
         # rc1: a fresh node with the set compiled in (on regtest: -yellowbackattestorset) syncs the whole history.
         setid = record["release"]["attestorSetId"]
@@ -482,8 +675,12 @@ def rehearse(opts):
             "checkpoint": c.getblockhash(record["checkpoint"]["height"]) == record["checkpoint"]["hash"],
         }
         if like["yellowback"]["enabled"]:
+            listed = set(r.get("attestorPubKey") for r in attestors)
             checks.update({"attestorsetid": info.get("attestorsetid") == setid, "moduleactive": info.get("moduleactive") is True,
-                           "house_seats_listed": len(attestors) == len(record.get("house_seats", []))})
+                           "house_seats_listed": len(attestors) == len(record.get("house_seats", [])),
+                           "house_keys_listed": listed == set(s["memberkey"] for s in record.get("house_seats", [])),
+                           # C-T7: no seat key was ever on the ceremony host (node1): nothing in its secrets dir
+                           "no_seat_key_on_ceremony_host": not os.path.isdir(opts.keydir) or not os.listdir(opts.keydir)})
         else:
             checks.update({"no_vault": int(info.get("activationheight", -1)) < 0, "no_attestor_set": setid is None})
         record["rehearsal"]["rc1_node"] = {"checks": checks, "attestors": [{k: r.get(k) for k in ("seq", "status", "bondZat")} for r in attestors],
@@ -535,6 +732,8 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
     if argv[:1] == ["rehearse"]:
         argv = rehearse_argv(argv[1:])
+    if argv[:1] in (["host-key"], ["host-sign"]):
+        return host_main(argv[0], argv[1:])
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0], epilog=__doc__.split("\n", 2)[2], formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--network", choices=[n for n in ybprofile.NETWORKS if n != "regtest"], help="the testnet to launch")
     ap.add_argument("--datadir", help="the ceremony node's -datadir")
@@ -543,6 +742,8 @@ def main(argv=None):
     ap.add_argument("--cli", help="ycash-cli (default: on PATH, else src/ycash-cli; a rehearsal: beside --ycashd)")
     ap.add_argument("--secrets", dest="keydir", help="directory for the house seats' keys: outside any git repository")
     ap.add_argument("--out", help="the ceremony record (default ./ceremony-<network>.json); re-runs continue from it")
+    ap.add_argument("--member-keys", dest="member_keys", help="C-T7: JSON {\"hosts\": {\"a\": [member key, ...], ...}} of the keys born on the seat hosts (`host-key`); the ceremony then never holds a seat key")
+    ap.add_argument("--handoff", help="with --member-keys: the directory of the unsigned joins and the hosts' signed copies (default: <out dir>/<network>-joins)")
     ap.add_argument("--steps", help="comma-separated subset of: " + ",".join(STEPS) + " (check always runs)")
     ap.add_argument("--no-mine", dest="mine", action="store_false", help="a testnet: wait for the other operators' blocks instead of setgenerate")
     ap.add_argument("--genproclimit", type=int, default=1)
@@ -562,8 +763,8 @@ def main(argv=None):
         if opts.rehearse:
             opts.poll = min(opts.poll, 0.5)
             return rehearse(opts)
-        if not (opts.network and opts.datadir and opts.keydir):
-            ap.error("a ceremony needs --network, --datadir and --secrets (or --rehearse)")
+        if not (opts.network and opts.datadir and (opts.keydir or opts.member_keys)):
+            ap.error("a ceremony needs --network, --datadir and --member-keys (or --secrets) (or --rehearse)")
         profile = ybprofile.load(opts.network)
         steps = None
         if opts.steps:
@@ -571,13 +772,38 @@ def main(argv=None):
             unknown = set(steps) - set(STEPS)
             if unknown:
                 ap.error("unknown steps: %s" % ", ".join(sorted(unknown)))
-        prepare_secrets(opts.keydir)
+        if opts.keydir:
+            prepare_secrets(opts.keydir)
         rpc = CliRPC(opts.cli or shutil.which("ycash-cli") or os.path.join(REPO, "src", "ycash-cli"), opts.datadir, profile, opts.conf, opts.rpcport)
         out = os.path.abspath(opts.out or "ceremony-%s.json" % opts.network)
         Ceremony(rpc, profile, opts, out).run(steps)
         return 0
     except CeremonyError as e:
         print("ceremony: stopped: %s" % e, file=sys.stderr)
+        return 2
+
+
+def host_main(command, argv):
+    """`ceremony host-key|host-sign`: on a seat host, against its own node (C-T7)."""
+    ap = argparse.ArgumentParser(prog="ceremony " + command)
+    ap.add_argument("--network", required=True, choices=list(ybprofile.NETWORKS))
+    ap.add_argument("--datadir", required=True)
+    ap.add_argument("--conf")
+    ap.add_argument("--rpcport", type=int)
+    ap.add_argument("--cli")
+    if command == "host-sign":
+        ap.add_argument("--join", required=True, help="the ceremony's <network>-seat-N-<host>.join.json")
+    a = ap.parse_args(argv)
+    profile = ybprofile.load(a.network)
+    rpc = CliRPC(a.cli or shutil.which("ycash-cli") or os.path.join(REPO, "src", "ycash-cli"), a.datadir, profile, a.conf, a.rpcport)
+    try:
+        if command == "host-key":
+            print(canonical(host_key(rpc)), end="")
+        else:
+            host_sign(rpc, a.network, a.join)
+        return 0
+    except CeremonyError as e:
+        print("ceremony %s: stopped: %s" % (command, e), file=sys.stderr)
         return 2
 
 

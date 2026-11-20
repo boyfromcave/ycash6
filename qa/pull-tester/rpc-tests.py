@@ -59,6 +59,8 @@ BASE_SCRIPTS= [
     'yellowback_attest_bond.py',
     'yellowback_attest_evict.py',
     'yellowback_attest_rejoin.py',
+    # beta4 C-T4/C-T5: the attestor set created before the release that names it (in-place rebuild vs fresh sync)
+    'yellowback_set_gap.py',
     'yellowback_attest_live.py',
     'yellowback_lifecycle.py',
     'yellowback_wallet_lifecycle.py',

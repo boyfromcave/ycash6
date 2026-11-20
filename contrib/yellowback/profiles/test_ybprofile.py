@@ -137,15 +137,16 @@ class ProfileTest(unittest.TestCase):
             livemin = value(section, "attestorLivenessMin") if "attestorLivenessMin" in section else value(main, "attestorLivenessMin")
             self.assertGreaterEqual(y["liveness_window"], livemin, network)
             floor = value(section, "bondMinFloorZat") if "bondMinFloorZat" in section else value(main, "bondMinFloorZat")
-            if network == "regtest":
-                self.assertEqual(y["house_bond_yec"], value(section, "bondMinCapZat"))
+            if network in ("regtest", "testnet-yb-fast"):     # fast: beta4 D-3, the cap (20 YEC)
+                cap = value(section, "bondMinCapZat") if "bondMinCapZat" in section else value(main, "bondMinCapZat")
+                self.assertEqual(y["house_bond_yec"], cap, network)
             else:
                 self.assertEqual(y["house_bond_yec"], floor, network)
             self.assertLessEqual(y["house_seats"], 15)
         self.assertFalse(ybprofile.load("testnet-legacy")["yellowback"]["enabled"])
         self.assertIsNone(ybprofile.load("testnet-legacy")["vault_height"])
         self.assertIsNone(ybprofile.load("testnet-yb-slow")["vault_height"])
-        self.assertEqual(ybprofile.load("testnet-yb-fast")["yellowback"]["house_seats"], 7)   # T-5
+        self.assertEqual(ybprofile.load("testnet-yb-fast")["yellowback"]["house_seats"], 9)   # beta4 D-1
         self.assertEqual(ybprofile.load("testnet-yb-slow")["yellowback"]["house_seats"], 3)   # T-5
 
 

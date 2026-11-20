@@ -57,6 +57,7 @@ identical qa/yellowback-ci-apt.sh
 identical qa/yellowback-index-profiles.py
 identical qa/rpc-tests/vault_activation_restart.py
 identical qa/rpc-tests/vault_prune_floor.py
+identical qa/rpc-tests/yellowback_set_gap.py
 identical qa/rpc-tests/stopatheight.py
 identical qa/rpc-tests/ycash_ydf_default.py
 identical qa/rpc-tests/ycash_ydf_mandate_end.py
