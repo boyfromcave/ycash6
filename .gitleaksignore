@@ -209,3 +209,6 @@ fc46118128a3518b02a788da984dc156c309aef6:doc/payment-disclosure.md:generic-api-k
 
 # contrib/yellowback/devnet/testnet_join.py (N2 join mode): the line builds ycash.conf text from a format string, "rpcpassword=%s" % password beside "rpcbind=127.0.0.1"; the password is random per devnet at run time, nothing is committed. Reshaped in the next commit.
 48cf2bfca1c77f3d14fbfdef3434665a7acb712c:contrib/yellowback/devnet/testnet_join.py:generic-api-key:99
+
+# contrib/testnet/ceremony/ceremony: the constant was the hex alphabet "0123456789abcdef" named MEMBER_KEY_HEX (a key-format check, not a key); renamed HEX_DIGITS in the next commit.
+81a9ca58fdc787324f9395b40e24af9b869c97b3:contrib/testnet/ceremony/ceremony:generic-api-key:81

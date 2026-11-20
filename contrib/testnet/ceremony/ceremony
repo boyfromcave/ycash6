@@ -78,7 +78,7 @@ STEPS = ("check", "fork", "vault", "set", "seats", "mature", "record")
 FAST_VAULT_DISTANCE = 510400 - 510248   # testnet-yb-fast's fork-to-Vault distance, which slow's rehearsal borrows
 SET_SEATS = 15                 # the module adopts only an OPEN set of 15 seats (yellowback/module.cpp AdoptedSet)
 FEE_MARGIN = Decimal("0.01")   # per join, on top of the bond, when checking the balance
-MEMBER_KEY_HEX = "0123456789abcdef"
+HEX_DIGITS = "0123456789abcdef"
 
 
 class CeremonyError(Exception):
@@ -121,7 +121,7 @@ def write_secret(path, value):
 
 def is_member_key(key):
     """A compressed secp256k1 public key, 66 lowercase hex (the attestor hosts' seats.json form)."""
-    return isinstance(key, str) and len(key) == 66 and key[:2] in ("02", "03") and all(c in MEMBER_KEY_HEX for c in key)
+    return isinstance(key, str) and len(key) == 66 and key[:2] in ("02", "03") and all(c in HEX_DIGITS for c in key)
 
 
 def load_member_keys(path, seats):
