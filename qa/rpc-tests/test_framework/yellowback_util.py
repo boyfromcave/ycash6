@@ -1127,6 +1127,12 @@ def restart_with_yellowback(test, node_indices, extra=None, yellowback_indices=N
 # Raw builders (section 3.5; N26, K18)
 
 def _spk_of_address(addr):
+    """The script an address is paid to: a plain post-quantum address (sqf/sqs, tqf/tqs, rqf/rqs; D-9)
+    gives its 35-byte TX_PQPKH (a tag v2 fee payee, rpcversion 11: the fee output of a MINT or a
+    REDEEM is the eligible payee's script), anything else the P2PKH of its trailing 20 bytes."""
+    payee = ym.address_payee(addr)
+    if payee is not None and payee[0] != ym.PAYEE_P2PKH:
+        return ym.payee_script(payee)
     return ym.p2pkh_script(ym.address_key_hash(addr))
 
 
