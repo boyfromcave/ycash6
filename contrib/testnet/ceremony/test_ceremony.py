@@ -385,6 +385,14 @@ class GapScanTest(unittest.TestCase):
         self.assertEqual([f["txid"] for f in own], [join["txid"]])
         self.assertEqual([(f["height"], f["kind"]) for f in findings], [(11, "SET_JOIN")])
 
+    def test_every_act_kind(self):
+        # the module refuses SET_WINDDOWN, a foreign SET_REMOVE (state.cpp RefusedAttestorSetAct) and a SET_JOIN below
+        # BondMinZat or displacing into a full set (state.cpp ACT_SET_JOIN); HEARTBEAT and EQUIVOCATION change seats too
+        self.assertEqual(sorted(cm.ACT_NAMES), [1, 2, 3, 4, 5, 6])   # src/vault/act.h ActType
+        for kind in range(2, 7):
+            tx = {"txid": hhash("act", kind), "vin": [], "vout": [self.act(kind, self.SETID)]}
+            self.assertEqual([f["kind"] for f in cm.scan_block(self.block(20, txs=[tx]), self.SETID)], [cm.ACT_NAMES[kind]])
+
     def test_first_push(self):
         self.assertEqual(cm.first_push("6a03aabbcc"), bytes.fromhex("aabbcc"))
         self.assertEqual(cm.first_push("6a4c03aabbcc"), bytes.fromhex("aabbcc"))

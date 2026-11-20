@@ -2521,6 +2521,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 LogPrintf("Shutdown requested. Exiting.\n");
                 return false;
             }
+            if (yellowback::g_yellowback->RefusedBlock()) {
+                // a reindex replays the same block: the chain holds a block the configured set's rules refuse
+                return InitError(strprintf(_("The Yellowback index could not be brought to the tip: %s. The active chain holds a block that is invalid under the Yellowback module for the configured attestor set; -reindex-yellowback replays the same block. The remedy is a new attestor set (rerun the ceremony), or a chain without that block."), yellowback::g_yellowback->UnhealthyReason()));
+            }
             return InitError(strprintf(_("The Yellowback index could not be brought to the tip: %s. Restart with -reindex-yellowback."), yellowback::g_yellowback->UnhealthyReason()));
         }
         RegisterValidationInterface(yellowback::g_yellowback);

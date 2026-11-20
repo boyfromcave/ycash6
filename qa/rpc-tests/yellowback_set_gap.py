@@ -216,27 +216,31 @@ class YellowbackSetGapTest(BitcoinTestFramework):
         self.stop(GAP_MINER)
         self.start(GAP_MINER)
 
-        for case in ('join', 'remove', 'winddown'):
+        # (case, blocks mined on top of the gap block): 'join-mid' leaves the gap act below the tip
+        for case, depth in (('join', 0), ('remove', 0), ('winddown', 0), ('join-mid', 3)):
             print('C-T5 2. gap case %s' % case)
             miner = self.nodes[GAP_MINER]
             assert_equal(miner.getbestblockhash(), base)
-            txid = self.gap_act(case, setid, keys)
+            txid = self.gap_act(case.split('-')[0], setid, keys)
             self.mine_tx(GAP_MINER, txid)
             gap = miner.getbestblockhash()
             height = miner.getblockcount()
             raw = miner.getblock(gap, False)
+            if depth:
+                self.mine(GAP_MINER, depth)
+                assert_equal(miner.getblockcount(), height + depth)
             own, findings = self.gap_scan(GAP_MINER, setid)
-            assert_equal(findings, [{'height': height, 'txid': txid, 'kind': GAP_KINDS[case]}])
+            assert_equal(findings, [{'height': height, 'txid': txid, 'kind': GAP_KINDS[case.split('-')[0]]}])
             assert_equal(len(own), 1 + MEMBERS)
             # the in-place verdict: node 3 restarted with the id holds the block it accepted while YED was inert at
             # its chain tip; its YED index, rebuilt from H_V with the module live, cannot apply it, so it does not start
             self.stop(GAP_MINER)
             assert_start_raises_init_error(GAP_MINER, self.options.tmpdir, self.node_args(GAP_MINER, setid),
-                                           'is invalid under the Yellowback module (bad-yellowback-')
+                                           'is invalid under the Yellowback module (bad-yellowback-')  # and names the remedy: a new attestor set
             # the fresh-sync verdict: node 4, live from the set's creation, refuses it
             verdict = self.nodes[GAP_FRESH].submitblock(raw)
-            print('    in place: block %d at the chain tip, the node refuses to start with the id; fresh sync: submitblock -> %r'
-                  % (height, verdict))
+            print('    in place: block %d (%d above it), the node refuses to start with the id; fresh sync: submitblock -> %r'
+                  % (height, depth, verdict))
             assert verdict not in (None, 'duplicate', 'inconclusive'), verdict
             assert_equal(self.nodes[GAP_FRESH].getbestblockhash(), base)
             assert_equal(self.nodes[GAP_FRESH].getblock(gap)['confirmations'], -1)
@@ -246,7 +250,7 @@ class YellowbackSetGapTest(BitcoinTestFramework):
             # holds a YED index), the gap block invalidated, and a restart that drops the act from its wallet and
             # mempool (-zapwallettxes=2: the join pays this wallet, which would otherwise rebroadcast it)
             self.start(GAP_MINER, off=True)
-            assert_equal(self.nodes[GAP_MINER].getbestblockhash(), gap)
+            assert_equal(self.nodes[GAP_MINER].getblockcount(), height + depth)
             self.nodes[GAP_MINER].invalidateblock(gap)
             self.stop(GAP_MINER)
             self.start(GAP_MINER, off=True, extra=['-zapwallettxes=2'])
