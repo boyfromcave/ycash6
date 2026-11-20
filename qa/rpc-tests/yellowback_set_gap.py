@@ -201,7 +201,15 @@ class YellowbackSetGapTest(BitcoinTestFramework):
         self.stop(GAP_FRESH)
         self.start(GAP_FRESH, setid)
         connect_nodes_bi(self.nodes, GAP_MINER, GAP_FRESH)
+        # node 4 judges node 3's blocks one by one (submitblock): the same fresh-sync verdict as P2P, and under
+        # the kogany harness (KOGANY_PEER=4) its follower, connected first, would otherwise be node 4's only
+        # header-sync peer while both sit at genesis, and the sync never starts
+        for h in range(self.nodes[GAP_FRESH].getblockcount() + 1, self.nodes[GAP_MINER].getblockcount() + 1):
+            raw_h = self.nodes[GAP_MINER].getblock(self.nodes[GAP_MINER].getblockhash(h), False)
+            assert self.nodes[GAP_FRESH].submitblock(raw_h) in (None, 'duplicate'), h
         self.sync((GAP_MINER, GAP_FRESH))
+        if kogany is not None:
+            kogany.current().sync_point([self.nodes[GAP_FRESH]], 'gap-fresh')   # the follower syncs from node 4
         assert_equal(self.views(GAP_FRESH)['tip'], base)
         assert_equal(len(self.nodes[GAP_FRESH].yed_listattestors()), MEMBERS)
         # the miner no longer relays to node 4: each gap block is handed over by submitblock
