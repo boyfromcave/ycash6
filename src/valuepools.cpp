@@ -110,7 +110,8 @@ std::optional<Record> GenesisRecord(const uint256& hash)
 //! caller holds cs
 std::optional<Record> ReadRecordLocked(const CBlockIndex* pindex)
 {
-    if (!pindex) return std::nullopt;
+    // A CBlockIndex built from a bare block (no map entry) has no hash pointer: no record.
+    if (!pindex || !pindex->phashBlock) return std::nullopt;
     const uint256 hash = pindex->GetBlockHash();
     if (!pindex->pprev) return GenesisRecord(hash);
     if (!db) return std::nullopt;
