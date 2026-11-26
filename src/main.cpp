@@ -9081,7 +9081,11 @@ bool static ProcessMessage(const CChainParams& chainparams, CNode* pfrom, string
             pfrom->AskFor(inv);
         }
         // TODO: currently, prohibit joinsplits and shielded spends/outputs/actions from entering mapOrphans
+        // Yugen (relay policy): nor a Yugen transaction. ProcessOrphanTx accepts an orphan outside any
+        // PeerVerifyScope, so its proofs would be verified with no token and no back-off. It is dropped
+        // like a shielded orphan: no ban, no back-off, its wtxid in recentRejects until the next tip.
         else if (fMissingInputs &&
+                 !tx.IsYugen() &&
                  tx.vJoinSplit.empty() &&
                  !tx.GetSaplingBundle().IsPresent() &&
                  !tx.GetOrchardBundle().IsPresent())

@@ -20,7 +20,9 @@ Node 0 builds the chain and the leaves; node 1 is fed blocks by hand and one P2P
 - a leaf whose helper run fails (a local fault, not a verdict) starts no back-off: the probe's next
   leaf is taken at once;
 - a guard: a leaf refused by the helper (a proof byte flipped) still starts the back-off, so the
-  probe's honest copy right after it is not judged.
+  probe's honest copy right after it is not judged;
+- a leaf whose transparent parent node 1 does not know is not kept as an orphan: orphans are accepted
+  outside any verification scope, so its proofs would be verified with no token and no back-off.
 """
 
 import json
@@ -35,7 +37,19 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal, p2p_port, rpc_auth_pair, rpc_port, start_nodes
 from tx_expiry_helper import TestNode
 from yugen_bundle import ARGS, HELPER, WALLET
-from yugen_strip import PROTO, msg_rawtx
+from yugen_strip import PROTO, compact, compact_read, msg_rawtx, strip_leaf_proofs
+
+
+def shrink_leaf_proofs(txhex, n):
+    """The leaf with each proof cut to its first n bytes: under the orphan pool's 100,000-byte limit,
+    and refused only by the helper."""
+    b = bytes.fromhex(txhex)
+    head = bytes.fromhex(strip_leaf_proofs(txhex))[:-2]
+    k, o = compact_read(b, len(head))
+    pa = b[o:o + k]
+    k, o = compact_read(b, o + k)
+    pb = b[o:o + k]
+    return (head + compact(n) + pa[:n] + compact(n) + pb[:n]).hex()
 
 
 class YugenStaleRelayTest(BitcoinTestFramework):
@@ -151,6 +165,33 @@ class YugenStaleRelayTest(BitcoinTestFramework):
         with open(os.path.join(self.options.tmpdir, 'node1', 'regtest', 'debug.log')) as f:
             log = f.read()
         assert re.search(r'Yugen tx %s from peer=\d+ deferred \(1 refusals in a row\)' % third, log), 'not deferred'
+
+        # 4. An orphan leaf: its parent (the deposit's funding) is in a block node 1 has not seen. An
+        # honest leaf is too large for the orphan pool anyway, so the probe sends a copy with short
+        # proofs, which only the helper refuses.
+        time.sleep(11)                                       # the guard's back-off (10 s) runs out
+        while (n0.getblockcount() + 1) % 16 == 0:            # the leaf's anchor must be one node 1 has
+            n0.generate(1)
+        self.feed()
+        fund = n0.sendtoaddress(dep, 2)
+        fund_hex = n0.gettransaction(fund)['hex']
+        n0.generate(1)
+        r = self.wallet('shield', json.dumps([fund]))
+        orphan = r if isinstance(r, str) else r['txid']
+        orphan_hex = n0.getrawtransaction(orphan)
+        assert fund in [i['txid'] for i in n0.decoderawtransaction(orphan_hex)['vin']]
+        probe.send_message(msg_rawtx(bytes.fromhex(shrink_leaf_proofs(orphan_hex, 1000))))
+        probe.sync_with_ping(timeout=120)
+        assert orphan not in n1.getrawmempool()
+        probe.send_message(msg_rawtx(bytes.fromhex(fund_hex)))
+        probe.sync_with_ping(timeout=120)
+        assert fund in n1.getrawmempool()
+        assert orphan not in n1.getrawmempool(), 'an orphan Yugen leaf was accepted outside any verification scope'
+        with open(os.path.join(self.options.tmpdir, 'node1', 'regtest', 'debug.log')) as f:
+            log = f.read()
+        assert 'stored orphan tx %s' % orphan not in log, 'a Yugen leaf was kept as an orphan'
+        assert 'verify %s' % orphan not in log, 'an orphan Yugen leaf reached the helper'
+        assert_equal(n1.getpeerinfo()[0].get('banscore', 0), 0)
 
 
 if __name__ == '__main__':

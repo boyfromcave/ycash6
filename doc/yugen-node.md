@@ -481,6 +481,15 @@ Tests: `qa/yugen/test_leafverify.py` (helper contract), helper unit test
   `bad-yugen-nullifier-spent`). Counting those deferred the peer's next real transaction by two
   minutes (spend_matrix `Mempool sync failed`).
   Tests: `Yugen.PeerVerifyBudgetFairShare`, `Yugen.RefusalBackoffDoubles`, rpc `yugen_stale_relay`.
+- Orphan Yugen transactions (high, relay policy): a leaf whose transparent input names a parent the
+  node does not know passed the cheap checks and stopped at the missing input, so it went to the
+  orphan pool; `ProcessOrphanTx` later accepts orphans outside any `PeerVerifyScope`, and the helper
+  verified its proofs with no token taken and no back-off. A Yugen transaction is no longer kept as
+  an orphan (`main.cpp`, beside the shielded exclusion): it is dropped with no ban and no back-off,
+  its wtxid in `recentRejects` until the next tip. An honest leaf (proofs of about 1.4 MB) is over
+  the orphan pool's 100,000-byte limit anyway; a copy with short proofs is not, and reached the
+  helper when its parent arrived. Test: rpc `yugen_stale_relay` (such a copy is not stored as an
+  orphan and never reaches the helper).
 - Helper retries (medium): `HELPER_RETRIES_MAX` (5) verifier failures of one block hash, then the
   block is no longer requested (`FindNextBlocksToDownload`) until a restart, with a log line; the
   same body (block hash and sidecar) failing a second time scores its sender 10 (`HELPER_SAME_BODY_DOS`), once
