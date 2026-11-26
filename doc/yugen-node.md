@@ -342,7 +342,12 @@ leaf way burns); test_bitcoin `yellowback_index_tests/tracks_at_parent_unknown_u
 `yugen_bundle_vb_module.py` (a block whose bundle deposits a token with a broken signature: an unhealthy
 index stops the node and the block is not invalid, the block connects with the deposit skipped, and
 `verifychain 4` passes over it; both failed before the fix). `-yellowbacktestfault=storage:mempool`
-(regtest) makes the next `MempoolCheck` fail, leaving the node running with an unhealthy index.
+(regtest) makes the next `MempoolCheck` fail, leaving the node running with an unhealthy index. Only a
+storage failure (`dbwrapper_error`) does that: any other exception while `MempoolCheck` or the template's
+`FilterTemplate` evaluates a transaction refuses that transaction (`yellowback-check-error`) or skips the
+candidate and leaves the index healthy, so a crafted peer transaction cannot make the next block stop the
+node (`-yellowbacktestfault=error:mempool`; test_bitcoin
+`yellowback_index_tests/mempool_non_storage_exception_refuses_without_unhealthy`).
 
 ## Review fixes (C-1, P-1, 2026-11-26)
 - C-1: `DecodeRecord` found a repeated deposit input by scanning the record's earlier inputs, quadratic

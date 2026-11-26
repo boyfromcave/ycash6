@@ -806,6 +806,55 @@ BOOST_AUTO_TEST_CASE(check_storage_fault_accepts_and_sets_unhealthy)
     BOOST_CHECK(live.index->SetTestFault("nonsense").has_value());
 }
 
+BOOST_AUTO_TEST_CASE(mempool_non_storage_exception_refuses_without_unhealthy)
+{
+    // A peer's transaction cannot stop the node: only a storage failure (dbwrapper_error) on the mempool path
+    // marks the index unhealthy (the next block then stops the node). Any other exception raised while
+    // evaluating a transaction refuses that transaction and leaves the index healthy.
+    Live live(pathTemp / "yb-mempool-nonstorage");
+    live.Activate();
+    live.MintActive();
+    const int ref = live.Tip() - 1;
+    const CTransaction mint(live.b->MintTx(10000, 48, ref));
+    BOOST_CHECK(live.index->MempoolCheck(mint));
+    BOOST_CHECK(!live.index->SetTestFault("error:mempool").has_value());
+    BOOST_CHECK_EQUAL(live.index->MempoolCheckReason(mint).value_or(""), "yellowback-check-error");
+    BOOST_CHECK(live.index->IsHealthy());
+    BOOST_CHECK(live.index->MempoolCheck(mint));                            // consumed: the next check runs normally
+    BOOST_CHECK(live.index->SetTestFault("error:mempool:5").has_value());   // takes no height
+
+    // Crafted input: every output script of a valid mint and of a vault spend truncated at each length and
+    // with each byte flipped, then garbage appended. Each is admitted or refused by a rule; none throws past
+    // the check and the index stays healthy.
+    CMutableTransaction spend = live.b->SpendTx(live.vault, ref, true, { COutPoint(live.vault, 1) }, (uint32_t)(ref + live.P.refWindow));
+    for (const CMutableTransaction& base : { CMutableTransaction(mint), spend }) {
+        for (size_t o = 0; o < base.vout.size(); o++) {
+            const CScript orig = base.vout[o].scriptPubKey;
+            std::vector<CScript> crafted;
+            for (size_t n = 0; n < orig.size(); n++) crafted.push_back(CScript(orig.begin(), orig.begin() + n));
+            for (size_t n = 0; n < orig.size(); n++) {
+                std::vector<unsigned char> b(orig.begin(), orig.end());
+                b[n] ^= 0xff;
+                crafted.push_back(CScript(b.begin(), b.end()));
+            }
+            std::vector<unsigned char> longer(orig.begin(), orig.end());
+            for (int i = 0; i < 300; i++) longer.push_back((unsigned char)(i * 37 + 11));
+            crafted.push_back(CScript(longer.begin(), longer.end()));
+            for (const CScript& c : crafted) {
+                CMutableTransaction m = base;
+                m.vout[o].scriptPubKey = c;
+                (void)live.index->MempoolCheckReason(CTransaction(m));
+            }
+        }
+    }
+    BOOST_CHECK(live.index->IsHealthy());
+
+    // A storage failure still marks the index unhealthy.
+    BOOST_CHECK(!live.index->SetTestFault("storage:mempool").has_value());
+    BOOST_CHECK_EQUAL(live.index->MempoolCheckReason(mint).value_or(""), "yellowback-unhealthy");
+    BOOST_CHECK(!live.index->IsHealthy());
+}
+
 // Rule: BLK-3
 BOOST_AUTO_TEST_CASE(commit_storage_fault_sets_unhealthy)
 {
