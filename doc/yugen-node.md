@@ -269,6 +269,13 @@ kogany will need the same rule when it implements VB records (record it in the k
 log until then). Tests: gtest `Yugen.BundleVbRecordsConnect` (a V-shaped record output, YED and other
 tag), `Yugen.BundleRecordInputTrackedByModule` (a token record input refused; the leaf way burns).
 
+## Review fixes (C-1, P-1, 2026-11-26)
+- C-1: `DecodeRecord` found a repeated deposit input by scanning the record's earlier inputs, quadratic
+  in the input count: ~53,000 inputs in a ~1.96 MB bundle took ~725 ms per decode, twice under `cs_main`
+  per relayed transaction. A set of the prevouts seen (yugen-ref `Bundle::decode`'s `BTreeSet`, per
+  record, the same `bundle-vin` verdict at the same input) makes it O(n log n). Test:
+  `Yugen.DecodeRecordManyInputsIsFast`.
+
 ## Known issues for beta4
 - **K-1, consensus, not built: withdrawal classification (§13.3.5, §15.6 B6 "applied").** A spec
   0.5.4 node classifies each withdrawal: queued if `G + a > K`, immediate if `a ≤ τ` (100 YEC) and

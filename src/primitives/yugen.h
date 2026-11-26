@@ -9,6 +9,7 @@
 #define YCASH_PRIMITIVES_YUGEN_H
 
 #include <array>
+#include <set>
 #include <functional>
 #include <cstdint>
 #include <optional>
@@ -187,14 +188,15 @@ inline bool DecodeRecord(const std::vector<unsigned char>& b, size_t& o, Transfe
     }
     if ((rc = ReadCompact(b, o, n))) return bad(rc, "bundle-vin");
     if (n == 0) return bad(2, "bundle-vin");
+    // A repeated prevout within the record, as yugen-ref's BTreeSet: O(n log n), not a scan (review C-1).
+    std::set<std::pair<std::array<uint8_t, 32>, uint32_t>> seen;
     for (uint64_t i = 0; i < n; i++) {
         if (b.size() - o < 36) return bad(1, "");
         RecordIn in;
         std::copy(b.begin() + o, b.begin() + o + 32, in.txid.begin());
         in.index = (uint32_t)le(o + 32, 4);
         o += 36;
-        for (const auto& e : t.vin)
-            if (e.txid == in.txid && e.index == in.index) return bad(2, "bundle-vin");
+        if (!seen.emplace(in.txid, in.index).second) return bad(2, "bundle-vin");
         if ((rc = ReadCompact(b, o, l))) return bad(rc, "bundle-vin");
         if (b.size() - o < l) return bad(1, "");
         in.scriptSig.assign(b.begin() + o, b.begin() + o + l);

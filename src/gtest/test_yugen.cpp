@@ -18,6 +18,7 @@
 
 #include <univalue.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -1231,4 +1232,39 @@ TEST(Yugen, RatchetAndOutflowCapVectors) {
     EXPECT_GT(ratchet, 0);
     EXPECT_GT(caps, 0);
     std::cout << "ratchet " << ratchet << ", outflow caps " << caps << " (" << windows << " with a window)" << std::endl;
+}
+
+TEST(Yugen, DecodeRecordManyInputsIsFast) {
+    // Review C-1: a deposit record of ~53,000 inputs (~1.96 MB, a full bundle) decodes in milliseconds;
+    // the quadratic duplicate scan it replaces took ~725 ms per decode. A repeated prevout is still `Vin`.
+    const size_t N = 53000;
+    std::vector<unsigned char> b{0x00, 0xfd, (uint8_t)(N & 0xff), (uint8_t)(N >> 8)};   // no outputs; N inputs
+    for (size_t i = 0; i < N; i++) {
+        std::array<uint8_t, 32> txid{};
+        txid[0] = i & 0xff; txid[1] = (i >> 8) & 0xff; txid[2] = (i >> 16) & 0xff;
+        b.insert(b.end(), txid.begin(), txid.end());
+        b.insert(b.end(), {0x00, 0x00, 0x00, 0x00, 0x00});   // index 0, an empty scriptSig
+    }
+    auto decode = [](const std::vector<unsigned char>& buf, yugen::Transfer& t, std::string& why) {
+        t.valueBalance = -1000;
+        size_t o = 0;
+        const bool ok = yugen::DecodeRecord(buf, o, t, why);
+        return ok && o == buf.size();
+    };
+    yugen::Transfer t;
+    std::string why;
+    const auto t0 = std::chrono::steady_clock::now();
+    EXPECT_TRUE(decode(b, t, why)) << why;
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    EXPECT_EQ(t.vin.size(), N);
+    EXPECT_LT(ms, 200) << "decode of " << N << " inputs took " << ms << " ms";
+    // The last input repeats the first: refused, as yugen-ref Bundle::decode refuses it.
+    std::copy(b.begin() + 4, b.begin() + 4 + 37, b.end() - 37);
+    yugen::Transfer d;
+    EXPECT_FALSE(decode(b, d, why));
+    EXPECT_EQ(why, "bundle-vin");
+    // The same outpoint with another index is a different input.
+    b[b.size() - 5] = 1;
+    yugen::Transfer e;
+    EXPECT_TRUE(decode(b, e, why)) << why;
 }
