@@ -134,6 +134,10 @@ class CCryptoKeyStore : public CBasicKeyStore
 {
 private:
     std::pair<uint256, std::vector<unsigned char>> cryptedMnemonicSeed;
+    //! The Yugen account seed (doc/yugen-node.md, N-A5): plain in an unencrypted wallet,
+    //! encrypted under the master key (IV = its fingerprint) in an encrypted one, as the mnemonic seed.
+    std::optional<CKeyingMaterial> yugenSeed;
+    std::optional<std::pair<uint256, std::vector<unsigned char>>> cryptedYugenSeed;
     std::optional<std::pair<uint256, std::vector<unsigned char>>> cryptedLegacySeed;
     CryptedKeyMap mapCryptedKeys;
     CryptedPQKeyMap mapCryptedPQKeys;
@@ -187,6 +191,21 @@ public:
     virtual bool SetCryptedMnemonicSeed(const uint256& seedFp, const std::vector<unsigned char> &vchCryptedSecret);
     bool HaveMnemonicSeed() const;
     std::optional<MnemonicSeed> GetMnemonicSeed() const;
+
+    //! The Yugen account seed (N-A5). Set refuses while an encrypted wallet is locked and when the
+    //! wallet already holds one; Get is nullopt while locked or when none is held.
+    bool SetYugenSeed(const CKeyingMaterial& seed);
+    virtual bool SetCryptedYugenSeed(const uint256& seedFp, const std::vector<unsigned char>& vchCryptedSecret);
+    bool HaveYugenSeed() const;
+    //! The encrypted Yugen seed record as held in memory (fingerprint, ciphertext); nullopt in a plain wallet.
+    std::optional<std::pair<uint256, std::vector<unsigned char>>> CryptedYugenSeedRecord() const
+    {
+        LOCK(cs_KeyStore);
+        return cryptedYugenSeed;
+    }
+    std::optional<CKeyingMaterial> GetYugenSeed() const;
+    //! BLAKE2b-256, personalisation "Ycash_YugenSd_FP" (the engine's seed_fingerprint), as a uint256.
+    static uint256 YugenSeedFingerprint(const CKeyingMaterial& seed);
 
     bool SetLegacyHDSeed(const HDSeed& seed);
     virtual bool SetCryptedLegacyHDSeed(const uint256& seedFp, const std::vector<unsigned char> &vchCryptedSecret);

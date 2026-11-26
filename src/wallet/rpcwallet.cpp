@@ -49,6 +49,15 @@
 #include "wallet/asyncrpcoperation_sendmany.h"
 #include "wallet/asyncrpcoperation_shieldcoinbase.h"
 #include "wallet/wallet_tx_builder.h"
+#include "yugen/state.h"
+#include "wallet/yugenaccount.h"
+#include "script/sign.h"
+#include <fcntl.h>
+#include <fstream>
+#include <poll.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include <stdint.h>
 
@@ -56,6 +65,8 @@
 #include <boost/algorithm/string/trim.hpp>
 
 #include <univalue.h>
+
+#include "yugen/spawn.h"
 
 #include <algorithm>
 #include <numeric>
@@ -2477,6 +2488,8 @@ UniValue listtransactions(const UniValue& params, bool fHelp)
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Negative from");
 
     UniValue ret(UniValue::VARR);
+    std::vector<UniValue> yugenRows;
+    if (yugenwallet::Exists() && !asOfHeight.has_value()) yugenRows = yugenwallet::TxRows().getValues();
 
     {
         LOCK2(cs_main, pwalletMain->cs_wallet);
@@ -2491,7 +2504,22 @@ UniValue listtransactions(const UniValue& params, bool fHelp)
         }
     }
 
-    // ret is newest to oldest
+    // ret is newest to oldest. The Yugen account's rows (N-A1; "pool": "yugen") are merged in by confirmations
+    // (fewest first, wallet rows first on a tie) before the from/count paging below.
+    if (!yugenRows.empty()) {
+        std::vector<UniValue> yr = yugenRows;
+        std::stable_sort(yr.begin(), yr.end(), [](const UniValue& a, const UniValue& b) {
+            return a["confirmations"].get_int() < b["confirmations"].get_int(); });
+        const std::vector<UniValue>& wr = ret.getValues();
+        UniValue merged(UniValue::VARR);
+        size_t i = 0, j = 0;
+        while (i < wr.size() || j < yr.size()) {
+            const bool takeWallet = j >= yr.size() ||
+                (i < wr.size() && (!wr[i]["confirmations"].isNum() || wr[i]["confirmations"].get_int() <= yr[j]["confirmations"].get_int()));
+            merged.push_back(takeWallet ? wr[i++] : yr[j++]);
+        }
+        ret = merged;
+    }
 
     if (nFrom > (int)ret.size())
         nFrom = ret.size();
@@ -2697,6 +2725,10 @@ UniValue gettransaction(const UniValue& params, bool fHelp)
             + HelpExampleRpc("gettransaction", "\"1075db55d416d3ca199f55b6084e2115b9345e16c5cf302fc80e9d5fbf5d48d\"")
         );
 
+    // A Yugen transaction of the wallet's Yugen account that the transparent wallet does not hold (N-A1).
+    UniValue yugenDetail;
+    if (yugenwallet::Exists() && params[0].isStr()) yugenDetail = yugenwallet::TxDetail(params[0].get_str());
+
     LOCK2(cs_main, pwalletMain->cs_wallet);
 
     uint256 hash;
@@ -2714,8 +2746,10 @@ UniValue gettransaction(const UniValue& params, bool fHelp)
     auto asOfHeight = parseAsOfHeight(params, 3);
 
     UniValue entry(UniValue::VOBJ);
-    if (!pwalletMain->mapWallet.count(hash))
+    if (!pwalletMain->mapWallet.count(hash)) {
+        if (!yugenDetail.isNull()) return yugenDetail;
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid or non-wallet transaction id");
+    }
     const CWalletTx& wtx = pwalletMain->mapWallet[hash];
 
     CAmount nCredit = wtx.GetCredit(asOfHeight, filter);
@@ -2764,6 +2798,8 @@ UniValue gettransaction(const UniValue& params, bool fHelp)
     string strHex = EncodeHexTx(static_cast<CTransaction>(wtx));
     entry.pushKV("hex", strHex);
 
+    // a Yugen spend or receipt of the wallet's Yugen account in this transaction (N-A1)
+    if (!yugenDetail.isNull()) entry.pushKV("yugen", yugenDetail);
     return entry;
 }
 
@@ -2912,6 +2948,12 @@ UniValue walletpassphrase(const UniValue& params, bool fHelp)
         throw runtime_error(
             "walletpassphrase <passphrase> <timeout>\n"
             "Stores the wallet decryption key in memory for <timeout> seconds.");
+
+    // N-A5: a Yugen seed left in the engine's state file by an earlier version moves into the (encrypted) wallet
+    {
+        std::string yerr;
+        if (!yugenwallet::MigrateLegacySeed(yerr)) LogPrintf("Yugen account: seed migration deferred: %s\n", yerr);
+    }
 
     // No need to check return values, because the wallet was unlocked above
     pwalletMain->UpdateNullifierNoteMap();
@@ -3131,6 +3173,12 @@ UniValue encryptwallet(const UniValue& params, bool fHelp)
             "encryptwallet <passphrase>\n"
             "Encrypts the wallet with <passphrase>.");
 
+    // N-A5: the Yugen seed must be in wallet.dat (not the engine's state file) before the wallet is encrypted
+    {
+        std::string yerr;
+        if (!yugenwallet::MigrateLegacySeed(yerr))
+            throw JSONRPCError(RPC_WALLET_ENCRYPTION_FAILED, "Error: the Yugen account seed could not be moved into the wallet: " + yerr);
+    }
     if (!pwalletMain->EncryptWallet(strWalletPass))
         throw JSONRPCError(RPC_WALLET_ENCRYPTION_FAILED, "Error: Failed to encrypt the wallet.");
 
@@ -3706,6 +3754,35 @@ UniValue z_listunspent(const UniValue& params, bool fHelp)
         fIncludeWatchonly = params[2].get_bool();
     }
 
+    // The Yugen account's unspent notes (N-A1; "pool": "yugen"), fetched before the locks. A filter of
+    // Yugen addresses only lists them; a filter mixing Yugen and other addresses is refused.
+    UniValue yugenRows(UniValue::VARR);
+    {
+        bool yugenOnly = false, anyYugen = false;
+        // Only a non-empty array naming a Yugen address takes this path; any other filter is checked as before.
+        if (yugenwallet::Configured() && params.size() > 3 && params[3].isArray() && !params[3].empty()) {
+            for (const UniValue& o : params[3].getValues())
+                anyYugen |= o.isStr() && yugenwallet::LooksLikeYugenAddress(o.get_str());
+        }
+        if (anyYugen) {
+            yugenOnly = true;
+            for (const UniValue& o : params[3].getValues()) {
+                const bool y = o.isStr() && yugenwallet::LooksLikeYugenAddress(o.get_str());
+                if (y && !yugenwallet::IsOwnAddress(o.get_str()))
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, Yugen address not in this wallet: " + o.get_str());
+                yugenOnly &= y;
+            }
+            if (!yugenOnly)
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, list Yugen addresses apart from other addresses");
+        }
+        if (yugenwallet::Exists() && (params.size() <= 3 || yugenOnly) && !asOfHeight.has_value()) {
+            const UniValue rows = yugenwallet::NoteRows(true, nMinDepth, true);
+            for (const auto& r : rows.getValues())
+                if (r["confirmations"].get_int() <= nMaxDepth) yugenRows.push_back(r);
+        }
+        if (yugenOnly) return yugenRows;
+    }
+
     LOCK2(cs_main, pwalletMain->cs_wallet);
 
     std::optional<NoteFilter> noteFilter = std::nullopt;
@@ -3842,6 +3919,7 @@ UniValue z_listunspent(const UniValue& params, bool fHelp)
         results.push_back(std::move(obj));
     }
 
+    results.push_backV(yugenRows.getValues());
     return results;
 }
 
@@ -4099,9 +4177,9 @@ UniValue z_getnewaddress(const UniValue& params, bool fHelp)
 
     std::string defaultType = ADDR_TYPE_SAPLING;
 
-    if (!fEnableZGetNewAddress || fHelp || params.size() > 1)
+    if (!fEnableZGetNewAddress || fHelp || params.size() > 2)
         throw runtime_error(
-            "z_getnewaddress ( type )\n"
+            "z_getnewaddress ( type {\"onetime\": bool} )\n"
             + SupportedOnYcash(fEnableZGetNewAddress,
                                "z_getnewaddress",
                                "This is the way to get a new Sapling address. Unified-address\n"
@@ -4113,7 +4191,11 @@ UniValue z_getnewaddress(const UniValue& params, bool fHelp)
             "Generating a Sprout address is not allowed after Canopy has activated.\n"
             "\nArguments:\n"
             "1. \"type\"         (string, optional, default=\"" + defaultType + "\") The type of address. One of [\""
-            + ADDR_TYPE_SPROUT + "\", \"" + ADDR_TYPE_SAPLING + "\"].\n"
+            + ADDR_TYPE_SPROUT + "\", \"" + ADDR_TYPE_SAPLING + "\", \"yugen\"].\n"
+            "                   \"yugen\": the wallet's Yugen account (one account, its keys from the wallet seed): its\n"
+            "                   default short address (yqf/yqtf/yqrf), the same on every call; needs -yugenprover.\n"
+            "2. options        (object, optional, \"yugen\" only) {\"onetime\": true} returns the one-time form instead:\n"
+            "                   the short address with a fresh single-payer payment request (paid with no host lookup).\n"
             "\nResult:\n"
             "\"zcashaddress\"    (string) The new shielded address.\n"
             "\nExamples:\n"
@@ -4121,6 +4203,15 @@ UniValue z_getnewaddress(const UniValue& params, bool fHelp)
             + HelpExampleCli("z_getnewaddress", ADDR_TYPE_SAPLING)
             + HelpExampleRpc("z_getnewaddress", "")
         );
+
+    if (params.size() > 0 && params[0].get_str() == "yugen") {
+        // The Yugen account (doc/yugen-node.md N-A1): the engine calls back into this node, so no lock is held.
+        EnsureWalletIsBackedUp(Params());
+        const bool onetime = params.size() > 1 && params[1].isObject() && find_value(params[1], "onetime").isTrue();
+        return yugenwallet::NewAddress(onetime);
+    }
+    if (params.size() > 1)
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "options are for the \"yugen\" type only");
 
     LOCK2(cs_main, pwalletMain->cs_wallet);
 
@@ -4502,6 +4593,8 @@ UniValue z_listaddresses(const UniValue& params, bool fHelp)
             }
         }
     }
+    // The Yugen account's addresses (N-A1): the default short address, then any one-time forms handed out.
+    for (const auto& a : yugenwallet::Addresses()) ret.push_back(a);
     return ret;
 }
 
@@ -4679,6 +4772,13 @@ UniValue z_listreceivedbyaddress(const UniValue& params, bool fHelp)
             + HelpExampleCli("z_listreceivedbyaddress", "\"ys1z7rejlpsa98s2rrrfkwmaxu53e4ue0ulcrw0h4x5g8jl04tak0d3mm47vdtahatqrlknghgfflq\"")
             + HelpExampleRpc("z_listreceivedbyaddress", "\"ys1z7rejlpsa98s2rrrfkwmaxu53e4ue0ulcrw0h4x5g8jl04tak0d3mm47vdtahatqrlknghgfflq\"")
         );
+
+    if (yugenwallet::LooksLikeYugenAddress(params[0].get_str())) {
+        // The Yugen account's received notes (N-A1), every memo (512 bytes) as "memo" hex and "memoStr".
+        if (!yugenwallet::Exists() || !yugenwallet::IsOwnAddress(params[0].get_str()))
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "From address does not belong to this node, Yugen address not found.");
+        return yugenwallet::NoteRows(false, parseMinconf(1, params, 1, std::nullopt), true);
+    }
 
     LOCK2(cs_main, pwalletMain->cs_wallet);
 
@@ -4915,6 +5015,18 @@ UniValue z_getbalance(const UniValue& params, bool fHelp)
             "\nAs a JSON RPC call\n"
             + HelpExampleRpc("z_getbalance", "\"myaddress\", 5")
         );
+
+    if (yugenwallet::LooksLikeYugenAddress(params[0].get_str())) {
+        // A Yugen address of this wallet's account: the account balance (one account). minconf 0 adds the
+        // pending notes (found, not yet under the wallet's anchor, or change of a spend not yet mined).
+        if (!yugenwallet::Exists() || !yugenwallet::IsOwnAddress(params[0].get_str()))
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "From address does not belong to this node, Yugen address not found.");
+        int nMinDepth = parseMinconf(1, params, 1, std::nullopt);
+        auto b = yugenwallet::GetBalances();
+        CAmount v = b.spendable + (nMinDepth == 0 ? b.pending : 0);
+        if (params.size() > 2 && params[2].get_bool()) return v;
+        return ValueFromAmount(v);
+    }
 
     LOCK2(cs_main, pwalletMain->cs_wallet);
 
@@ -5260,6 +5372,14 @@ UniValue z_gettotalbalance(const UniValue& params, bool fHelp)
             + HelpExampleRpc("z_gettotalbalance", "5")
         );
 
+    // The Yugen account (N-A1), fetched before the locks (its engine calls back into this node).
+    std::optional<yugenwallet::Balances> yugenBal;
+    std::string yugenErr;
+    if (yugenwallet::Exists()) {
+        try { yugenBal = yugenwallet::GetBalances(); }
+        catch (const UniValue& e) { yugenErr = find_value(e, "message").getValStr(); }
+    }
+
     LOCK2(cs_main, pwalletMain->cs_wallet);
 
     int nMinDepth = parseMinconf(1, params, 0, std::nullopt);
@@ -5276,10 +5396,18 @@ UniValue z_gettotalbalance(const UniValue& params, bool fHelp)
     const TransparentSplit tsplit = AvailableTransparentSplit(nMinDepth, !fIncludeWatchonly);   // = getBalanceTaddr
     CAmount nBalance = tsplit.total;
     CAmount nPrivateBalance = getBalanceZaddr(std::nullopt, std::nullopt, nMinDepth, INT_MAX, !fIncludeWatchonly);
-    CAmount nTotalBalance = nBalance + nPrivateBalance;
+    const CAmount nYugen = yugenBal.has_value() ? yugenBal->spendable + (nMinDepth == 0 ? yugenBal->pending : 0) : 0;
+    CAmount nTotalBalance = nBalance + nPrivateBalance + nYugen;
     UniValue result(UniValue::VOBJ);
     result.pushKV("transparent", FormatMoney(nBalance));
     result.pushKV("private", FormatMoney(nPrivateBalance));
+    if (yugenwallet::Configured()) {
+        // "yugen": the Yugen account's spendable notes (minconf 0 adds the pending ones); in "total".
+        result.pushKV("yugen", FormatMoney(nYugen));
+        result.pushKV("yugen_pending", FormatMoney(yugenBal.has_value() ? yugenBal->pending : 0));
+        result.pushKV("yugen_outgoing_pending", FormatMoney(yugenBal.has_value() ? yugenBal->outgoing : 0));
+        if (!yugenErr.empty()) result.pushKV("yugen_error", yugenErr);
+    }
     result.pushKV("total", FormatMoney(nTotalBalance));
     // The split by address type (beta2 item 15), by the rule transparent follows: ECC = transparent minus its PQ part.
     const PQAmounts& pqBal = tsplit.pq;
@@ -5855,6 +5983,683 @@ static std::optional<libzcash::Memo> ParseMemo(const UniValue& memoValue)
     }
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Yugen payments in z_sendmany (decision Y-9b; doc/yugen-sendmany.md). A recipient that is a
+// Yugen address (a payment request, spec 0.5.2 §9, or a static full address, §12.1) is paid in ONE deposit-shape
+// Yugen transaction (§7.1: two dummy spends, value_balance = -(amount + transfer fee)) whose value comes from the
+// sender's transparent coins (ECC P2PKH, SLH-DSA, FN-DSA), signed by those coins' own keys under ZIP-243 with
+// hashYugen (doc/yugen-node.md N-TX). The transfer is built by the yugen-sendbuild helper and proved by the
+// wallet's prover binary (yewd-yugen prove a|b), both child processes (-yugenbuilder, -yugenprover); nothing of
+// either is linked into ycashd. From a Sapling address the wallet first pays a fresh transparent address of its
+// own exactly amount + transfer fee (decision N-S3) and then deposits that coin; the caller sees one operation id.
+// ---------------------------------------------------------------------------------------------------------------
+
+static const CAmount YUGEN_LEAF_TRANSFER_FEE = 100000 + 155600;   // BASE_FEE + LEAF_PROOF_FEE (spec 0.5.2 §2, §16.1)
+static const uint32_t YUGEN_ANCHOR_GRID = 16, YUGEN_ANCHOR_MIN_DEPTH = 3, YUGEN_ANCHOR_WINDOW = 96;  // spec §2, §8.3
+
+static bool YugenSendConfigured()
+{
+    return !GetArg("-yugenbuilder", "").empty() && !GetArg("-yugenprover", "").empty();
+}
+
+// Runs `yugen-sendbuild <mode> <input file>` without a shell; returns its JSON line; throws the helper's refusal.
+static UniValue RunYugenSendBuild(const std::string& mode, const UniValue& input)
+{
+    fs::path d = GetDataDir() / "yugen-tmp";
+    fs::create_directories(d);
+    fs::path p = d / strprintf("send-%s-%d.json", mode, GetRand(std::numeric_limits<uint32_t>::max()));
+    {
+        std::ofstream o(p.string());
+        o << input.write();
+    }
+    std::vector<std::string> argv{GetArg("-yugenbuilder", ""), mode, p.string()};
+    std::vector<char*> cargv;
+    for (auto& a : argv) cargv.push_back(const_cast<char*>(a.c_str()));
+    cargv.push_back(nullptr);
+    const long maxfd = OpenFdLimit();
+    int fd[2];
+    pid_t pid;
+    {
+        std::lock_guard<std::mutex> sg(SpawnMutex());  // no other child inherits this pipe (N-A5)
+        if (!PipeCloexec(fd)) throw JSONRPCError(RPC_WALLET_ERROR, "Yugen: pipe failed");
+        pid = fork();
+    }
+    if (pid < 0) { close(fd[0]); close(fd[1]); throw JSONRPCError(RPC_WALLET_ERROR, "Yugen: fork failed"); }
+    if (pid == 0) {
+        setpgid(0, 0);
+        dup2(fd[1], 1);
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) dup2(devnull, 2);
+        CloseFdsFrom(3, maxfd);
+        execve(cargv[0], cargv.data(), environ);
+        _exit(127);
+    }
+    close(fd[1]);
+    std::string out;
+    const int64_t deadline = GetTimeMillis() + 1000 * GetArg("-yugenprovetimeout", 1800);
+    bool timedOut = false;
+    char buf[65536];
+    for (;;) {
+        int64_t left = deadline - GetTimeMillis();
+        if (left <= 0) { timedOut = true; break; }
+        struct pollfd pf{fd[0], POLLIN, 0};
+        int n = poll(&pf, 1, (int)std::min<int64_t>(left, 1000));
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) break;
+        if (n == 0) continue;
+        ssize_t k = read(fd[0], buf, sizeof(buf));
+        if (k <= 0) break;
+        out.append(buf, k);
+    }
+    close(fd[0]);
+    if (timedOut) kill(-pid, SIGKILL);
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    fs::remove(p);
+    if (timedOut) throw JSONRPCError(RPC_WALLET_ERROR, "Yugen: the transfer builder timed out (-yugenprovetimeout)");
+    UniValue v;
+    if (!v.read(out.substr(0, out.find('\n'))) || !v.isObject())
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Yugen: the transfer builder failed (exit %d; is -yugenbuilder set?)",
+                                                       WIFEXITED(status) ? WEXITSTATUS(status) : -1));
+    if (!find_value(v, "error").isNull())
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Yugen: " + find_value(v, "error").get_str());
+    if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0))
+        throw JSONRPCError(RPC_WALLET_ERROR, "Yugen: the transfer builder failed");
+    return v;
+}
+
+static int YugenNetwork()
+{
+    const std::string n = Params().NetworkIDString();
+    return n == "main" ? 0 : n == "test" ? 1 : 2;
+}
+
+// The memo of a z_sendmany recipient as hex bytes for the builder ("" for none): hex as z_sendmany takes it.
+static std::string YugenMemoHex(const UniValue& memo)
+{
+    if (memo.isNull()) return "";
+    const std::string s = memo.get_str();
+    if (!IsHex(s)) throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, expected memo data in hexadecimal format.");
+    return s;
+}
+
+struct YugenSendSource {
+    std::optional<CTxDestination> taddr;                     // one transparent address (ECC or PQ)
+    std::optional<libzcash::SaplingPaymentAddress> sapling;  // a Sapling address (the wallet's own hop)
+    bool anyTaddr{false};
+};
+
+class AsyncRPCOperation_yugensend : public AsyncRPCOperation {
+public:
+    AsyncRPCOperation_yugensend(YugenSendSource src, std::string to, CAmount amount, std::string memoHex, int minDepth,
+                                UniValue contextInfo)
+        : src_(src), to_(to), amount_(amount), memo_(memoHex), minDepth_(minDepth), contextinfo_(contextInfo) {}
+
+    virtual void main() {
+        if (isCancelled()) return;
+        set_state(OperationStatus::EXECUTING);
+        start_execution_clock();
+        bool ok = false;
+        try {
+            Resolve();
+            set_result(run());
+            ok = true;
+        } catch (const UniValue& objError) {
+            set_error_code(find_value(objError, "code").get_int());
+            set_error_message(find_value(objError, "message").get_str());
+        } catch (const std::exception& e) {
+            set_error_code(-1);
+            set_error_message(std::string("runtime error: ") + e.what());
+        }
+        stop_execution_clock();
+        set_state(ok ? OperationStatus::SUCCESS : OperationStatus::FAILED);
+        std::string s = strprintf("%s: z_sendmany to a Yugen address finished (status=%s", getId(), getStateAsString());
+        if (ok) s += strprintf(", txid=%s)\n", find_value(getResult(), "txid").get_str());
+        else s += strprintf(", error=%s)\n", getErrorMessage());
+        LogPrintf("%s", s);
+    }
+
+    virtual UniValue getStatus() const {
+        UniValue v = AsyncRPCOperation::getStatus();
+        UniValue obj = v.get_obj();
+        {
+            // decision Y-16: a payment to a short Yugen address waits for the next sync; pending, not failed
+            LOCK(pendingLock_);
+            if (!pendingMsg_.empty() && getState() == OperationStatus::EXECUTING) {
+                obj.pushKV("status", "pending");
+                obj.pushKV("pending", pendingMsg_);
+            }
+        }
+        if (contextinfo_.isNull()) return obj;
+        obj.pushKV("method", "z_sendmany");
+        obj.pushKV("params", contextinfo_);
+        return obj;
+    }
+
+private:
+    YugenSendSource src_;
+    std::string to_;
+    CAmount amount_;
+    std::string memo_;
+    int minDepth_;
+    UniValue contextinfo_;
+
+    struct Coin { COutPoint op; CTxOut out; };
+    mutable CCriticalSection pendingLock_;
+    std::string pendingMsg_;
+
+    // A short Yugen address (UX-1 short form) is resolved through the two mailbox hosts (-yugenhosts) by the helper
+    // before any coin moves (decision N-S4, doc/yugen-sendmany.md). decision Y-16: a record not served yet is asked again
+    // at the next sync boundary (a height that is a multiple of ANCHOR_GRID); the operation reports "pending" until
+    // then and fails only on a refusal or a host fault.
+    void Resolve() {
+        for (;;) {
+            UniValue in(UniValue::VOBJ);
+            in.pushKV("network", YugenNetwork());
+            in.pushKV("to", to_);
+            in.pushKV("amount", (int64_t)amount_);
+            if (!memo_.empty()) in.pushKV("memo", memo_);
+            in.pushKV("hosts", GetArg("-yugenhosts", ""));
+            try {
+                UniValue r = RunYugenSendBuild("resolve", in);
+                to_ = find_value(r, "to").get_str();
+                LOCK(pendingLock_);
+                pendingMsg_.clear();
+                return;
+            } catch (const UniValue& e) {
+                const std::string m = find_value(e, "message").get_str();
+                // a host fault (the two hosts disagree, e.g. one has not snapshotted the boundary yet, or a failed
+                // answer check) is reported and retried at the next sync, as the wallet does (spec §17.8 item 3)
+                const std::string tag = "Yugen: pending: ", fault = "Yugen: host fault";
+                if (m.compare(0, tag.size(), tag) != 0 && m.compare(0, fault.size(), fault) != 0) throw;
+                {
+                    LOCK(pendingLock_);
+                    pendingMsg_ = m.compare(0, tag.size(), tag) == 0 ? m.substr(7) : "pending: " + m.substr(7) + " (asked again at the next sync)";
+                }
+                int h0;
+                {
+                    LOCK(cs_main);
+                    h0 = chainActive.Height();
+                }
+                const int next = (h0 / (int)YUGEN_ANCHOR_GRID + 1) * (int)YUGEN_ANCHOR_GRID;
+                for (;;) {
+                    if (isCancelled() || ShutdownRequested()) throw JSONRPCError(RPC_WALLET_ERROR, "Yugen: cancelled while pending");
+                    {
+                        LOCK(cs_main);
+                        if (chainActive.Height() >= next) break;
+                    }
+                    MilliSleep(500);
+                }
+            }
+        }
+    }
+
+    // Sapling source: pay amount + transfer fee to a fresh transparent key of this wallet, through the stock
+    // z_sendmany operation (its own fee, its own proofs), and return that one coin (decision N-S3).
+    Coin SaplingHop() {
+        CKeyID hop;
+        ZTXOSelector selector = [&]() {
+            LOCK2(cs_main, pwalletMain->cs_wallet);
+            EnsureWalletIsUnlocked();
+            hop = pwalletMain->GenerateNewKey(true).GetID();
+            auto sel = pwalletMain->ZTXOSelectorForAddress(src_.sapling.value(), true, TransparentCoinbasePolicy::Disallow, std::nullopt);
+            if (!sel.has_value())
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid from address, no payment source found for address.");
+            return sel.value();
+        }();
+        std::vector<Payment> pay{Payment(hop, amount_ + YUGEN_LEAF_TRANSFER_FEE, std::nullopt)};
+        auto nAnchorDepth = std::min((unsigned int) minDepth_, nAnchorConfirmations);
+        AsyncRPCOperation_sendmany op(WalletTxBuilder(Params(), minRelayTxFee), selector, pay, minDepth_, nAnchorDepth,
+                                      TransactionStrategy(PrivacyPolicy::AllowRevealedRecipients), std::nullopt);
+        op.main();
+        if (op.getState() != OperationStatus::SUCCESS)
+            throw JSONRPCError(op.getErrorCode() ? op.getErrorCode() : RPC_WALLET_ERROR,
+                               "Yugen: the Sapling leg failed: " + op.getErrorMessage());
+        uint256 txid = uint256S(find_value(op.getResult(), "txid").get_str());
+        LOCK2(cs_main, pwalletMain->cs_wallet);
+        auto it = pwalletMain->mapWallet.find(txid);
+        if (it == pwalletMain->mapWallet.end()) throw JSONRPCError(RPC_WALLET_ERROR, "Yugen: the Sapling leg is not in the wallet");
+        const CScript script = GetScriptForDestination(hop);
+        for (unsigned int i = 0; i < it->second.vout.size(); i++)
+            if (it->second.vout[i].scriptPubKey == script) return Coin{COutPoint(txid, i), it->second.vout[i]};
+        throw JSONRPCError(RPC_WALLET_ERROR, "Yugen: the Sapling leg pays no hop output");
+    }
+
+    // Transparent source: the coins of the from address (or any, for ANY_TADDR), largest first, covering need.
+    std::vector<Coin> SelectTransparent(CAmount need, CAmount& sum) {
+        AssertLockHeld(cs_main);
+        AssertLockHeld(pwalletMain->cs_wallet);
+        std::vector<COutput> coins;
+        std::set<CTxDestination> only;
+        if (src_.taddr.has_value()) only.insert(src_.taddr.value());
+        pwalletMain->AvailableCoins(coins, std::nullopt, minDepth_ > 0, nullptr, false, false, true, minDepth_, only);
+        const bool pq = src_.taddr.has_value() && std::holds_alternative<CPQKeyID>(src_.taddr.value());
+        const std::string refusal = DropYellowbackCoins(coins, pq);
+        std::sort(coins.begin(), coins.end(), [](const COutput& a, const COutput& b) {
+            return a.tx->vout[a.i].nValue > b.tx->vout[b.i].nValue;
+        });
+        std::vector<Coin> picked;
+        sum = 0;
+        for (const COutput& c : coins) {
+            if (sum >= need) break;
+            if (pwalletMain->IsLockedCoin(c.tx->GetHash(), c.i)) continue;
+            picked.push_back(Coin{COutPoint(c.tx->GetHash(), c.i), c.tx->vout[c.i]});
+            sum += c.tx->vout[c.i].nValue;
+        }
+        if (sum < need) {
+            std::string m = strprintf("Insufficient funds: have %s, need %s (amount + the Yugen transfer fee %s)",
+                                      FormatMoney(sum), FormatMoney(need), FormatMoney(YUGEN_LEAF_TRANSFER_FEE));
+            if (!refusal.empty()) m += "; " + refusal;
+            throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, m);
+        }
+        return picked;
+    }
+
+    UniValue run() {
+        const CChainParams& chainparams = Params();
+        const Consensus::Params& consensus = chainparams.GetConsensus();
+        const CAmount need = amount_ + YUGEN_LEAF_TRANSFER_FEE;
+        std::vector<Coin> ins;
+        CAmount sum = 0;
+        std::optional<CScript> changeScript;
+        if (src_.sapling.has_value()) {
+            ins.push_back(SaplingHop());
+            sum = ins[0].out.nValue;
+        }
+        CMutableTransaction mtx;
+        UniValue input(UniValue::VOBJ);
+        int nextHeight;
+        uint32_t branchId;
+        {
+            LOCK2(cs_main, pwalletMain->cs_wallet);
+            EnsureWalletIsUnlocked();
+            nextHeight = chainActive.Height() + 1;
+            if (!consensus.NetworkUpgradeActive(nextHeight, Consensus::UPGRADE_YUGEN))
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Yugen is not active for the next block");
+            branchId = CurrentEpochBranchId(nextHeight, consensus);
+            const uint32_t tip = chainActive.Height();
+            const uint32_t ha = tip < YUGEN_ANCHOR_MIN_DEPTH ? 0 : (tip - YUGEN_ANCHOR_MIN_DEPTH) / YUGEN_ANCHOR_GRID * YUGEN_ANCHOR_GRID;
+            const auto& st = yugen::Current(chainparams);
+            auto rec = st.blocks.find(ha);
+            if (rec == st.blocks.end())
+                throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Yugen: no anchor yet (anchor height %d has no pool state)", ha));
+            uint256 bh = chainActive[ha]->GetBlockHash();
+            if (!src_.sapling.has_value()) {
+                ins = SelectTransparent(need, sum);
+                if (src_.taddr.has_value()) {
+                    changeScript = GetScriptForDestination(src_.taddr.value());
+                } else {
+                    changeScript = GetScriptForDestination(pwalletMain->GenerateNewKey(false).GetID());
+                }
+            }
+            for (auto& c : ins) pwalletMain->LockCoin(c.op);
+            mtx.fOverwintered = true;
+            mtx.nVersion = SAPLING_TX_VERSION;
+            mtx.nVersionGroupId = YUGEN_VERSION_GROUP_ID;
+            mtx.nLockTime = 0;
+            mtx.nExpiryHeight = ha + YUGEN_ANCHOR_WINDOW;
+            for (auto& c : ins) mtx.vin.push_back(CTxIn(c.op, CScript(), CTxIn::SEQUENCE_FINAL));
+            const CAmount change = sum - need;
+            // Change below the dust threshold is left to the miner (the transaction fee) rather than made an output.
+            if (change > 0 && changeScript.has_value() && !CTxOut(change, changeScript.value()).IsDust())
+                mtx.vout.push_back(CTxOut(change, changeScript.value()));
+            CDataStream vs(SER_NETWORK, PROTOCOL_VERSION);
+            vs << mtx.vout;
+            input.pushKV("prover", GetArg("-yugenprover", ""));
+            input.pushKV("branch_id", (int64_t)branchId);
+            input.pushKV("network", YugenNetwork());
+            input.pushKV("anchor_height", (int64_t)ha);
+            input.pushKV("anchor_root", yugen::HexRoot(rec->second.rootAfter));
+            input.pushKV("anchor_block_hash", HexStr(bh.begin(), bh.end()));
+            input.pushKV("to", to_);
+            input.pushKV("amount", (int64_t)amount_);
+            if (!memo_.empty()) input.pushKV("memo", memo_);
+            input.pushKV("vout", HexStr(vs.begin(), vs.end()));
+        }
+        auto unlock = [&]() {
+            LOCK(pwalletMain->cs_wallet);
+            for (auto& c : ins) pwalletMain->UnlockCoin(c.op);
+        };
+        try {
+            // Build and prove with no global lock held (two proofs, seconds to minutes).
+            UniValue b = RunYugenSendBuild("build", input);
+            mtx.yugen.transfer = ParseHex(find_value(b, "transfer").get_str());
+            mtx.yugen.proofA = ParseHex(find_value(b, "proof_a").get_str());
+            mtx.yugen.proofB = ParseHex(find_value(b, "proof_b").get_str());
+            if (find_value(b, "fee").get_int64() != YUGEN_LEAF_TRANSFER_FEE ||
+                find_value(b, "expiry").get_int64() != (int64_t)mtx.nExpiryHeight)
+                throw JSONRPCError(RPC_WALLET_ERROR, "Yugen: the transfer builder returned another fee or expiry");
+            // Sign every transparent input with its own key (ECC, SLH-DSA, FN-DSA), ZIP-243 + hashYugen under the
+            // Yugen branch id and the vault script flags of the next block.
+            std::vector<CTxOut> spent;
+            for (auto& c : ins) spent.push_back(c.out);
+            const unsigned int flags = STANDARD_SCRIPT_VERIFY_FLAGS | GetVaultScriptFlags(nextHeight, consensus);
+            const CTransaction txConst(mtx);
+            const PrecomputedTransactionData txdata(txConst, spent);
+            for (size_t i = 0; i < ins.size(); i++) {
+                SignatureData sigdata;
+                if (!ProduceSignature(TransactionSignatureCreator(pwalletMain, &txConst, txdata, i, ins[i].out.nValue, SIGHASH_ALL),
+                                      ins[i].out.scriptPubKey, sigdata, branchId, flags))
+                    throw JSONRPCError(RPC_WALLET_ERROR, "Yugen: failed to sign a transparent input");
+                UpdateTransaction(mtx, i, sigdata);
+            }
+            const CTransaction tx(mtx);
+            UniValue r;
+            {
+                LOCK2(cs_main, pwalletMain->cs_wallet);
+                if (CurrentEpochBranchId(chainActive.Height() + 1, consensus) != branchId)
+                    throw JSONRPCError(RPC_WALLET_ERROR, "The next block's rules changed while this transaction was built; send it again");
+                r = SendTransaction(tx, std::vector<ResolvedPayment>(), std::nullopt, false);
+            }
+            unlock();
+            UniValue o(UniValue::VOBJ);
+            o.pushKV("txid", tx.GetHash().GetHex());
+            o.pushKV("nf1", find_value(b, "nf1"));
+            o.pushKV("fee", (int64_t)YUGEN_LEAF_TRANSFER_FEE);
+            return o;
+        } catch (...) {
+            unlock();
+            throw;
+        }
+    }
+};
+
+// True when `addr` is not a Ycash address of any kind and the Yugen builder takes it as a Yugen address.
+static bool IsYugenRecipient(const KeyIO& keyIO, const std::string& addr)
+{
+    if (IsValidDestination(keyIO.DecodeDestination(addr)) || keyIO.DecodePaymentAddress(addr).has_value()) return false;
+    if (!YugenSendConfigured()) return false;
+    UniValue in(UniValue::VOBJ);
+    in.pushKV("network", YugenNetwork());
+    in.pushKV("to", addr);
+    in.pushKV("amount", (int64_t)1);
+    try {
+        RunYugenSendBuild("check", in);
+    } catch (const UniValue& e) {
+        const std::string m = find_value(e, "message").get_str();
+        if (m.find("not a Yugen payment request or static full address") != std::string::npos) return false;
+        throw;
+    }
+    return true;
+}
+
+// z_sendmany with a Yugen recipient (called with cs_main and cs_wallet held).
+static UniValue YugenSendMany(const UniValue& params, const KeyIO& keyIO)
+{
+    const UniValue outputs = params[1].get_array();
+    if (outputs.size() != 1)
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "A send to a Yugen address has exactly one recipient");
+    const UniValue& o = outputs[0];
+    const std::string to = find_value(o, "address").get_str();
+    const CAmount amount = AmountFromValue(find_value(o, "amount"));
+    if (amount <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, amount must be positive");
+    const std::string memo = YugenMemoHex(find_value(o, "memo"));
+    if (params.size() > 3 && !params[3].isNull() && AmountFromValue(params[3]) != YUGEN_LEAF_TRANSFER_FEE)
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("A send to a Yugen address pays the fixed transfer fee %s",
+                                                            FormatMoney(YUGEN_LEAF_TRANSFER_FEE)));
+    if (!Params().GetConsensus().NetworkUpgradeActive(chainActive.Height() + 1, Consensus::UPGRADE_YUGEN))
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Yugen is not active for the next block");
+    {
+        // Address, memo and request checks up front, so the caller is refused here rather than in the operation.
+        UniValue in(UniValue::VOBJ);
+        const uint32_t tip = chainActive.Height();
+        in.pushKV("network", YugenNetwork());
+        in.pushKV("anchor_height", (int64_t)(tip < YUGEN_ANCHOR_MIN_DEPTH ? 0 : (tip - YUGEN_ANCHOR_MIN_DEPTH) / YUGEN_ANCHOR_GRID * YUGEN_ANCHOR_GRID));
+        in.pushKV("to", to);
+        in.pushKV("amount", (int64_t)amount);
+        if (!memo.empty()) in.pushKV("memo", memo);
+        RunYugenSendBuild("check", in);
+    }
+    YugenSendSource src;
+    const std::string from = params[0].get_str();
+    if (from == "ANY_TADDR") {
+        src.anyTaddr = true;
+    } else {
+        const CTxDestination dest = keyIO.DecodeDestination(from);
+        if (IsValidDestination(dest)) {
+            if (const CPQKeyID* pq = std::get_if<CPQKeyID>(&dest)) EnsurePQSourceSpendable(dest);
+            else if (!std::holds_alternative<CKeyID>(dest))
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "A Yugen send spends from a P2PKH, post-quantum or Sapling address");
+            src.taddr = dest;
+        } else {
+            auto pa = keyIO.DecodePaymentAddress(from);
+            if (!pa.has_value() || !std::holds_alternative<libzcash::SaplingPaymentAddress>(pa.value()))
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "A Yugen send spends from a P2PKH, post-quantum or Sapling address");
+            src.sapling = std::get<libzcash::SaplingPaymentAddress>(pa.value());
+        }
+    }
+    const int nMinDepth = parseMinconf(DEFAULT_NOTE_CONFIRMATIONS, params, 2, std::nullopt);
+    UniValue ctx(UniValue::VOBJ);
+    ctx.pushKV("fromaddress", params[0]);
+    ctx.pushKV("amounts", params[1]);
+    ctx.pushKV("minconf", nMinDepth);
+    std::shared_ptr<AsyncRPCOperation> op(new AsyncRPCOperation_yugensend(src, to, amount, memo, nMinDepth, ctx));
+    getAsyncRPCQueue()->addOperation(op);
+    return op->getId();
+}
+
+// z_sendmany from the wallet's Yugen account (doc/yugen-node.md N-A3): fromaddress is one of the account's
+// addresses; one recipient. To a Yugen address: a leaf transfer from the account's notes (a short address
+// not yet resolved waits for the next scheduled sync: "pending"). To a transparent address: a withdrawal
+// through the turnstile (spec §7.9 rule 4). To a Sapling address: a withdrawal of amount + hop fee to a
+// fresh transparent address of this wallet, then a stock z_sendmany of exactly that coin to the Sapling
+// address with the memo (as yewd's Y-W9 and N-S3). One operation id; the result names every txid.
+UniValue z_sendmany(const UniValue& params, bool fHelp);
+static const CAmount YUGEN_SAPLING_HOP_FEE = 1000;   // yewd facade SAPLING_HOP_FEE (Y-W9)
+
+class AsyncRPCOperation_yugenaccount : public AsyncRPCOperation {
+public:
+    enum Kind { TO_YUGEN, TO_TRANSPARENT, TO_SAPLING };
+    AsyncRPCOperation_yugenaccount(Kind k, std::string to, CAmount amount, std::string memoText, std::string memoHex, UniValue ctx)
+        : kind_(k), to_(to), amount_(amount), memoText_(memoText), memoHex_(memoHex), contextinfo_(ctx) {}
+
+    virtual void main() {
+        if (isCancelled()) return;
+        set_state(OperationStatus::EXECUTING);
+        start_execution_clock();
+        bool ok = false;
+        try {
+            set_result(run());
+            ok = true;
+        } catch (const UniValue& objError) {
+            set_error_code(find_value(objError, "code").get_int());
+            set_error_message(find_value(objError, "message").get_str());
+        } catch (const std::exception& e) {
+            set_error_code(-1);
+            set_error_message(std::string("runtime error: ") + e.what());
+        }
+        stop_execution_clock();
+        set_state(ok ? OperationStatus::SUCCESS : OperationStatus::FAILED);
+        LogPrintf("%s: z_sendmany from the Yugen account finished (status=%s%s)\n", getId(), getStateAsString(),
+                  ok ? ", txid=" + find_value(getResult(), "txid").getValStr() : ", error=" + getErrorMessage());
+    }
+
+    virtual UniValue getStatus() const {
+        UniValue v = AsyncRPCOperation::getStatus();
+        UniValue obj = v.get_obj();
+        {
+            LOCK(pendingLock_);
+            if (!pendingMsg_.empty() && getState() == OperationStatus::EXECUTING) {
+                obj.pushKV("status", "pending");
+                obj.pushKV("pending", pendingMsg_);
+            }
+        }
+        obj.pushKV("method", "z_sendmany");
+        obj.pushKV("params", contextinfo_);
+        return obj;
+    }
+
+private:
+    Kind kind_;
+    std::string to_;
+    CAmount amount_;
+    std::string memoText_, memoHex_;
+    UniValue contextinfo_;
+    mutable CCriticalSection pendingLock_;
+    std::string pendingMsg_;
+
+    static UniValue Arr3(const std::string& a, CAmount v, const std::string& m) {
+        UniValue p(UniValue::VARR);
+        p.push_back(a);
+        p.push_back(FormatMoney(v));
+        if (!m.empty()) p.push_back(m);
+        return p;
+    }
+
+    UniValue run() {
+        if (kind_ == TO_YUGEN) {
+            UniValue r = yugenwallet::Call("send", Arr3(to_, amount_, memoText_));
+            if (!find_value(r, "txid").isNull()) return r;
+            // decision Y-16: queued for the next scheduled sync; the scheduler thread sends it
+            const int64_t id = find_value(r, "id").get_int64();
+            {
+                LOCK(pendingLock_);
+                pendingMsg_ = find_value(r, "message").getValStr();
+            }
+            for (;;) {
+                MilliSleep(2000);
+                if (isCancelled() || ShutdownRequested()) throw JSONRPCError(RPC_WALLET_ERROR, "Yugen: cancelled while pending (the payment stays queued in the account)");
+                UniValue st = yugenwallet::State(false);
+                bool found = false;
+                const UniValue& ps = find_value(st, "pending_sends");
+                if (ps.isArray()) for (const auto& p : ps.getValues()) {
+                    if (p["id"].get_int64() != id) continue;
+                    const std::string s = p["state"].get_str();
+                    if (s == "sent") {
+                        UniValue o(UniValue::VOBJ);
+                        o.pushKV("txid", p["txid"]);
+                        o.pushKV("route", "static");
+                        o.pushKV("fee", ValueFromAmount(YUGEN_LEAF_TRANSFER_FEE));
+                        o.pushKV("queued_at", p["queued"]);
+                        return o;
+                    }
+                    if (s != "waiting") throw JSONRPCError(RPC_WALLET_ERROR, "Yugen: " + p["error"].getValStr());
+                    found = true;
+                }
+                if (!found) throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Yugen: queued payment %d is no longer in the account", id));
+            }
+        }
+        if (kind_ == TO_TRANSPARENT) return yugenwallet::Call("withdraw", Arr3(to_, amount_, ""));
+        // TO_SAPLING: the hop
+        UniValue none(UniValue::VARR);
+        const std::string hop = getnewaddress(none, false).get_str();
+        UniValue w = yugenwallet::Call("withdraw", Arr3(hop, amount_ + YUGEN_SAPLING_HOP_FEE, ""));
+        const std::string wtxid = find_value(w, "txid").get_str();
+        bool seen = false;
+        for (int i = 0; i < 120 && !seen; i++) {
+            {
+                LOCK2(cs_main, pwalletMain->cs_wallet);
+                seen = pwalletMain->mapWallet.count(uint256S(wtxid)) > 0;
+            }
+            if (!seen) MilliSleep(500);
+        }
+        if (!seen) throw JSONRPCError(RPC_WALLET_ERROR, "Yugen -> Sapling: the withdrawal " + wtxid + " did not reach this wallet; its coins are at the wallet's own transparent address " + hop);
+        UniValue out(UniValue::VOBJ);
+        out.pushKV("address", to_);
+        out.pushKV("amount", FormatMoney(amount_));
+        if (!memoHex_.empty()) out.pushKV("memo", memoHex_);
+        UniValue outs(UniValue::VARR);
+        outs.push_back(out);
+        UniValue p(UniValue::VARR);
+        p.push_back(hop);
+        p.push_back(outs);
+        p.push_back(0);
+        p.push_back(ValueFromAmount(YUGEN_SAPLING_HOP_FEE));
+        p.push_back("AllowRevealedSenders");
+        const std::string opid = z_sendmany(p, false).get_str();
+        // Run the Sapling operation here, not on the queue: this operation holds a queue worker
+        // (-rpcasyncthreads defaults to 1), so waiting for the queue would never end.
+        auto q = getAsyncRPCQueue();
+        auto op = q->popOperationForId(opid);
+        if (!op) throw JSONRPCError(RPC_WALLET_ERROR, "Yugen -> Sapling: the Sapling operation vanished");
+        if (op->getState() == OperationStatus::READY) op->main();
+        while (!op->isSuccess() && !op->isFailed() && !op->isCancelled()) MilliSleep(500);
+        {
+            if (op->isSuccess()) {
+                const std::string stxid = find_value(op->getResult(), "txid").getValStr();
+                UniValue r(UniValue::VOBJ);
+                r.pushKV("operation", "yugen-to-sapling");
+                r.pushKV("txid", stxid);
+                r.pushKV("withdraw_txid", wtxid);
+                r.pushKV("sapling_txid", stxid);
+                r.pushKV("amount", ValueFromAmount(amount_));
+                r.pushKV("fee", ValueFromAmount(YUGEN_LEAF_TRANSFER_FEE + YUGEN_SAPLING_HOP_FEE));
+                return r;
+            }
+            {
+                throw JSONRPCError(RPC_WALLET_ERROR, "Yugen -> Sapling: the withdrawal " + wtxid + " is done; the Sapling send failed (" +
+                                   op->getErrorMessage() + "): the coins are at the wallet's own transparent address " + hop);
+            }
+        }
+    }
+};
+
+static bool IsUtf8(const std::string& s)
+{
+    size_t i = 0;
+    while (i < s.size()) {
+        unsigned char c = s[i];
+        int n = c < 0x80 ? 0 : (c >> 5) == 6 ? 1 : (c >> 4) == 14 ? 2 : (c >> 3) == 30 ? 3 : -1;
+        if (n < 0 || i + n >= s.size()) return false;
+        for (int k = 1; k <= n; k++) if (i + k >= s.size() || ((unsigned char)s[i + k] >> 6) != 2) return false;
+        i += n + 1;
+    }
+    return true;
+}
+
+static UniValue YugenAccountSendMany(const UniValue& params)
+{
+    const std::string from = params[0].get_str();
+    if (!yugenwallet::Exists() || !yugenwallet::IsOwnAddress(from))
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid from address: not a Yugen address of this wallet's Yugen account");
+    // N-A5: the Yugen seed is encrypted with the wallet; a spend needs it unlocked (refused now, not in the operation)
+    if (yugenwallet::Locked())
+        throw JSONRPCError(RPC_WALLET_UNLOCK_NEEDED, "Error: Please enter the wallet passphrase with walletpassphrase first.");
+    const UniValue outputs = params[1].get_array();
+    if (outputs.size() != 1)
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "A send from the Yugen account has exactly one recipient");
+    const UniValue& o = outputs[0];
+    if (!o.isObject() || !find_value(o, "address").isStr())
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, expected object with an address");
+    const std::string to = find_value(o, "address").get_str();
+    const CAmount amount = AmountFromValue(find_value(o, "amount"));
+    if (amount <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, amount must be positive");
+    std::string memoHex = find_value(o, "memo").isStr() ? find_value(o, "memo").get_str() : "";
+    std::string memoText;
+    if (!memoHex.empty()) {
+        if (!IsHex(memoHex) || memoHex.size() > 1024) throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, memo must be hex, at most 512 bytes");
+        auto b = ParseHex(memoHex);
+        while (!b.empty() && b.back() == 0) b.pop_back();
+        memoText.assign(b.begin(), b.end());
+        if (!IsUtf8(memoText) || memoText.find('\0') != std::string::npos)
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, a Yugen memo from the account is UTF-8 text (no NUL bytes)");
+    }
+    if (params.size() > 3 && !params[3].isNull() && AmountFromValue(params[3]) != YUGEN_LEAF_TRANSFER_FEE)
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("A send from the Yugen account pays the fixed transfer fee %s",
+                                                            FormatMoney(YUGEN_LEAF_TRANSFER_FEE)));
+    KeyIO keyIO(Params());
+    AsyncRPCOperation_yugenaccount::Kind k = AsyncRPCOperation_yugenaccount::TO_YUGEN;
+    if (IsValidDestination(keyIO.DecodeDestination(to))) {
+        k = AsyncRPCOperation_yugenaccount::TO_TRANSPARENT;
+        if (!memoHex.empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, "memo refused: a transparent output carries no memo");
+    } else if (auto pa = keyIO.DecodePaymentAddress(to); pa.has_value()) {
+        if (!std::holds_alternative<libzcash::SaplingPaymentAddress>(pa.value()))
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "A send from the Yugen account goes to a Yugen, transparent or Sapling address");
+        k = AsyncRPCOperation_yugenaccount::TO_SAPLING;
+    }
+    {
+        LOCK(cs_main);
+        if (!Params().GetConsensus().NetworkUpgradeActive(chainActive.Height() + 1, Consensus::UPGRADE_YUGEN))
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Yugen is not active for the next block");
+    }
+    UniValue ctx(UniValue::VOBJ);
+    ctx.pushKV("fromaddress", params[0]);
+    ctx.pushKV("amounts", params[1]);
+    std::shared_ptr<AsyncRPCOperation> op(new AsyncRPCOperation_yugenaccount(k, to, amount, memoText, memoHex, ctx));
+    getAsyncRPCQueue()->addOperation(op);
+    return op->getId();
+}
+
 UniValue z_sendmany(const UniValue& params, bool fHelp)
 {
     if (!EnsureWalletIsAvailable(fHelp))
@@ -5925,6 +6730,10 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
             + HelpExampleRpc("z_sendmany", "\"s1kTb43xroRcuscGeiajocxn3PkRhZ9eRNw\", [{\"address\": \"ys1z7rejlpsa98s2rrrfkwmaxu53e4ue0ulcrw0h4x5g8jl04tak0d3mm47vdtahatqrlknghgfflq\", \"amount\": 5.0}]")
         );
 
+    // From the wallet's Yugen account (N-A3): before the locks, the engine calls back into this node.
+    if (params[0].isStr() && yugenwallet::LooksLikeYugenAddress(params[0].get_str()))
+        return YugenAccountSendMany(params);
+
     LOCK2(cs_main, pwalletMain->cs_wallet);
 
     const auto& chainparams = Params();
@@ -5941,6 +6750,12 @@ UniValue z_sendmany(const UniValue& params, bool fHelp)
     UniValue outputs = params[1].get_array();
     if (outputs.size() == 0) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, amounts array is empty.");
+    }
+
+    // A Yugen recipient (decision Y-9b): one deposit-shape Yugen transaction (YugenSendMany).
+    for (const UniValue& o : outputs.getValues()) {
+        if (o.isObject() && find_value(o, "address").isStr() && IsYugenRecipient(keyIO, find_value(o, "address").get_str()))
+            return YugenSendMany(params, keyIO);
     }
 
     std::set<PaymentAddress> recipientAddrs;

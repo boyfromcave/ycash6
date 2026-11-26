@@ -7,6 +7,9 @@
 
 #include "wallet/wallet.h"
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include "asyncrpcqueue.h"
 #include "checkpoints.h"
 #include "coincontrol.h"
@@ -3432,6 +3435,18 @@ bool CWallet::IsSpent(const uint256& hash, unsigned int n, const std::optional<i
             return true; // Spent
         }
     }
+    // Wallets learn of connected blocks asynchronously (ThreadNotifyWallets). Between a block
+    // that mines one of our spends being connected and the wallet being notified of it, the
+    // spend is in neither the mempool nor (for the wallet) a block, so it reads as conflicted
+    // and the coin as unspent. If the chain's UTXO set no longer holds the coin, it is spent,
+    // unless the coin is an output of a mempool transaction (unconfirmed, so never in the UTXO set).
+    if (range.first != range.second && !asOfHeight.has_value() && pcoinsTip != nullptr) {
+        AssertLockHeld(cs_main);
+        CCoins coins;
+        if ((!pcoinsTip->GetCoins(hash, coins) || !coins.IsAvailable(n)) && !mempool.exists(hash)) {
+            return true;
+        }
+    }
     return false;
 }
 
@@ -5329,6 +5344,9 @@ void WalletBatchScanner::AddTransaction(
     decryptedNotes.insert(
         std::make_pair(tx.GetHash(), pwallet->TryDecryptShieldedOutputs(tx)));
 
+    // Yugen: the Rust parser has no Yugen format and a Yugen transaction has no Sapling outputs.
+    if (tx.fOverwintered && tx.nVersionGroupId == YUGEN_VERSION_GROUP_ID) return;
+
     // Queue Sapling outputs for trial decryption.
     inner->add_transaction(blockTag.GetRawBytes(), {txBytes.data(), txBytes.size()}, nHeight);
 }
@@ -6055,6 +6073,79 @@ uint32_t CWallet::BIP44CoinType() const {
     return Params(networkIdString).BIP44CoinType();
 }
 
+
+bool CWallet::SetYugenSeed(const CKeyingMaterial& seed)
+{
+    if (!CCryptoKeyStore::SetYugenSeed(seed)) return false;
+    if (!fFileBacked) return true;
+    LOCK(cs_wallet);
+    if (!IsCrypted()) return CWalletDB(strWalletFile).WriteYugenSeed(YugenSeedFingerprint(seed), seed);
+    return true;
+}
+
+static void FullSyncPath(const fs::path& p)
+{
+    int fd = open(p.string().c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+#ifdef __APPLE__
+    if (fcntl(fd, F_FULLFSYNC) != 0) fsync(fd);  // fsync on macOS leaves the data in the drive's cache
+#else
+    fsync(fd);
+#endif
+    close(fd);
+}
+
+bool CWallet::YugenSeedDurable()
+{
+    if (!fFileBacked) return true;
+    LOCK(cs_wallet);
+    if (!HaveYugenSeed()) return false;
+    if (pwalletdbEncryption) return false;  // inside encryptwallet's transaction: not committed yet
+    if (bitdb.dbenv == nullptr) return false;
+    if (bitdb.dbenv->log_flush(nullptr) != 0) return false;
+    if (bitdb.dbenv->txn_checkpoint(0, 0, 0) != 0) return false;
+    if (bitdb.dbenv->log_flush(nullptr) != 0) return false;
+    FullSyncPath(GetDataDir() / strWalletFile);
+    try {
+        for (fs::directory_iterator it(GetDataDir() / "database"), end; it != end; ++it) FullSyncPath(it->path());
+    } catch (const fs::filesystem_error&) {}
+    FullSyncPath(GetDataDir() / "database");
+    FullSyncPath(GetDataDir());
+    CKeyingMaterial plain;
+    std::vector<unsigned char> crypted;
+    bool same = false;
+    {
+        CWalletDB db(strWalletFile, "r");
+        if (IsCrypted()) {
+            const auto rec = CryptedYugenSeedRecord();
+            if (rec.has_value() && db.ReadYugenSeed(rec->first, plain, crypted)) same = crypted == rec->second;
+        } else {
+            const auto held = GetYugenSeed();
+            if (held.has_value() && db.ReadYugenSeed(YugenSeedFingerprint(held.value()), plain, crypted))
+                same = plain == held.value();
+        }
+    }
+    return same;
+}
+
+bool CWallet::SetCryptedYugenSeed(const uint256& seedFp, const std::vector<unsigned char>& vchCryptedSecret)
+{
+    if (!CCryptoKeyStore::SetCryptedYugenSeed(seedFp, vchCryptedSecret)) return false;
+    if (!fFileBacked) return true;
+    LOCK(cs_wallet);
+    if (pwalletdbEncryption) return pwalletdbEncryption->WriteCryptedYugenSeed(seedFp, vchCryptedSecret);
+    return CWalletDB(strWalletFile).WriteCryptedYugenSeed(seedFp, vchCryptedSecret);
+}
+
+bool CWallet::LoadYugenSeed(const CKeyingMaterial& seed)
+{
+    return CCryptoKeyStore::SetYugenSeed(seed);
+}
+
+bool CWallet::LoadCryptedYugenSeed(const uint256& seedFp, const std::vector<unsigned char>& seed)
+{
+    return CCryptoKeyStore::SetCryptedYugenSeed(seedFp, seed);
+}
 
 bool CWallet::LoadMnemonicSeed(const MnemonicSeed& seed)
 {

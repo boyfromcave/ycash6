@@ -573,6 +573,11 @@ public:
     bool WriteNetworkInfo(const std::string& networkId);
     bool WriteMnemonicSeed(const MnemonicSeed& seed);
     bool WriteCryptedMnemonicSeed(const uint256& seedFp, const std::vector<unsigned char>& vchCryptedSecret);
+    //! The Yugen account seed (N-A5): "yugenseed" (plain wallet) or "cyugenseed" (encrypted; erases the plain record).
+    bool WriteYugenSeed(const uint256& seedFp, const CKeyingMaterial& seed);
+    bool WriteCryptedYugenSeed(const uint256& seedFp, const std::vector<unsigned char>& vchCryptedSecret);
+    //! Reads the Yugen seed record back (the plain one into `plain`, the encrypted one into `crypted`).
+    bool ReadYugenSeed(const uint256& seedFp, CKeyingMaterial& plain, std::vector<unsigned char>& crypted);
     bool WriteMnemonicHDChain(const CHDChain& chain);
     bool WriteHasExternalImports(bool value);
     //! Review L-2: the lowest height a locked wallet without its transparent lookahead may have missed a coin at.

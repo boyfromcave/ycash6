@@ -377,6 +377,7 @@ BITCOIN_CORE_H = \
   wallet/rpcwallet.h \
   wallet/wallet.h \
   wallet/walletdb.h \
+  wallet/yugenaccount.h \
   wallet/wallet_tx_builder.h \
   warnings.h \
   weighted_map.h \
@@ -489,6 +490,7 @@ libbitcoin_wallet_a_SOURCES = \
   wallet/rpcdisclosure.cpp \
   wallet/rpcdump.cpp \
   wallet/rpcwallet.cpp \
+  wallet/yugenaccount.cpp \
   wallet/wallet.cpp \
   yellowback/txbuilder.cpp \
   yellowback/wallet.cpp \

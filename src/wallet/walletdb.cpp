@@ -1107,6 +1107,31 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
                 return false;
             }
         }
+        else if (strType == "yugenseed")
+        {
+            uint256 seedFp;
+            CKeyingMaterial seed;
+            ssKey >> seedFp;
+            ssValue >> seed;
+            if (CCryptoKeyStore::YugenSeedFingerprint(seed) != seedFp || !pwallet->LoadYugenSeed(seed))
+            {
+                strErr = "Error reading wallet database: Yugen seed corrupt";
+                return false;
+            }
+        }
+        else if (strType == "cyugenseed")
+        {
+            uint256 seedFp;
+            vector<unsigned char> vchCryptedSecret;
+            ssKey >> seedFp;
+            ssValue >> vchCryptedSecret;
+            if (!pwallet->LoadCryptedYugenSeed(seedFp, vchCryptedSecret))
+            {
+                strErr = "Error reading wallet database: LoadCryptedYugenSeed failed";
+                return false;
+            }
+            wss.fIsEncrypted = true;
+        }
         else if (strType == "cmnemonicphrase")
         {
             uint256 seedFp;
@@ -1237,6 +1262,7 @@ static bool IsKeyType(string strType)
     return (strType== "key" || strType == "wkey" ||
             strType == "hdseed" || strType == "chdseed" ||
             strType == "mnemonicphrase" || strType == "cmnemonicphrase" ||
+            strType == "yugenseed" || strType == "cyugenseed" ||
             strType == "mnemonichdchain" ||
             strType == "zkey" || strType == "czkey" ||
             strType == "sapzkey" || strType == "csapzkey" ||
@@ -1728,10 +1754,34 @@ bool CWalletDB::WriteMnemonicSeed(const MnemonicSeed& seed)
     return Write(std::make_pair(std::string("mnemonicphrase"), seed.Fingerprint()), seed);
 }
 
+bool CWalletDB::WriteYugenSeed(const uint256& seedFp, const CKeyingMaterial& seed)
+{
+    nWalletDBUpdateCounter++;
+    return Write(std::make_pair(std::string("yugenseed"), seedFp), seed);
+}
+
+bool CWalletDB::ReadYugenSeed(const uint256& seedFp, CKeyingMaterial& plain, std::vector<unsigned char>& crypted)
+{
+    const bool p = Read(std::make_pair(std::string("yugenseed"), seedFp), plain);
+    const bool c = Read(std::make_pair(std::string("cyugenseed"), seedFp), crypted);
+    return p || c;
+}
+
+bool CWalletDB::WriteCryptedYugenSeed(const uint256& seedFp, const std::vector<unsigned char>& vchCryptedSecret)
+{
+    nWalletDBUpdateCounter++;
+    if (!Write(std::make_pair(std::string("cyugenseed"), seedFp), vchCryptedSecret)) return false;
+    Erase(std::make_pair(std::string("yugenseed"), seedFp));
+    return true;
+}
+
 bool CWalletDB::WriteCryptedMnemonicSeed(const uint256& seedFp, const std::vector<unsigned char>& vchCryptedSecret)
 {
     nWalletDBUpdateCounter++;
-    return Write(std::make_pair(std::string("cmnemonicphrase"), seedFp), vchCryptedSecret);
+    if (!Write(std::make_pair(std::string("cmnemonicphrase"), seedFp), vchCryptedSecret)) return false;
+    // the plain record written before encryptwallet must not survive it (CDB::Rewrite then drops its slack)
+    Erase(std::make_pair(std::string("mnemonicphrase"), seedFp));
+    return true;
 }
 
 bool CWalletDB::WriteMnemonicHDChain(const CHDChain& chain)

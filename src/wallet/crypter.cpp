@@ -8,6 +8,7 @@
 
 #include "crypto/aes.h"
 #include "crypto/sha512.h"
+#include "hash.h"
 #include "script/script.h"
 #include "script/standard.h"
 #include "streams.h"
@@ -441,6 +442,59 @@ std::optional<MnemonicSeed> CCryptoKeyStore::GetMnemonicSeed() const
 }
 
 //
+// The Yugen account seed (doc/yugen-node.md, N-A5)
+//
+
+uint256 CCryptoKeyStore::YugenSeedFingerprint(const CKeyingMaterial& seed)
+{
+    CBLAKE2bWriter w(SER_GETHASH, 0, (const unsigned char*)"Ycash_YugenSd_FP");
+    w.write((const char*)seed.data(), seed.size());
+    return w.GetHash();
+}
+
+bool CCryptoKeyStore::SetYugenSeed(const CKeyingMaterial& seed)
+{
+    LOCK(cs_KeyStore);
+    if (HaveYugenSeed()) return false;
+    if (!fUseCrypto) {
+        yugenSeed = seed;
+        return true;
+    }
+    if (IsLocked()) return false;
+    const uint256 fp = YugenSeedFingerprint(seed);
+    std::vector<unsigned char> vchCryptedSecret;
+    if (!EncryptSecret(vMasterKey, seed, fp, vchCryptedSecret)) return false;
+    // This will call into CWallet to store the crypted seed to disk
+    return SetCryptedYugenSeed(fp, vchCryptedSecret);
+}
+
+bool CCryptoKeyStore::SetCryptedYugenSeed(const uint256& seedFp, const std::vector<unsigned char>& vchCryptedSecret)
+{
+    LOCK(cs_KeyStore);
+    // a wallet loading its records may meet this one before any other crypted record
+    if (!SetCrypted() || cryptedYugenSeed.has_value()) return false;
+    cryptedYugenSeed = std::make_pair(seedFp, vchCryptedSecret);
+    return true;
+}
+
+bool CCryptoKeyStore::HaveYugenSeed() const
+{
+    LOCK(cs_KeyStore);
+    return fUseCrypto ? cryptedYugenSeed.has_value() : yugenSeed.has_value();
+}
+
+std::optional<CKeyingMaterial> CCryptoKeyStore::GetYugenSeed() const
+{
+    LOCK(cs_KeyStore);
+    if (!fUseCrypto) return yugenSeed;
+    if (!cryptedYugenSeed.has_value() || vMasterKey.empty()) return std::nullopt;
+    CKeyingMaterial seed;
+    if (!DecryptSecret(vMasterKey, cryptedYugenSeed->second, cryptedYugenSeed->first, seed)) return std::nullopt;
+    if (YugenSeedFingerprint(seed) != cryptedYugenSeed->first) return std::nullopt;
+    return seed;
+}
+
+//
 // Legacy HD seeds
 //
 
@@ -775,6 +829,18 @@ bool CCryptoKeyStore::EncryptKeys(CKeyingMaterial& vMasterKeyIn)
                 }
             }
             mnemonicSeed = std::nullopt;
+        }
+        if (yugenSeed.has_value()) {
+            const uint256 fp = YugenSeedFingerprint(yugenSeed.value());
+            std::vector<unsigned char> vchCryptedSecret;
+            if (!EncryptSecret(vMasterKeyIn, yugenSeed.value(), fp, vchCryptedSecret)) {
+                return false;
+            }
+            // This will call into CWallet to store the crypted seed to disk (and erase the plain record)
+            if (!SetCryptedYugenSeed(fp, vchCryptedSecret)) {
+                return false;
+            }
+            yugenSeed = std::nullopt;  // CKeyingMaterial: the secure allocator wipes it
         }
         if (legacySeed.has_value()) {
             {

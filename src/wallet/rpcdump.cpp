@@ -22,6 +22,7 @@
 #include "util/match.h"
 #include "util/time.h"
 #include "wallet.h"
+#include "wallet/yugenaccount.h"
 #include "yellowback/address.h"
 #include "yellowback/params.h"
 #include "yellowback/wallet.h"
@@ -634,6 +635,17 @@ UniValue importwallet_impl(const UniValue& params, bool fImportZKeys)
         // The vault set sign-once history and the wallet's remembered vault builds (07/F-5, 01/V-2): dumpwallet's
         // "vaultsetsigs=<n>", "vaultsetsig=<setid>:<txid>:<n>:<role>:<sighash>", "vaultbuild=<txid>:<n>:<hex>" and
         // "vaultrecipient=<hash>:<script hex>" lines. Older nodes skip them.
+        if (boost::algorithm::starts_with(vstr[0], "yugenseed=")) {
+            // The Yugen account (N-A4): created from this seed if the wallet has none; the next call scans the chain.
+            // A node without -yugenprover stores it in wallet.dat all the same (a later Yugen start uses it).
+            SecureString ys(vstr[0].begin() + 10, vstr[0].end());
+            for (auto& t : vstr) memory_cleanse(const_cast<char*>(t.data()), t.size());
+            memory_cleanse(const_cast<char*>(line.data()), line.size());
+            std::string yerr;
+            if (!yugenwallet::RestoreSeed(ys, yerr))
+                throw JSONRPCError(RPC_WALLET_ERROR, "Yugen account: " + yerr);
+            continue;
+        }
         if (boost::algorithm::starts_with(vstr[0], "vaultsetsigs=")) {
             continue;                               // informative only: an import never clears the restore marker (S2)
         }
@@ -877,6 +889,9 @@ static void WriteWalletDumpToFile(const fs::path& exportfilepath)
     AssertLockHeld(cs_main);
     AssertLockHeld(pwalletMain->cs_wallet);
 
+    // before the file exists: a Yugen account whose seed is not available refuses the dump (never a dump without it)
+    const SecureString ys = yugenwallet::SeedHex();  // also on a node without -yugenprover (S1)
+
     ofstream file;
     file.open(exportfilepath.string().c_str());
     if (!file.is_open()) {
@@ -1040,6 +1055,17 @@ static void WriteWalletDumpToFile(const fs::path& exportfilepath)
         }
     }
     file << "\n";
+
+    // The Yugen account (doc/yugen-node.md N-A4): its seed (derived from the mnemonic seed, N-A2; written so that
+    // a restore into a wallet with another seed still finds the notes) and its addresses.
+    if (!ys.empty()) {
+        file << "# Yugen account\n";
+        const auto yaddrs = yugenwallet::Addresses();
+        file << "yugenseed=";
+        file.write(ys.data(), ys.size());
+        file << " # yugenaddr=" << (yaddrs.empty() ? "" : yaddrs.front()) << "\n";
+        file << "\n";
+    }
 
     file << "# End of dump\n";
     file.close();

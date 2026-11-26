@@ -2719,6 +2719,15 @@ public:
 
     /* Set the current encrypted mnemonic phrase, without saving it to disk (used by LoadWallet) */
     bool LoadCryptedMnemonicSeed(const uint256& seedFp, const std::vector<unsigned char>& seed);
+    //! The Yugen account seed (doc/yugen-node.md, N-A5): kept in wallet.dat like the mnemonic seed.
+    bool SetYugenSeed(const CKeyingMaterial& seed);
+    //! N-A5: the Yugen seed record is on disk: flushes the BDB log and a checkpoint (the environment runs with
+    //! DB_TXN_WRITE_NOSYNC), syncs the files (F_FULLFSYNC on macOS), then reads the record back and compares it
+    //! with the seed held in memory. Only after this may a copy of the seed elsewhere be destroyed.
+    bool YugenSeedDurable();
+    bool SetCryptedYugenSeed(const uint256& seedFp, const std::vector<unsigned char>& vchCryptedSecret);
+    bool LoadYugenSeed(const CKeyingMaterial& seed);
+    bool LoadCryptedYugenSeed(const uint256& seedFp, const std::vector<unsigned char>& seed);
     /* Set the legacy encrypted HD seed, without saving it to disk (used by LoadWallet) */
     bool LoadCryptedLegacyHDSeed(const uint256& seedFp, const std::vector<unsigned char>& seed);
 

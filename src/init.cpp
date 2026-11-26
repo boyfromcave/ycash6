@@ -11,6 +11,9 @@
 
 #include "init.h"
 #include "yugen/state.h"
+#ifdef ENABLE_WALLET
+#include "wallet/yugenaccount.h"
+#endif
 #include "addrman.h"
 #include "amount.h"
 #include "checkpoints.h"
@@ -2715,6 +2718,16 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
         // Run a thread to flush wallet periodically
         threadGroup.create_thread(boost::bind(&ThreadFlushWalletDB, boost::ref(pwalletMain->strWalletFile)));
+
+        // The Yugen account (doc/yugen-node.md N-A1): -rescan rebuilds its chain state; one sync per 16 blocks.
+        if (yugenwallet::Configured()) {
+            std::string yerr;
+            if (GetBoolArg("-rescan", false) && !yugenwallet::ResetChainState(yerr))
+                return InitError(strprintf(_("Yugen account: -rescan refused (%s). %s"), yerr, yugenwallet::RescanRecovery(yerr)));
+            yerr.clear();  // N-A5: a seed left in the state file moves into wallet.dat (a locked wallet: at walletpassphrase)
+            if (!yugenwallet::MigrateLegacySeed(yerr)) LogPrintf("Yugen account: seed migration deferred: %s\n", yerr);
+            threadGroup.create_thread(&yugenwallet::ThreadScheduledSync);
+        }
     }
 #endif
 
