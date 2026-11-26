@@ -409,6 +409,14 @@ node (`-yellowbacktestfault=error:mempool`; test_bitcoin
   outputs or the coins a bundle spent, so an explorer shows neither. Fixing it needs the wallet and the
   indexes to read a bundle's applied records (the undo mask) where they read `vin`/`vout`; not small,
   left for beta5.
+- **K-4, availability: a helper run holds `cs_main` for up to 120 s.** A mempool candidate's helper
+  runs inside `CheckMempoolTx`, under `cs_main`, with the deadline `-yugenmempoolverifytimeout`
+  (default 120 s). With the shared budget of 6 runs a minute (`-yugenpeerverifyrate`), Sybil peers
+  sending bytes that stall the helper until the deadline could keep `cs_main` busy most of the time:
+  block connection, RPCs and other relay wait behind it. Each such copy costs its sender a refusal in
+  the back-off, and the budget's per-peer share limits one peer, but not many. Running the helper
+  outside `cs_main` (check the bytes, then take the lock and re-check against the tip) is deferred
+  past beta4.
 
 ## Review fixes (independent review of the consensus commit, 2026-11-25)
 - H-1, C-1 (sidecar swap): the helper checks B5 (both proofs non-empty, within `PROOF_BYTES_MAX`,
@@ -482,10 +490,17 @@ Tests: `qa/yugen/test_leafverify.py` (helper contract), helper unit test
   tracks (`CoinsAtTip`), or the pool state itself fails. The refusal cache takes every refusal
   (`bad-yugen-bundle-skips` included) and a helper failure that is a verdict on the bytes (the helper
   ran and failed, or answered malformed), its reason cut to 200 characters; not a timeout or a
-  `helper not run` fault (node-local, retried), and not a helper failure outside a peer scope
-  (`sendrawtransaction`, the wallet's rebroadcast), so a transient fault never blocks the node's own
-  transaction. The cache is emptied whenever the tip moves (a connect or a disconnect, so a reorg back
-  to the same tip reuses nothing), so the same bytes replayed by other (Sybil) peers do not run the
+  `helper not run` fault (node-local, retried; `HelperResult::fault` says which, not the reason
+  string), and not a helper failure outside a peer scope (`sendrawtransaction`, the wallet's
+  rebroadcast). Nor is the cache read outside a peer scope: the node's own transaction is always
+  checked, so neither a transient fault nor a failure a peer's copy caused ever refuses it. A helper
+  exit 3 is still a verdict on the bytes even when its cause is local to this node: a missing
+  `-yugenb2verify`, the helper's own temp-file write errors, b2verify's exit 2; the helper does not
+  tell them apart from a failure on the input, so such a fault defers honest peers' copies until the
+  tip changes (fixing the node's configuration and the next block end it). The cache is emptied
+  whenever the active tip moves (`UpdateTip`, after `ConnectTip` or `DisconnectTip`, so a reorg back
+  to the same tip reuses nothing), not by a block that a later check of `ConnectBlock` still refuses,
+  nor by an `fJustCheck` or `VerifyDB` connect, so the same bytes replayed by other (Sybil) peers do not run the
   helper again at this tip; a copy with other proofs has another key and is judged on its own. Known
   trade-off: an attacker who exploits a difference of helper version or hardware (bytes that fail on
   some nodes only) can have honest relayers of those bytes deferred, never banned: each refused copy,

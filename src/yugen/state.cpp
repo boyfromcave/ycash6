@@ -51,7 +51,14 @@ struct HelperResult {
     std::string all;
     // A bundle REJECT only: the helper had confirmed both proofs hash to the committed hashes (review H-1).
     bool proofsBound{false};
+    // A FAIL that is no verdict on the bytes: the helper never ran on them (NOT_RUN: a pipe, fork or exec
+    // failure, a temp-file write failure; the line says HELPER_NOT_RUN) or ran out of time (TIMEOUT).
+    enum Fault { NONE, NOT_RUN, TIMEOUT } fault{NONE};
 };
+
+// The fault of the last helper failure ApplyBlockInner reported (fail()), read by CheckMempoolTx
+// after its trial; under cs_main.
+static HelperResult::Fault g_lastFault = HelperResult::NONE;
 
 // Review M-2: the helper timeout while a mempool candidate is checked (-yugenmempoolverifytimeout).
 static int64_t g_timeoutOverride = 0;
@@ -132,10 +139,10 @@ static HelperResult RunHelper(const std::vector<std::string>& args)
     pid_t pid;
     {
         std::lock_guard<std::mutex> sg(SpawnMutex());  // no other child inherits this pipe (N-A5)
-        if (!PipeCloexec(fd)) { r.line = std::string(HELPER_NOT_RUN) + "pipe failed"; return r; }
+        if (!PipeCloexec(fd)) { r.line = std::string(HELPER_NOT_RUN) + "pipe failed"; r.fault = HelperResult::NOT_RUN; return r; }
         pid = fork();
     }
-    if (pid < 0) { close(fd[0]); close(fd[1]); r.line = std::string(HELPER_NOT_RUN) + "fork failed"; return r; }
+    if (pid < 0) { close(fd[0]); close(fd[1]); r.line = std::string(HELPER_NOT_RUN) + "fork failed"; r.fault = HelperResult::NOT_RUN; return r; }
     if (pid == 0) {
         setpgid(0, 0);
         dup2(fd[1], 1);
@@ -174,8 +181,11 @@ static HelperResult RunHelper(const std::vector<std::string>& args)
     while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
     size_t nl = r.all.find('\n');
     r.line = r.all.substr(0, nl);
-    if (timedOut) { r.line = "timeout"; return r; }
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 127) r.line = std::string(HELPER_NOT_RUN) + "exec failed";   // the child's _exit(127)
+    if (timedOut) { r.line = "timeout"; r.fault = HelperResult::TIMEOUT; return r; }
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 127) {   // the child's _exit(127)
+        r.line = std::string(HELPER_NOT_RUN) + "exec failed";
+        r.fault = HelperResult::NOT_RUN;
+    }
     if (WIFEXITED(status) && WEXITSTATUS(status) == 0) r.kind = HelperResult::OK;
     else if (WIFEXITED(status) && WEXITSTATUS(status) == HELPER_EXIT_REJECT && r.line.rfind("REJECT ", 0) == 0) r.kind = HelperResult::REJECT;
     if (r.kind != HelperResult::OK) LogPrint("yugen", "yugen: helper %s: exit %d: %s\n", args.empty() ? "" : args[0],
@@ -259,7 +269,8 @@ static HelperResult VerifyProofs(const CTransaction& tx, const Transfer& t, int 
         if (!(o << doc).flush()) {
             boost::system::error_code ec;
             fs::remove(p, ec);
-            return HelperResult{HelperResult::FAIL, std::string(HELPER_NOT_RUN) + "temp file write failed", ""};
+            return HelperResult{HelperResult::FAIL, std::string(HELPER_NOT_RUN) + "temp file write failed", "", false,
+                                HelperResult::NOT_RUN};
         }
     }
     int64_t t0 = GetTimeMillis();
@@ -743,7 +754,7 @@ static HelperResult BundleHelper(const CTransaction& tx, const std::vector<std::
         if (!(o << doc).flush()) {
             boost::system::error_code ec;
             fs::remove(p, ec);
-            return {HelperResult::FAIL, std::string(HELPER_NOT_RUN) + "temp file write failed", ""};
+            return {HelperResult::FAIL, std::string(HELPER_NOT_RUN) + "temp file write failed", "", false, HelperResult::NOT_RUN};
         }
     }
     int64_t t0 = GetTimeMillis();
@@ -831,7 +842,8 @@ static bool ApplyBlockInner(PoolState& s, BlockRecord& rec, const CBlock& block,
     std::vector<Pay> pays;                     // per bundle, block order
     uint64_t w5Weight = 0, w5Bytes = 0, sidecarBytes = 0;
     size_t sidecarUsed = 0;
-    auto fail = [&](const std::string& why) {
+    auto fail = [&](const std::string& why, HelperResult::Fault fault = HelperResult::NONE) {
+        g_lastFault = fault;
         return state.Error(std::string(VERIFIER_FAILED) + ": " + why);   // never a verdict on the block (review H-1)
     };
     for (const CTransaction& tx : block.vtx) {
@@ -898,7 +910,7 @@ static bool ApplyBlockInner(PoolState& s, BlockRecord& rec, const CBlock& block,
                     if (p.empty() || p.size() > PROOF_BYTES_MAX) return state.DoS(100, false, REJECT_INVALID, "bad-yugen-proof-too-long", BodyCorruption::Possible);
                 Pay pay;
                 auto hr = BundleHelper(tx, proofs, h, heights, {}, params, pay);
-                if (hr.kind == HelperResult::FAIL) return fail(hr.line);
+                if (hr.kind == HelperResult::FAIL) return fail(hr.line, hr.fault);
                 // Review H-1: a refusal is a verdict on the block only when the helper had confirmed
                 // that these are the proofs the bundle commits to; any other refusal may be a relay's
                 // substitution of sidecar data (body-replaceable).
@@ -930,7 +942,7 @@ static bool ApplyBlockInner(PoolState& s, BlockRecord& rec, const CBlock& block,
                 }
                 if (std::find(applied.begin(), applied.end(), false) != applied.end()) {
                     hr = BundleHelper(tx, proofs, h, heights, applied, params, pay);
-                    if (hr.kind != HelperResult::OK) return fail(hr.line);
+                    if (hr.kind != HelperResult::OK) return fail(hr.line, hr.fault);
                 }
                 if (!trial) PutProofs(tx.GetHash(), proofs);   // round 3: a trial's proofs came from the store
                 pays.push_back(pay);
@@ -963,7 +975,7 @@ static bool ApplyBlockInner(PoolState& s, BlockRecord& rec, const CBlock& block,
             const CBlockIndex* anchorIndex = pprev->GetAncestor(ha);
             if (!anchorIndex) return state.DoS(100, false, REJECT_INVALID, "bad-yugen-anchor");
             auto hr = VerifyProofs(tx, *t, h, ha, s.blocks.at(ha).rootAfter, anchorIndex->GetBlockHash(), params);
-            if (hr.kind == HelperResult::FAIL) return fail(hr.line);
+            if (hr.kind == HelperResult::FAIL) return fail(hr.line, hr.fault);
             if (hr.kind == HelperResult::REJECT)
                 return state.DoS(100, error("yugen: %s: %s", tx.GetHash().ToString(), hr.line), REJECT_INVALID, "bad-yugen-proof",
                                  BodyCorruption::Possible);   // the proofs are outside the txid (N-D7)
@@ -1233,6 +1245,12 @@ const PoolState& Current(const CChainParams& params)
     return g_state;
 }
 
+void TipChanged()
+{
+    AssertLockHeld(cs_main);
+    g_refused.clear();
+}
+
 void DisconnectBlock(const CBlockIndex* pindex)
 {
     g_refused.clear();
@@ -1315,7 +1333,6 @@ bool ConnectBlock(const CBlock& block, const CBlockIndex* pindex, const CChainPa
         return state.DoS(dos, false, REJECT_INVALID, "yugen-verifier-failed", BodyCorruption::Possible);
     }
     if (ok && !fJustCheck) {
-        g_refused.clear();
         g_helperFailures.erase(hash);
         PruneProofStore(pindex->nHeight - (int)MAX_REORG_LENGTH);
     }
@@ -1479,7 +1496,10 @@ bool CheckMempoolTx(const CTransaction& tx, const CTxMemPool& pool, const CChain
         one.vYugenProofs.push_back({tx.GetHash(), *p});
     }
     const uint256 key = RefusalKey(tx, tx.IsYugenBundle() ? &one.vYugenProofs[0].proofs : nullptr);
-    if (const std::string* why = g_refused.get(key)) return state.DoS(0, false, REJECT_INVALID, *why, BodyCorruption::Possible);
+    // Only a peer's candidate is answered from the cache: the node's own transaction (sendrawtransaction,
+    // the wallet's rebroadcast) is always checked, so a failure a peer's copy caused never refuses it.
+    if (g_scopePeer >= 0)
+        if (const std::string* why = g_refused.get(key)) return state.DoS(0, false, REJECT_INVALID, *why, BodyCorruption::Possible);
     // Round 3: a candidate from a peer spends a token of the shared budget here, after the cheap checks
     // (CheckTransaction, the structure, PreCheckMempoolTx, inputs and scripts) and the refusal cache.
     if (g_scopePeer >= 0 && !g_peerBudget.Take(GetTimeMicros(), GetArg("-yugenpeerverifyrate", DEFAULT_PEER_VERIFY_RATE), g_scopePeer))
@@ -1511,12 +1531,13 @@ bool CheckMempoolTx(const CTransaction& tx, const CTxMemPool& pool, const CChain
         if (inner.IsError()) g_scopeJudged = false;
         return state.DoS(0, false, REJECT_INVALID, inner.GetRejectReason(), BodyCorruption::Possible);
     }
+    g_lastFault = HelperResult::NONE;
     if (!Trial(one, tip->nHeight + 1, tip, params, inner, nullptr, coins, &nfs)) {
         const std::string& why = inner.GetRejectReason();
-        const std::string failed = std::string(VERIFIER_FAILED) + ": ";   // fail() in ApplyBlockInner
-        const bool helperFailed = why.rfind(VERIFIER_FAILED, 0) == 0;
-        const bool notRun = why.rfind(failed + HELPER_NOT_RUN, 0) == 0;
-        if (!inner.IsError() || (helperFailed && !notRun && why != failed + "timeout" && g_scopePeer >= 0))
+        const bool helperFailed = why.rfind(VERIFIER_FAILED, 0) == 0;   // fail() in ApplyBlockInner
+        const bool notRun = helperFailed && g_lastFault == HelperResult::NOT_RUN;
+        const bool timedOut = helperFailed && g_lastFault == HelperResult::TIMEOUT;
+        if (!inner.IsError() || (helperFailed && !notRun && !timedOut && g_scopePeer >= 0))
             g_refused.put(key, why.substr(0, REFUSED_REASON_MAX));
         if (inner.IsError() && (!helperFailed || notRun)) g_scopeJudged = false;
         return state.DoS(0, false, REJECT_INVALID, why, BodyCorruption::Possible);

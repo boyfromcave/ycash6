@@ -196,6 +196,9 @@ static const char* const VERIFY_DEFERRED = "yugen-verify-deferred";
 int64_t RefusalBackoff(int& refusals, int64_t& lastRefusal, int64_t nowMicros);
 // A mempool candidate refused at this tip with exactly these bytes, proofs included (cheap).
 bool KnownRefused(const CTransaction& tx);
+// The active tip moved (main.cpp UpdateTip, after ConnectTip or DisconnectTip): the refusal cache is
+// emptied. Not on a connect that main.cpp's later checks still reject, nor fJustCheck. Under cs_main.
+void TipChanged();
 
 // The bundle proof store: sidecar data kept beside the block files (<datadir>/yugen/proofs).
 void PutProofs(const uint256& txid, const std::vector<std::vector<unsigned char>>& proofs);

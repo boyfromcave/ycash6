@@ -4821,6 +4821,7 @@ struct PoolMetrics {
 /** Update chainActive and related internal data structures. */
 void static UpdateTip(CBlockIndex *pindexNew, const CChainParams& chainParams) {
     chainActive.SetTip(pindexNew);
+    yugen::TipChanged();   // Yugen: the mempool refusal cache holds for one tip only
 
     // New best block
     nTimeBestReceived = GetTime();

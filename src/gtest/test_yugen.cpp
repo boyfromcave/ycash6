@@ -1597,6 +1597,32 @@ TEST(Yugen, MempoolLocalHelperFaultIsNotRemembered) {
     }
 }
 
+// A refusal cached from a peer's copy never refuses the node's own transaction: without a peer scope
+// (sendrawtransaction, the wallet's rebroadcast) the cache is not read and the helper runs again. A tip
+// change empties the cache.
+TEST(Yugen, MempoolOwnTxSkipsRefusalCache) {
+    YugenChain c("fail");
+    ASSERT_TRUE(c.ConnectSeed());
+    MempoolAtTip m(c, {});
+    const CTransaction leaf = YugenChain::Leaf(19, 20);
+    auto [ok1, why1, judged1] = m.Check(leaf, 1);
+    EXPECT_FALSE(ok1);
+    EXPECT_TRUE(judged1);
+    ASSERT_TRUE(yugen::KnownRefused(leaf));
+    const int runs = c.Calls("verify");
+    setenv("YUGEN_FAKE_VERIFY", "accept", 1);                // the fault is gone (it was the peer's copy here)
+    auto [ok2, why2, judged2] = m.Check(leaf, -1);
+    EXPECT_TRUE(ok2) << why2;
+    EXPECT_FALSE(judged2);
+    EXPECT_GT(c.Calls("verify"), runs);                      // checked, not answered from the cache
+    EXPECT_TRUE(yugen::KnownRefused(leaf));                  // a peer's copy is still answered from it
+    {
+        LOCK(cs_main);
+        yugen::TipChanged();
+    }
+    EXPECT_FALSE(yugen::KnownRefused(leaf));
+}
+
 // bad-yugen-bundle-skips depends on the tip and the bytes only, so it is remembered: a second peer's copy
 // runs no helper. At tip 33 (a leaf spent nullifier 1), a bundle's withdrawal spending it is skipped.
 TEST(Yugen, MempoolBundleSkipsIsRemembered) {
