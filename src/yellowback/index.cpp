@@ -153,8 +153,10 @@ std::optional<std::string> YellowbackIndex::SetTestFault(const std::string& spec
     } else if (boost::algorithm::starts_with(spec, "storage:")) {
         std::vector<std::string> parts;
         boost::split(parts, spec, boost::is_any_of(":"));
-        if (parts.size() < 2 || parts.size() > 3) return std::string("-yellowbacktestfault: expected storage:<check|commit|undo>[:<height>]");
+        if (parts.size() < 2 || parts.size() > 3) return std::string("-yellowbacktestfault: expected storage:<check|commit|undo>[:<height>] or storage:mempool");
+        if (parts[1] == "mempool" && parts.size() == 3) return std::string("-yellowbacktestfault: storage:mempool takes no height");
         if (parts[1] == "check") f.storageHook = TestFault::CHECK;
+        else if (parts[1] == "mempool") f.storageHook = TestFault::MEMPOOL;
         else if (parts[1] == "commit") f.storageHook = TestFault::COMMIT;
         else if (parts[1] == "undo") f.storageHook = TestFault::UNDO;
         else return std::string("-yellowbacktestfault: unknown hook '" + parts[1] + "'");
@@ -165,7 +167,7 @@ std::optional<std::string> YellowbackIndex::SetTestFault(const std::string& spec
         }
         f.armed = true;
     } else {
-        return std::string("-yellowbacktestfault: expected storage:<check|commit|undo>[:<height>], crash:<height>, template or schema");
+        return std::string("-yellowbacktestfault: expected storage:<check|commit|undo>[:<height>], storage:mempool, crash:<height>, template or schema");
     }
     testFault = f;
     LogPrintf("yellowback: -yellowbacktestfault=%s armed\n", spec);
@@ -652,6 +654,7 @@ std::optional<std::string> YellowbackIndex::MempoolCheckLocked(const CTransactio
     // The storage boundary on the mempool path (audit A-3): a storage failure refuses the transaction and
     // marks the index unhealthy (the next block then aborts the node) instead of unwinding AcceptToMemoryPool.
     try {
+        MaybeFault(TestFault::MEMPOOL, 0);
         return MempoolCheckInner(tx);
     } catch (const std::exception& e) {
         SetUnhealthy(std::string("storage failure in MempoolCheck: ") + e.what());
@@ -711,14 +714,27 @@ std::optional<std::string> YellowbackIndex::MempoolCheckInner(const CTransaction
     return std::nullopt;
 }
 
-bool YellowbackIndex::TracksAtParent(const COutPoint& out, const CBlockIndex* pprev)
+bool YellowbackIndex::TracksAtParent(const std::vector<COutPoint>& outs, const CBlockIndex* pprev, std::vector<bool>& tracked)
 {
     LOCK(cs_yellowback);
-    if (stopped || !healthy || pprev == nullptr) return false;   // CheckConnect then fails the block's connection
-    State st(*db);
-    const std::optional<TipRecord> tip = st.GetTip();
-    if (!tip.has_value() || tip->height != pprev->nHeight || tip->blockHash != pprev->GetBlockHash()) return false;   // as CheckConnect (K6)
-    return st.GetToken(out).has_value() || st.GetVault(out).has_value() || st.GetIntent(out).has_value() || st.GetBondIndex(out).has_value();
+    tracked.assign(outs.size(), false);
+    if (stopped || !healthy || pprev == nullptr) return false;
+    try {
+        State st(*db);
+        const std::optional<TipRecord> tip = st.GetTip();
+        if (!tip.has_value()) return pprev->nHeight + 1 <= params.startHeight;   // before the module starts: nothing tracked
+        if (tip->height != pprev->nHeight || tip->blockHash != pprev->GetBlockHash()) return false;   // not at the parent (K6)
+        for (size_t i = 0; i < outs.size(); i++)
+            tracked[i] = st.GetToken(outs[i]).has_value() || st.GetVault(outs[i]).has_value() ||
+                         st.GetIntent(outs[i]).has_value() || st.GetBondIndex(outs[i]).has_value();
+        return true;
+    } catch (const std::exception& e) {
+        SetUnhealthy(std::string("storage failure in TracksAtParent: ") + e.what());
+    } catch (...) {
+        SetUnhealthy("storage failure in TracksAtParent");
+    }
+    tracked.assign(outs.size(), false);
+    return false;
 }
 
 std::optional<std::string> YellowbackIndex::MempoolCheckReason(const CTransaction& tx)

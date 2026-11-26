@@ -33,7 +33,15 @@ primitive and its registered rule modules (the YED module), never sees them. Two
 
 - Inputs are a skip, not a failure: a bundle may name a coin that does not exist yet, so a holder of a
   signed, unbroadcast module transaction could otherwise void a bundle (and its proving work) by
-  broadcasting it after the bundle is built. As a skip, only that record is lost.
+  broadcasting it after the bundle is built. As a skip, only that record is lost, unless every
+  transfer of the bundle is skipped: the bundle then fails as a whole ("no transfer applied"), so a
+  bundle made only of deposits that its depositors can turn into skips can still be voided (hosts
+  screen deposits, below).
+- The module's answer is a node's local fact: a node whose module cannot answer (its state not at the
+  parent, unavailable) must not decide the block either way; it stops rather than call the block
+  invalid. The rule module's state must be maintained by every validating node of a network from the
+  upgrade's activation (on ycash6 the YED attestor set, which the tracked coins depend on, is a chain
+  parameter on every public network).
 - The same-block clause lets a node decide S2 from the module's state at the parent: only a coin of the
   same block can have become tracked earlier in that block, and wallets and hosts deposit confirmed
   coins anyway.
@@ -46,4 +54,5 @@ primitive and its registered rule modules (the YED module), never sees them. Two
 
 No vector changes in bundle.json (no vector deposits a tracked coin or creates a template output); new
 vectors should cover a tracked-coin skip, a same-block-coin skip and each refused output shape. Hosts
-should accept only confirmed, module-untracked deposit coins.
+should accept only confirmed, module-untracked deposit coins, and should not build a bundle made only
+of deposits from one untrusted source.

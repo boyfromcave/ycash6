@@ -464,7 +464,7 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-yellowbackattestarmmin=<n>", "Yellowback ATTEST_ARM_MIN override, 0 = attestation never arms (regtest only, default 3)");
         strUsage += HelpMessageOpt("-yellowbackmintrequiresarmed", "Yellowback MINT_REQUIRES_ARMED: an unarmed mint is VOID (mint-halted-unarmed) (regtest only, default 0; always on mainnet and testnet)");
         strUsage += HelpMessageOpt("-yellowbackbundlecarrier=<mode>", "Yellowback BUNDLE_CARRIER override: scriptsig, opreturn or either (regtest only, default scriptsig)");
-        strUsage += HelpMessageOpt("-yellowbacktestfault=<spec>", "Inject a fault once: storage:<check|commit|undo>[:<height>], crash:<height>, template or schema (regtest only)");
+        strUsage += HelpMessageOpt("-yellowbacktestfault=<spec>", "Inject a fault once: storage:<check|commit|undo>[:<height>], storage:mempool, crash:<height>, template or schema (regtest only)");
     }
 
     strUsage += HelpMessageGroup(_("Connection options:"));
@@ -1690,6 +1690,16 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             return InitError(yellowbackErr.value());
         }
         yellowback::g_yellowbackLive = yellowbackParams.IsConfigured();
+        // N-D12: a bundle skips a deposit of a coin the module tracks (yugen::ConnectBundleCoins, S2). Set here,
+        // before VerifyDB, wherever the module is live: until the index exists the answer is unknown (a
+        // re-verified block then takes its recorded decision; any other block is a local failure, never invalid).
+        if (yellowback::g_yellowbackLive) {
+            yugen::g_moduleTracks = [](const std::vector<COutPoint>& outs, const CBlockIndex* pprev, std::vector<bool>& tracked) {
+                tracked.assign(outs.size(), false);
+                return yellowback::g_yellowback != nullptr && yellowback::g_yellowback->TracksAtParent(outs, pprev, tracked)
+                           ? yugen::ModuleAnswer::KNOWN : yugen::ModuleAnswer::UNKNOWN;
+            };
+        }
         // The module's per-transaction rules run inside the primitive from the first block connected (§15.7).
         yellowback::SetModuleParams(yellowbackParams);
         // 01/V-7: until P8 makes the attestor set a chain parameter it is a node parameter on regtest, and nodes
@@ -2541,10 +2551,6 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         yellowback::g_yellowback = new yellowback::YellowbackIndex(yellowbackParams, GetDataDir() / "yellowback", 1 << 22, GetBoolArg("-reindex-yellowback", false));
         // the primitive's liveness hook verifies through the index's signature cache (focused review; never deleted)
         vault::SetModuleCache(static_cast<yellowback::SigCache*>(yellowback::g_yellowback->GetSigCache()));
-        // N-D12: a bundle skips a deposit of a coin the module tracks (yugen::ConnectBundleCoins, S2)
-        yugen::g_moduleTracks = [](const COutPoint& out, const CBlockIndex* pprev) {
-            return yellowback::g_yellowback != nullptr && yellowback::g_yellowback->TracksAtParent(out, pprev);
-        };
         {
             // MINER-1..3, L6 (validated in step 3).
             KeyIO yellowbackKeyIO(chainparams);

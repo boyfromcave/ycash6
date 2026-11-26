@@ -261,7 +261,8 @@ module and claimed that a later transaction could not trigger it. That was false
 is fixed once the coin exists, but a bundle may name a coin that does not exist yet. A holder of a
 signed, unbroadcast YED transaction knows its txid; a host bundles a deposit of `(txid, 0)` (harmless
 then: an S2 skip), the YED transaction is broadcast, and every node would refuse the whole bundle,
-losing its proving work. As a skip, the same sequence only skips that one record.
+losing its proving work. As a skip, the same sequence only skips that one record (unless every other
+transfer of the bundle is skipped too: `bad-yugen-bundle-none-applied`, see the host policy).
 
 Why the parent's state and the same-block skip. The coins move in `ConnectBundleCoins`, inside
 main.cpp's transaction loop; the module evaluates the block after it, so its in-order pass cannot
@@ -271,10 +272,32 @@ is a spent coin, S2 already). Only a coin created in the same block could have b
 earlier position, and the same-block skip covers it without the module's in-block state (stricter than
 needed; the pool already takes only confirmed deposit coins). The block connect, the template's and the
 pool's dry runs (`CoinsAtTip`, both at the tip) and the replay (the undo mask) therefore decide alike.
-`TracksAtParent` answers false when the index is not at the parent: empty, stopped or unhealthy (then
-`CheckConnect` fails the connection anyway) or re-verifying an active-chain block (K6, where the module
-does not judge the block either; a `-checklevel=4` re-verification may then apply a deposit the original
-connection skipped, in its throwaway view only).
+The module's answer has three states (review, 2026-11-26): tracked, not tracked, or unknown. It is unknown
+when the index is stopped or unhealthy (any storage failure makes it so, the hooks' and also
+`MempoolCheck`'s, `AddAttestation`'s and `BuildBundle`'s, after which the node runs on), when it is empty
+at or past its start height, or when its tip is not the parent. Unknown is never "not tracked": a block
+being connected stops the node with a node failure (`AbortNode`, as `CheckConnect`'s own failure does), so
+the block is not marked invalid and connects once the index is rebuilt (`-reindex-yellowback`); the pool
+and the template refuse the bundle for the moment. The first version answered "not tracked", so an
+unhealthy node applied a deposit the others skip (and never verify) and could mark a valid block
+`BLOCK_FAILED_VALID` for good. The one place where unknown is expected is a re-verification of an
+active-chain block (`VerifyDB`, `verifychain`, K6): the module's state after its parent is gone, so
+`ConnectBlock` reads the block's undo data and `ConnectBundleCoins` takes the module's decision from the
+recorded applied mask (a record that every other rule would apply and the mask records skipped was the
+module's skip); every other rule is re-decided and checked as before. The hook is set when the module is
+known to be live (before `VerifyDB` runs at startup), and one call per bundle asks for all its deposit
+coins (one lock, one tip read).
+
+Nodes without an attestor set. Where the module is not live (`g_yellowbackLive` false) the hook is unset
+and nothing is tracked, so such a node applies a deposit a live node skips: the two would hold different
+coins, a split. It cannot happen on a public network: the attestor set is a chain parameter there
+(`ParamsForNetwork`, testnet-yb-fast's `TEST_FAST_ATTESTOR_SET_ID`), so every node of a network is live
+or none is, and where none is no coin is ever tracked (a YED vault is created only under the set,
+`ValidateCreate`'s `bad-yellowback-vault-set`, so the tracked coins are a function of the set and cannot
+be maintained without it). On regtest the set is a node parameter (01/V-7, until P8): nodes started with
+and without it already compute different module state and may now also split on a bundle's deposit of a
+tracked coin; a regtest network that uses YED and Yugen together must give every node the set
+(`yugen_bundle_vb_module.py` uses exactly this difference to build its block).
 
 Why a failure for outputs, and that it is not griefable. Record outputs are bytes the bundle author
 writes at build time, and the test is a pure function of the script (no chain state, no height), so no
@@ -283,13 +306,17 @@ later transaction can change the verdict; a host checks its own bundles before p
 Host policy (yugen-bundler, any bundling host): accept only deposit coins that are confirmed and that
 the module does not track at the tip (the pool refuses any bundle with a skip,
 `bad-yugen-bundle-skips`); a deposit voided later by a YED transaction is then a skip, not a loss of
-the bundle.
+the bundle. A skip saves the bundle only while one transfer stays applied: a bundle whose every transfer
+is a deposit its depositors can turn into skips (a coin they make tracked or spend, or one created in
+the bundle's block) still fails as a whole (`bad-yugen-bundle-none-applied`), so the griefing above is
+narrowed, not closed. A host does not build a bundle made only of deposits from one untrusted source, and
+screens every deposit as confirmed and untracked.
 
-Cost. `TracksAtParent` takes the index lock and reads the tip record and up to four keys per deposit
-input, at the bundle's admission to the pool, per block template and at the block's connection; it runs
-only for inputs that pass the rest of S2 and never on the per-tip pool re-check (`StaleInPool`,
-`RemoveInvalidVaultSpends`). For a ~53,000-input bundle that is ~265,000 LevelDB reads per evaluation,
-mostly cached: a known issue for beta4 (one tip read per call and one prefix lookup would cut it).
+Cost. `TracksAtParent` takes the index lock and reads the tip record once per bundle, then up to four keys
+per deposit input, at the bundle's admission to the pool, per block template and at the block's
+connection; never on the per-tip pool re-check (`StaleInPool`, `RemoveInvalidVaultSpends`). For a
+~53,000-input bundle that is ~212,000 LevelDB reads per evaluation, mostly cached: a known issue for beta4
+(one prefix lookup would cut it).
 
 Spec status: both rules are pending a spec proposal for 0.5.5
 (`doc/yugen-spec-proposal-0.5.5-vb-module-coins.md`); the output rule narrows §15.1's "any bytes".
@@ -297,9 +324,14 @@ Spec status: both rules are pending a spec proposal for 0.5.5
 Tier: within the network upgrade (Yugen's activation), the smallest rung: a skip and a refusal on the
 bundle path, no new field, no new state; both bind only post-activation blocks. kogany will need the
 same rules when it implements VB records (record it in the kogany plan's findings log until then).
-Tests: gtest `Yugen.BundleVbRecordsConnect` (a tracked coin and a same-block coin skipped; a V-shaped
-record output, YED and other tag, refused), `Yugen.BundleRecordInputTrackedByModule` (the module does
-not refuse the bundle; the leaf way burns).
+Tests: gtest `Yugen.BundleVbRecordsConnect` (a tracked coin and a same-block coin skipped; an unknown
+answer a local error, never invalid, and a recorded mask followed; a V-shaped record output, YED and
+other tag, refused), `Yugen.BundleRecordInputTrackedByModule` (the module does not refuse the bundle; the
+leaf way burns); test_bitcoin `yellowback_index_tests/tracks_at_parent_unknown_unless_at_parent`; rpc
+`yugen_bundle_vb_module.py` (a block whose bundle deposits a token with a broken signature: an unhealthy
+index stops the node and the block is not invalid, the block connects with the deposit skipped, and
+`verifychain 4` passes over it; both failed before the fix). `-yellowbacktestfault=storage:mempool`
+(regtest) makes the next `MempoolCheck` fail, leaving the node running with an unhealthy index.
 
 ## Review fixes (C-1, P-1, 2026-11-26)
 - C-1: `DecodeRecord` found a repeated deposit input by scanning the record's earlier inputs, quadratic

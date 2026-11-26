@@ -1106,8 +1106,50 @@ TEST(Yugen, BundleVbRecordsConnect) {
         // N-D12, S2: a coin the YED module tracks after the parent (here: a token) is skipped, never spent.
         static COutPoint tracked;
         tracked = vb.coin;
-        yugen::g_moduleTracks = [](const COutPoint& o, const CBlockIndex*) { return o == tracked; };
+        yugen::g_moduleTracks = [](const std::vector<COutPoint>& outs, const CBlockIndex*, std::vector<bool>& t) {
+            t.clear();
+            for (const auto& o : outs) t.push_back(o == tracked);
+            return yugen::ModuleAnswer::KNOWN;
+        };
         skippedDeposit(1);
+        yugen::g_moduleTracks = nullptr;
+    }
+    {
+        // N-D12: the module cannot answer (its index stopped, unhealthy or not at the parent). A block being
+        // connected is a local failure (state.IsError, so no BLOCK_FAILED_VALID), never invalid, and nothing is
+        // spent; a re-verified active-chain block takes the decision its undo entry recorded.
+        yugen::g_moduleTracks = [](const std::vector<COutPoint>& outs, const CBlockIndex*, std::vector<bool>& t) {
+            t.assign(outs.size(), false);
+            return yugen::ModuleAnswer::UNKNOWN;
+        };
+        auto once = [&](const std::vector<bool>* recorded, CCoinsViewCache& view, CTxUndo& undo, CValidationState& st) {
+            const CTransaction bundle = vb.Tx(c.h0);
+            withCoin(view, vb.Spk());
+            c.i2.nHeight = YugenChain::ACT + 1; c.i2.pprev = &c.i1;
+            yugen::BlockCoins bc; CAmount delta = 0;
+            return yugen::ConnectBundleCoins(bundle, view, undo, &c.i2, Params(), SCRIPT_VERIFY_P2SH, bc, delta, st, recorded);
+        };
+        {
+            CCoinsViewCache view(&base); CTxUndo undo; CValidationState st;
+            EXPECT_FALSE(once(nullptr, view, undo, st));
+            EXPECT_TRUE(st.IsError());
+            EXPECT_FALSE(st.IsInvalid());
+            EXPECT_TRUE(view.AccessCoins(vb.coin.hash)->IsAvailable(vb.coin.n));
+        }
+        {
+            const std::vector<bool> skipped{false, true};
+            CCoinsViewCache view(&base); CTxUndo undo; CValidationState st;
+            EXPECT_TRUE(once(&skipped, view, undo, st)) << st.GetRejectReason();
+            EXPECT_EQ(yugen::UndoMask(undo), skipped);
+            EXPECT_TRUE(view.AccessCoins(vb.coin.hash)->IsAvailable(vb.coin.n));
+        }
+        {
+            const std::vector<bool> applied{true, true};
+            CCoinsViewCache view(&base); CTxUndo undo; CValidationState st;
+            EXPECT_TRUE(once(&applied, view, undo, st)) << st.GetRejectReason();
+            EXPECT_EQ(yugen::UndoMask(undo), applied);
+            EXPECT_FALSE(view.AccessCoins(vb.coin.hash) && view.AccessCoins(vb.coin.hash)->IsAvailable(vb.coin.n));
+        }
         yugen::g_moduleTracks = nullptr;
     }
     // N-D12, S2: a coin created in the bundle's own block is skipped (the module's state at the parent

@@ -3900,6 +3900,7 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     CAmount chainSupplyDelta = 0;
     CAmount transparentValueDelta = 0;
     yugen::BlockCoins yugenCoins;
+    std::optional<CBlockUndo> yugenRecordedUndo;   // N-D12: the recorded undo of a re-verified active-chain block
     size_t total_sapling_tx = 0;
     size_t total_orchard_tx = 0;
 
@@ -4121,9 +4122,28 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
         UpdateCoins(tx, view, i == 0 ? undoDummy : blockundo.vtxundo.back(), pindex->nHeight);
         // Yugen (spec 0.5.4 §15.5, §15.6 B6): a bundle's VB records spend and create coins here, in block order.
         if (tx.IsYugen()) {
+            // N-D12: a block of the active chain is a re-verification (VerifyDB, verifychain): the YED module's
+            // state after its parent is gone, so a bundle takes the module's skips from its recorded undo entry.
+            const std::vector<bool>* yugenRecorded = nullptr;
+            std::vector<bool> yugenRecordedMask;
+            if (i > 0 && tx.IsYugenBundle() && chainActive.Contains(pindex)) {
+                if (!yugenRecordedUndo.has_value()) {
+                    yugenRecordedUndo.emplace();
+                    if (!ReadBlockUndo(*yugenRecordedUndo, pindex)) yugenRecordedUndo->vtxundo.clear();
+                }
+                if (i - 1 < yugenRecordedUndo->vtxundo.size()) {
+                    yugenRecordedMask = yugen::UndoMask(yugenRecordedUndo->vtxundo[i - 1]);
+                    yugenRecorded = &yugenRecordedMask;
+                }
+            }
             if (!yugen::ConnectBundleCoins(tx, view, i == 0 ? undoDummy : blockundo.vtxundo.back(), pindex, chainparams,
-                                           flags, yugenCoins, transparentValueDelta, state))
+                                           flags, yugenCoins, transparentValueDelta, state, yugenRecorded)) {
+                // The module's answer was unknown (its index cannot evaluate): a node failure, as CheckConnect's,
+                // never a verdict on the block (no BLOCK_FAILED_VALID).
+                if (state.IsError() && !chainActive.Contains(pindex))
+                    return AbortNode(state, "Yellowback index failure: " + state.GetRejectReason());
                 return false;
+            }
             if (!MoneyDeltaRange(transparentValueDelta))
                 return state.DoS(100, error("%s: transparent value delta out of range: %d at height %d", __func__, transparentValueDelta, pindex->nHeight),
                     REJECT_INVALID, "bad-transparent-value-delta-out-of-range");

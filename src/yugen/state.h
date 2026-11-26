@@ -97,13 +97,22 @@ struct BlockCoins {
 // (the bundle's CTxUndo) given the applied mask (its first entry, UndoMask) and the spent coins.
 // `transparentDelta` changes by the outputs created less the coins spent. The deposit scripts are
 // verified by ConnectBlock (they sign the transfer hash, which the helper computes).
+// `recorded`: the applied mask this bundle's undo entry holds, when the block is re-verified on the
+// active chain (VerifyDB, verifychain): the module's state after the parent is gone then, so a deposit
+// the rest of S2 would apply takes its module decision from the mask (N-D12; nothing else does).
+// A false return with state.IsError() is a node-local failure (the module's answer is unknown), never
+// a verdict on the block.
 bool ConnectBundleCoins(const CTransaction& tx, CCoinsViewCache& view, CTxUndo& undo, const CBlockIndex* pindex,
                         const CChainParams& params, unsigned int flags, BlockCoins& bc, CAmount& transparentDelta,
-                        CValidationState& state);
-// N-D12: whether the YED module tracks a coin (a token, a vault, an intent, a bond) in its state after
-// `pprev` (init.cpp sets it to the Yellowback index's answer; unset, nothing is tracked). ConnectBundleCoins
-// skips a deposit of such a coin (S2).
-extern bool (*g_moduleTracks)(const COutPoint& out, const CBlockIndex* pprev);
+                        CValidationState& state, const std::vector<bool>* recorded = nullptr);
+// N-D12: the YED module's answer for a bundle's deposit coins in its state after `pprev`: KNOWN fills
+// `tracked` (a token, a vault, an intent, a bond: true); UNKNOWN when the module cannot say (its index is
+// stopped, unhealthy, not built yet or not at `pprev`). One call per bundle: one lock, one tip read.
+enum class ModuleAnswer { KNOWN, UNKNOWN };
+// Set by init.cpp wherever the YED module is live (an attestor set: on a public network a chain
+// parameter, so every node of the network or none); unset, the module is inert and tracks nothing.
+// ConnectBundleCoins skips a deposit of a tracked coin (S2).
+extern ModuleAnswer (*g_moduleTracks)(const std::vector<COutPoint>& outs, const CBlockIndex* pprev, std::vector<bool>& tracked);
 // The applied mask a bundle's undo entry records (empty if it records none), and the outputs and
 // the outpoints of its applied records (for DisconnectBlock).
 std::vector<bool> UndoMask(const CTxUndo& undo);

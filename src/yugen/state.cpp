@@ -518,11 +518,11 @@ static unsigned int ConsensusScriptFlags(int h, const Consensus::Params& consens
 
 static bool Ensure(const CBlockIndex* pindex, const CChainParams& params, std::string& err);
 
-bool (*g_moduleTracks)(const COutPoint& out, const CBlockIndex* pprev) = nullptr;
+ModuleAnswer (*g_moduleTracks)(const std::vector<COutPoint>& outs, const CBlockIndex* pprev, std::vector<bool>& tracked) = nullptr;
 
 bool ConnectBundleCoins(const CTransaction& tx, CCoinsViewCache& view, CTxUndo& undo, const CBlockIndex* pindex,
                         const CChainParams& params, unsigned int flags, BlockCoins& bc, CAmount& transparentDelta,
-                        CValidationState& state)
+                        CValidationState& state, const std::vector<bool>* recorded)
 {
     if (!tx.IsYugen()) return true;
     const auto ts = tx.GetYugenTransfers();
@@ -539,8 +539,21 @@ bool ConnectBundleCoins(const CTransaction& tx, CCoinsViewCache& view, CTxUndo& 
     BundleCoins& out = bc.bundles[tx.GetHash()];
     out = BundleCoins();
     out.flags = flags;
+    // N-D12: the module's answer for every deposit coin, asked once (one lock, one tip read). A coin's
+    // status is fixed in the parent's state, so asking for coins S2 later skips anyway costs only lookups.
+    std::vector<COutPoint> asked;
+    for (const auto& t : ts)
+        if (t.valueBalance < 0) for (const auto& in : t.vin) asked.push_back(Prevout(in));
+    std::vector<bool> tracked(asked.size(), false);
+    ModuleAnswer answer = ModuleAnswer::KNOWN;
+    if (g_moduleTracks && !asked.empty()) answer = g_moduleTracks(asked, pindex->pprev, tracked);
+    if (answer == ModuleAnswer::KNOWN && tracked.size() != asked.size()) answer = ModuleAnswer::UNKNOWN;
+    size_t a = 0;   // the next deposit coin's position in `asked`
     std::vector<CTxInUndo> spent;
-    for (const auto& t : ts) {
+    for (size_t j = 0; j < ts.size(); j++) {
+        const auto& t = ts[j];
+        const size_t a0 = a;
+        if (t.valueBalance < 0) a += t.vin.size();
         // B6 first: a withdrawal above the window's gross cap K fails the bundle, skipped or not (§13.3.5).
         if (t.valueBalance > 0 && (uint64_t)t.valueBalance > K)
             return state.DoS(100, false, REJECT_INVALID, "bad-yugen-bundle-withdrawal-above-k");
@@ -560,13 +573,25 @@ bool ConnectBundleCoins(const CTransaction& tx, CCoinsViewCache& view, CTxUndo& 
         // N-D12: or one created in this block, or one the YED module tracks after the parent (a token, a
         // vault, an intent, a bond: the module reads tx.vin only). A coin of this block is skipped whatever
         // it is, so the module's state at the parent decides every other coin exactly.
-        if (!skip && t.valueBalance < 0)
-            for (const auto& in : t.vin) {
-                const COutPoint p = Prevout(in);
+        if (!skip && t.valueBalance < 0) {
+            bool moduleAsked = false;
+            for (size_t k = 0; k < t.vin.size(); k++) {
+                const COutPoint p = Prevout(t.vin[k]);
                 const CCoins* c = view.AccessCoins(p.hash);
                 if (!c || !c->IsAvailable(p.n) || (c->IsCoinBase() && h - c->nHeight < COINBASE_MATURITY)) { skip = true; break; }
-                if (c->nHeight >= h || (g_moduleTracks && g_moduleTracks(p, pindex->pprev))) { skip = true; break; }
+                if (c->nHeight >= h) { skip = true; break; }
+                if (answer == ModuleAnswer::KNOWN) { if (tracked[a0 + k]) { skip = true; break; } }
+                else moduleAsked = true;
             }
+            // The module could not answer: a re-verified active-chain block takes the decision its undo
+            // entry recorded (every other S2 cause is re-decided above, so a skip recorded here was the
+            // module's); anything else is a local failure, never a verdict on the block.
+            if (!skip && moduleAsked) {
+                if (recorded == nullptr || j >= recorded->size())
+                    return state.Error("yugen-module-unknown: the YED module cannot say which deposit coins it tracks (its index is stopped, unhealthy or not at the parent)");
+                skip = !(*recorded)[j];
+            }
+        }
         // S3: a deposit that would take B above cap(h) (§13.3.6), B as the earlier transfers left it.
         if (!skip && t.valueBalance < 0 && g_state.balance - bc.debited - t.TransparentDelta() > (CAmount)cap) skip = true;
         out.applied.push_back(!skip);

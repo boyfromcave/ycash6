@@ -151,7 +151,7 @@ struct MinerStatus
 /** -yellowbacktestfault (regtest only, §4.5): a storage fault at one hook once, a template disagreement once, or a schema mismatch at start. */
 struct TestFault
 {
-    enum Hook { NONE, CHECK, COMMIT, UNDO };
+    enum Hook { NONE, CHECK, COMMIT, UNDO, MEMPOOL };   //!< MEMPOOL: the next MempoolCheck (unhealthy, the node runs on)
     Hook storageHook;
     std::optional<int> height;        //!< fire at this height only (default: the next call)
     bool armed;                       //!< consumed on the first firing
@@ -377,12 +377,14 @@ public:
     ConnectCheck CheckConnect(const CBlock& block, const CBlockIndex* pindex, bool fJustCheck);
 
     /**
-     * N-D12 (yugen::g_moduleTracks): whether the module tracks `out` (a token, a vault, an intent, a bond) in
-     * its state after `pprev`. False when the index is not at `pprev` -- an empty index, a stopped or unhealthy
-     * one (CheckConnect then fails the connection) or a re-verification of an active-chain block (K6, which the
-     * module does not judge either).
+     * N-D12 (yugen::g_moduleTracks): whether the module tracks each of `outs` (a token, a vault, an intent, a
+     * bond) in its state after `pprev`, under one lock and one tip read. False (unknown) when the module cannot
+     * say: the index is stopped or unhealthy (any storage failure, CheckConnect's or MempoolCheck's,
+     * AddAttestation's or BuildBundle's, makes it so), it is empty while `pprev` is at or past the start
+     * height, or its tip is not `pprev` (a re-verification of an active-chain block, K6). The caller never
+     * turns an unknown answer into a verdict on the block. Below the start height nothing is tracked.
      */
-    bool TracksAtParent(const COutPoint& out, const CBlockIndex* pprev);
+    bool TracksAtParent(const std::vector<COutPoint>& outs, const CBlockIndex* pprev, std::vector<bool>& tracked);
     /** The commit after view.SetBestBlock (never under fJustCheck): same guards; reuses the cache else re-evaluates; one batch; false => a node failure (the caller aborts). */
     bool CommitConnect(const CBlock& block, const CBlockIndex* pindex);
     /** DisconnectBlock's undo (inside `if (updateIndices)`): guard indexTip.blockHash == pindex->GetBlockHash(); false => a node failure. */
