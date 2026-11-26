@@ -229,6 +229,46 @@ admits (`StaleInPool`, `CreateNewBlock`); the pool refuses a bundle with a skip
 itself. Tests: gtest `Yugen.RatchetAndOutflowCapVectors` (safety.json `ratchet` without a freeze and
 `outflow-caps`), `Yugen.LeafValueCapAndGrossCap`, `Yugen.BundleVbRecordsConnect` (S3 skip, K failure).
 
+## Decision N-D12: a bundle's VB records never touch what the vault primitive or the YED module tracks (review, 2026-11-25)
+The defect: a bundle's record inputs and outputs (B1a: the bundle transaction has no `vin`/`vout`) are
+spent and created in `ConnectBundleCoins`, but the vault primitive (`vault::ApplyBlock`, `IsVaultRelevant`,
+`TouchesTemplate`) and the YED module (`ProcessTx`) read `tx.vin`/`tx.vout` only. `DepositScriptOk`
+admits P2PKH and TX_PQPKH, exactly where YED tokens sit, so a bundled deposit of a token coin left the
+module's `TokenRecord` and `Totals` counting a spent outpoint; and record output scripts were free, so a
+V- or I-shaped output (or an act) could be created past the primitive's and the module's creation rules.
+
+Four-part check. The leaf path does X (spends a token coin as an ordinary input: the module reads it,
+IN-1, and burns the YED; creates V/I/act outputs in `tx.vout`: the primitive and the module judge them)
+in `src/yellowback/state.cpp` `ProcessTxImpl` and `src/vault/state.cpp` using mechanism M (both read the
+transaction's own `vin`/`vout`). The bundle path is Z (records outside `vin`/`vout`), which lacks M. So
+the adaptation W is refusal, not integration: (1) a record input the module tracks (a token, a vault, an
+intent, an attestor bond), applied or skipped, makes the bundle invalid under the module
+(`bad-yellowback-yugen-bundle-input`; `yellowback::YugenRecordInputs`, also in the mempool relevance
+filter); (2) a record output that is an act or V- or I-shaped (`MatchVault`/`MatchIntent` not `NONE`,
+any tag, malformed included) fails the bundle, skipped or not, as B6's `K` does
+(`bad-yugen-bundle-record-output`). Such a coin deposits, and such an output is paid, by a leaf, whose
+outcome is unchanged; as with `DepositScriptOk`'s "any other coin deposits by a leaf transfer". The
+vault primitive's own coins need no input rule: vaults and intents are templates and bonds are P2SH, all
+refused by `DepositScriptOk` already.
+
+Where. Options: (a) everything in `ConnectBundleCoins`; (b) the input rule in the module, the output
+rule in `ConnectBundleCoins`; (c) integrate (feed record inputs to the module and the primitive). Chosen
+(b). The output rule is a pure function of the script, so it sits beside B6 in the bundle path. The
+input rule depends on the module's state at the bundle's place in the block: a token created earlier
+in the same block is not in the index's tip state while `ConnectBundleCoins` runs (the module evaluates
+the block after main.cpp's loop), so (a) would need either a new deposit restriction (coins from earlier
+blocks only) or a second, partial token view; the module's sequential pass has the exact state, in
+`ConnectBlock`, the mempool and the template alike. A token's status is fixed at its creation, so the
+refusal cannot be triggered against a pooled bundle by a later transaction. (c) gives up the smaller
+footprint for nothing a user needs. Reverse if the spec gives VB records a module-visible form.
+
+Tier: within the network upgrade (Yugen's activation), the smallest rung: a refusal on the bundle path,
+no new field, no state; it narrows what a valid bundle may be, so it binds only post-activation blocks
+and nothing on chain before Yugen changes. The spec (§15.5, §15.6 B6) should carry the same two rules;
+kogany will need the same rule when it implements VB records (record it in the kogany plan's findings
+log until then). Tests: gtest `Yugen.BundleVbRecordsConnect` (a V-shaped record output, YED and other
+tag), `Yugen.BundleRecordInputTrackedByModule` (a token record input refused; the leaf way burns).
+
 ## Known issues for beta4
 - **K-1, consensus, not built: withdrawal classification (§13.3.5, §15.6 B6 "applied").** A spec
   0.5.4 node classifies each withdrawal: queued if `G + a > K`, immediate if `a ≤ τ` (100 YEC) and

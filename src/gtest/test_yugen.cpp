@@ -146,6 +146,11 @@ TEST(Yugen, ValueBalanceRange) {
 #include "crypto/pq/sign.h"
 #include "script/interpreter.h"
 #include "vault/node.h"
+#include "vault/template.h"
+#include "yellowback/params.h"
+#include "yellowback/script.h"
+#include "yellowback/state.h"
+#include "yellowback/view.h"
 
 TEST(Yugen, PQRecheckAcceptsYugenGroup) {
     SelectParams(CBaseChainParams::REGTEST);
@@ -946,6 +951,7 @@ struct VbBundle {
     CAmount coinValue = 3000000, deposit = 2500000, change = 500000, withdrawal = 400000;
     std::array<uint8_t, 48> th0{}, th1{};
     std::vector<unsigned char> sig;
+    CScript wOut;   // the withdrawal record's output script (empty: Spk())
     CScript Spk() const { return GetScriptForDestination(key.GetPubKey().GetID()); }
     static void Compact(std::vector<unsigned char>& b, uint64_t n) { b.push_back((uint8_t)n); }   // n < 253
     static void Le(std::vector<unsigned char>& b, uint64_t v, int n) { for (int i = 0; i < n; i++) b.push_back((v >> (8 * i)) & 0xff); }
@@ -975,7 +981,8 @@ struct VbBundle {
         Compact(b, scriptSig.size()); b.insert(b.end(), scriptSig.begin(), scriptSig.end());
         auto t1 = Transfer(30, withdrawal);
         b.insert(b.end(), t1.begin(), t1.end());
-        Compact(b, 1); Le(b, withdrawal, 8); Compact(b, s.size()); b.insert(b.end(), s.begin(), s.end());
+        const CScript w = wOut.empty() ? s : wOut;
+        Compact(b, 1); Le(b, withdrawal, 8); Compact(b, w.size()); b.insert(b.end(), w.begin(), w.end());
         b.insert(b.end(), 64, 0x00);
         return b;
     }
@@ -1113,6 +1120,61 @@ TEST(Yugen, BundleVbRecordsConnect) {
         wide.withdrawal = (CAmount)yugen::GrossCap(YugenChain::ACT + 1, YugenChain::ACT) + 1;
         EXPECT_EQ(refused(wide.Tx(c.h0), wide.Spk()), "bad-yugen-bundle-withdrawal-above-k");
     }
+    {
+        // N-D12: a record output the vault primitive or the YED module would read (V- or I-shaped, an act)
+        // fails the bundle: neither sees record outputs.
+        vault::VaultParams v;
+        v.tag = yellowback::YED_TAG;
+        v.cancelSetId = uint256S("11");
+        v.setId = uint256S("22");
+        v.delay = 10;
+        v.ownerHeight = 500;
+        v.appHeight = 500;
+        v.owner = CPQKeyID(pq::SCHEME_SLH_DSA_SHA2_128S, uint256S("33"));
+        VbBundle shaped;
+        shaped.wOut = vault::BuildVault(v);
+        ASSERT_FALSE(shaped.wOut.empty());
+        EXPECT_EQ(refused(shaped.Tx(c.h0), shaped.Spk()), "bad-yugen-bundle-record-output");
+        v.tag = vault::Tag{{0x4e, 0x59, 0x45, 0x43}};   // an unregistered tag: still a vault
+        shaped.wOut = vault::BuildVault(v);
+        EXPECT_EQ(refused(shaped.Tx(c.h0), shaped.Spk()), "bad-yugen-bundle-record-output");
+    }
+}
+
+TEST(Yugen, BundleRecordInputTrackedByModule) {
+    // N-D12: a bundle's record input is spent outside tx.vin; the YED module refuses the bundle when the
+    // coin is one it tracks (here a token), where a leaf (an ordinary input) spending it burns the YED.
+    YugenChain c("accept");   // the chain parameters the bundle is built under
+    VbBundle vb;
+    const CTransaction bundle = vb.Tx(uint256S("01"));
+    EXPECT_EQ(yellowback::YugenRecordInputs(bundle), std::vector<COutPoint>({vb.coin}));
+    const yellowback::Params P = yellowback::RegtestParams(1, 15000, 10000, uint256S("aa"));
+    {
+        yellowback::MemoryStateView view;
+        yellowback::State st(view);
+        const yellowback::TxOutcome out = yellowback::ProcessTx(st, P, bundle, 10);
+        EXPECT_FALSE(out.invalid) << out.log.verdict;   // an untracked coin: nothing for the module
+    }
+    yellowback::MemoryStateView view;
+    yellowback::State st(view);
+    yellowback::TokenRecord tok;
+    tok.cents = 500;
+    tok.nValue = vb.coinValue;
+    tok.scriptPubKey = vb.Spk();
+    tok.height = 5;
+    st.Put(yellowback::keys::Token(vb.coin), tok);
+    const yellowback::TxOutcome out = yellowback::ProcessTx(st, P, bundle, 10);
+    EXPECT_TRUE(out.invalid);
+    EXPECT_EQ(out.log.verdict, yellowback::verdict::YUGEN_BUNDLE_INPUT);
+    EXPECT_TRUE(st.GetToken(vb.coin).has_value());   // nothing applied
+    // The leaf way: an ordinary input spending the token burns it.
+    CMutableTransaction leaf;
+    leaf.vin.push_back(CTxIn(vb.coin));
+    leaf.vout.push_back(CTxOut(vb.coinValue - 1000, vb.Spk()));
+    const yellowback::TxOutcome burned = yellowback::ProcessTx(st, P, CTransaction(leaf), 10);
+    EXPECT_FALSE(burned.invalid) << burned.log.verdict;
+    EXPECT_EQ(burned.log.verdict, yellowback::verdict::BURNED);
+    EXPECT_FALSE(st.GetToken(vb.coin).has_value());
 }
 
 TEST(Yugen, LeafValueCapAndGrossCap) {

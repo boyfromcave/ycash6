@@ -7,6 +7,7 @@
 #include "arith_uint256.h"
 #include "crypto/pq/scheme.h"
 #include "crypto/sha256.h"
+#include "primitives/yugen.h"
 #include "script/script.h"
 #include "vault/act.h"
 #include "vault/template.h"
@@ -77,6 +78,7 @@ const char* const ATTESTOR_SET_ACT = "attestor-set-act";
 const char* const ATTESTOR_BOND_BELOW_MIN = "attestor-bond-below-min";
 const char* const LIVENESS_UNHELD = "liveness-unheld";
 const char* const ATTESTOR_SEQ_EXHAUSTED = "attestor-seq-exhausted";
+const char* const YUGEN_BUNDLE_INPUT = "yugen-bundle-input";
 } // namespace verdict
 
 // ---------------------------------------------------------------------------
@@ -1300,6 +1302,17 @@ TxOutcome ProcessTxImpl(EvalContext& ctx, const CTransaction& tx)
     log.verdict = verdict::NON_YELLOWBACK;
     if (tx.IsCoinBase()) return out; // TX-0: the coinbase registers nothing; only its scriptSig (the tag) is read
 
+    // Yugen (N-D12): a bundle's VB records spend coins outside tx.vin, which this module never sees; a
+    // record input it tracks (a token, a vault, an intent, a bond), applied or skipped, is invalid. Such a
+    // coin deposits by a leaf transfer, whose inputs are read below like any other.
+    for (const COutPoint& prev : YugenRecordInputs(tx)) {
+        if (ctx.st.GetToken(prev) || ctx.st.GetVault(prev) || ctx.st.GetIntent(prev) || ctx.st.GetBondIndex(prev)) {
+            log.verdict = verdict::YUGEN_BUNDLE_INPUT;
+            out.invalid = true;
+            return out;
+        }
+    }
+
     const uint256 txid = tx.GetHash();
     Totals totals = ctx.st.GetTotals();
     const Totals before = totals;
@@ -1892,6 +1905,19 @@ Snapshot ComputeSnapshot(State& st, const Params& P, int height, const uint256& 
 
 // ---------------------------------------------------------------------------
 // Blocks
+
+std::vector<COutPoint> YugenRecordInputs(const CTransaction& tx)
+{
+    std::vector<COutPoint> out;
+    if (!tx.IsYugenBundle()) return out;
+    for (const yugen::Transfer& t : tx.GetYugenTransfers())
+        for (const yugen::RecordIn& in : t.vin) {
+            uint256 h;
+            std::copy(in.txid.begin(), in.txid.end(), h.begin());
+            out.push_back(COutPoint(h, in.index));
+        }
+    return out;
+}
 
 TxOutcome ProcessTx(State& st, const Params& params, const CTransaction& tx, int height, SigCache* cache)
 {

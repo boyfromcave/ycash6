@@ -679,6 +679,8 @@ std::optional<std::string> YellowbackIndex::MempoolCheckInner(const CTransaction
         if (v.has_value() && v->Status() == VaultStatus::ACTIVE) spendsActive = true;
         if (v.has_value() || st.GetToken(in.prevout).has_value() || st.GetIntent(in.prevout).has_value()) relevant = true;
     }
+    for (const COutPoint& prev : YugenRecordInputs(tx))   // N-D12: a bundle's VB record inputs
+        if (st.GetToken(prev) || st.GetVault(prev) || st.GetIntent(prev) || st.GetBondIndex(prev)) relevant = true;
     for (const CTxOut& o : tx.vout) {
         vault::VaultParams vp;
         vault::IntentParams ip;

@@ -23,6 +23,8 @@
 #include "util/strencodings.h"
 #include "util/system.h"
 #include "util/time.h"
+#include "vault/act.h"
+#include "vault/template.h"
 #include "version.h"
 
 #include <univalue.h>
@@ -540,6 +542,15 @@ bool ConnectBundleCoins(const CTransaction& tx, CCoinsViewCache& view, CTxUndo& 
         // B6 first: a withdrawal above the window's gross cap K fails the bundle, skipped or not (§13.3.5).
         if (t.valueBalance > 0 && (uint64_t)t.valueBalance > K)
             return state.DoS(100, false, REJECT_INVALID, "bad-yugen-bundle-withdrawal-above-k");
+        // N-D12: a record output the vault primitive or the YED module would read (an act, a V- or I-shaped
+        // script) fails the bundle, skipped or not: neither sees record outputs, so it pays by a leaf.
+        for (const auto& o : t.vout) {
+            const CScript spk(o.script.begin(), o.script.end());
+            vault::VaultParams vp;
+            vault::IntentParams ip;
+            if (vault::IsActOutput(spk) || vault::MatchVault(spk, vp) != vault::Shape::NONE || vault::MatchIntent(spk, ip) != vault::Shape::NONE)
+                return state.DoS(100, false, REJECT_INVALID, "bad-yugen-bundle-record-output");
+        }
         // S1: a nullifier spent on chain, earlier in the block or earlier in this bundle.
         bool skip = false;
         for (const auto& nf : t.nf) if (g_state.nullifiers.count(nf) || bc.nfs.count(nf)) skip = true;

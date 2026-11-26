@@ -130,6 +130,7 @@ extern const char* const ATTESTOR_SET_ACT;            //!< a SET_REMOVE or SET_W
 extern const char* const ATTESTOR_SEQ_EXHAUSTED;      //!< a SET_JOIN of the attestor set once the u16 seq space is used up (focused review)
 extern const char* const LIVENESS_UNHELD;             //!< a bundle that credits liveness on a transaction that is not a held YED act, or fails BUNDLE-1 (focused review)
 extern const char* const ATTESTOR_BOND_BELOW_MIN;     //!< a SET_JOIN of the attestor set below BondMinZat at its block (seats re-review)
+extern const char* const YUGEN_BUNDLE_INPUT;          //!< a Yugen bundle's VB record input (applied or not) is an outpoint the module tracks (N-D12)
 } // namespace verdict
 
 /**
@@ -172,6 +173,10 @@ struct TxOutcome
  * when relevant. Total.
  */
 TxOutcome ProcessTx(State& st, const Params& params, const CTransaction& tx, int height, SigCache* cache = nullptr);
+
+/** Yugen (N-D12): the VB record inputs of a bundle, every record's, applied or not; empty for anything
+ *  else. The coins a bundle deposits are spent outside tx.vin (yugen::ConnectBundleCoins). */
+std::vector<COutPoint> YugenRecordInputs(const CTransaction& tx);
 
 /**
  * Evaluate a whole block into `overlay` without committing it (§3.8, §3.9
