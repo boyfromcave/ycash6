@@ -275,6 +275,17 @@ tag), `Yugen.BundleRecordInputTrackedByModule` (a token record input refused; th
   per relayed transaction. A set of the prevouts seen (yugen-ref `Bundle::decode`'s `BTreeSet`, per
   record, the same `bundle-vin` verdict at the same input) makes it O(n log n). Test:
   `Yugen.DecodeRecordManyInputsIsFast`.
+- P-1: the helper (`contrib/yugen-leafverify`, `bundle`) cleared `proofs_bound` before
+  `Bundle::decode` and `bundle_views`, so a bundle the node's reading accepts but the reference
+  refuses (B1: anchor order, payee table, unused anchor, mixed schemes, a sixth merge level, more
+  than 16,384 transfers; B2 to B4: anchors) came back as a possibly corrupt body: the block was
+  refetched forever while the peers that served it were banned. The bundle bytes are committed by the
+  txid and the height by the block, so such a refusal now reports `proofs_bound` (a verdict on the
+  block); only a missing request field does not. The node's own reading now has the reference's
+  limits too: a merge needs budget left (`BUNDLE_DEPTH_MAX` = 5 merge levels, was 6) and at most
+  `BUNDLE_TRANSFERS_MAX` = 16,384 transfers (unreachable under the arity limits, kept for parity), so
+  `depth-six` is refused by the node itself. Tests: the helper's
+  `tests::structurally_invalid_bundle_is_bound` (`cargo test --release`), `Yugen.BundleVectors`.
 
 ## Known issues for beta4
 - **K-1, consensus, not built: withdrawal classification (§13.3.5, §15.6 B6 "applied").** A spec

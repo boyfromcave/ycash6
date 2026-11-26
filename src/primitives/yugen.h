@@ -33,6 +33,10 @@ static constexpr size_t PKG_SHORT = 1674, PKG_LONG = 2186;
 // first byte is BUNDLE_VERSION is a bundle, any other a leaf transfer (whose first byte is
 // fee_class, at most 3, §7.1).
 static constexpr uint8_t BUNDLE_VERSION = 0x80;
+// §15.2, yugen-ref params BUNDLE_DEPTH_MAX / BUNDLE_TRANSFERS_MAX: merge levels below the root's budget,
+// and the transfers of one tree (review P-1: the node refuses what the reference refuses).
+static constexpr int BUNDLE_DEPTH_MAX = 5;
+static constexpr size_t BUNDLE_TRANSFERS_MAX = 16384;
 
 enum Flag : uint16_t {
     PKG1 = 1 << 0, PKG2 = 1 << 1, PKG1_MEMO = 1 << 2, PKG2_MEMO = 1 << 3, VB = 1 << 4,
@@ -238,17 +242,18 @@ inline bool DecodeBundleTransfers(const std::vector<unsigned char>& b, std::vect
     for (size_t i = 0; i < P; i++) { if (o >= b.size()) return false; o += 1 + b[o]; }
     size_t n = 0;
     std::function<bool(int)> node = [&](int depth) -> bool {
-        if (depth > 6 || o + 2 > b.size()) return false;
+        if (o + 2 > b.size()) return false;
         uint8_t tag = b[o], k = b[o + 1];
         o += 2;
         if (k < 1 || k > 4) return false;
         if (tag == 0x00) { n += k; o += 2 * (k <= 2 ? 3 : 4); return o <= b.size(); }
         if (tag != 0x01) return false;
+        if (depth >= BUNDLE_DEPTH_MAX) return false;   // yugen-ref Node::decode: a merge needs budget left
         if (k >= 2) o += 2 * (k <= 2 ? 3 : 4);
         for (int i = 0; i < k; i++) if (!node(depth + 1)) return false;
         return o <= b.size();
     };
-    if (!node(0)) return false;
+    if (!node(0) || n > BUNDLE_TRANSFERS_MAX) return false;
     for (size_t i = 0; i < n; i++) {
         size_t start = o;
         if (o + FIXED_LEN > b.size()) return false;

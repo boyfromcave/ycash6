@@ -844,12 +844,13 @@ TEST(Yugen, BundleVectors) {
         "payee-index-beyond-the-table", "payee-table-not-in-first-use-order", "payee-unused", "payee-twice-in-the-table",
         "payee-empty-script", "one-slot-not-a-template",
         "script-of-24-bytes", "script-of-1-byte", "script-of-64-bytes", "p2pkh-wrong-opcode", "p2sh-wrong-push",
-        "pqpkh-scheme-3", "pqpkh-checksig", "merge-script-not-a-template", "funded-canary-nullifier", "depth-six"};
+        "pqpkh-scheme-3", "pqpkh-checksig", "merge-script-not-a-template", "funded-canary-nullifier"};
     // Refused by the node's structural reading under its own name (the helper names the spec's error).
     const std::set<std::string> nodeGeneric{
         "version-1", "no-anchors", "seven-anchors", "tree-kind-2", "sub-bundle-of-zero", "sub-bundle-of-5",
         "merge-of-zero", "merge-of-5", "payee-table-missing", "merge-of-one-with-record", "truncated", "trailing-byte",
-        "two-inputs-four-records", "payee-count-above-the-maximum", "three-inputs-three-records", "anchor-entry-at-0.3-length"};
+        "two-inputs-four-records", "payee-count-above-the-maximum", "three-inputs-three-records", "anchor-entry-at-0.3-length",
+        "depth-six"};   // since review P-1 the node refuses a sixth merge level itself
     int exact = 0, generic = 0, helper = 0, bundles = 0, inputs = 0, envelopes = 0, scripts = 0;
     for (size_t i = 0; i < v.size(); i++) {
         const UniValue& x = v[i];

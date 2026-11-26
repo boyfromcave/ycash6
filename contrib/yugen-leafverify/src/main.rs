@@ -188,15 +188,20 @@ fn stub(tag: &[u8], stmt: &[u8; 32]) -> Vec<u8> { [tag, &stmt[..]].concat() }
 /// `bound` is set once both proofs are confirmed to be the ones the bundle commits to (B5's
 /// hashes), before anything else about them is judged: a reject after that is a verdict on the
 /// block, one before it may be a relay's substitution (review H-1).
+///
+/// A bundle that fails to decode (B1) or whose anchors do not resolve (B2 to B4) is refused with
+/// `bound` set whatever the proofs: the bundle bytes are committed by the txid and the height by
+/// the block, so that refusal is a verdict on the block, never a relay's substitution (review P-1).
 fn bundle(req: &Value, bound: &mut bool) -> Result<Value, String> {
     *bound = false;
     let num = |k: &str| fail(req[k].as_u64().ok_or(k.to_string()));
-    let b = Bundle::decode(&fail(bytes(req, "bundle"))?).map_err(|e| format!("bundle {e:?}"))?;
+    let raw = fail(bytes(req, "bundle"))?;
     let h = num("height")? as u32;
     let (branch_id, network, act) = (num("branch_id")? as u32, num("network")? as u8, num("activation")? as u32);
     let mode = req["mode"].as_u64().unwrap_or(0) as u8;
     let pa = fail(bytes(req, "proof_a"))?;
     let pb = fail(bytes(req, "proof_b"))?;
+    let b = Bundle::decode(&raw).map_err(|e| { *bound = true; format!("bundle {e:?}") })?;
     let check = req["check_proofs"].as_bool().unwrap_or(true);
     if check {
         // B5 first: the proofs are sidecar data. A bundle proof may be up to PROOF_BYTES_MAX (§15.1,
@@ -209,7 +214,7 @@ fn bundle(req: &Value, bound: &mut bool) -> Result<Value, String> {
         }
         *bound = true;
     }
-    let (views, stmt) = bundle_views(&b, branch_id, network, h, act, mode).map_err(|e| format!("bundle {e:?}"))?;
+    let (views, stmt) = bundle_views(&b, branch_id, network, h, act, mode).map_err(|e| { *bound = true; format!("bundle {e:?}") })?;
     if check {
         if req["stub"].as_bool() == Some(true) {
             // TEST-ONLY (regtest, -yugenteststubproofs): the "proof" is a tag and the statement.
@@ -423,6 +428,24 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review P-1: a bundle the reference refuses at decode is a verdict on the block (proofs_bound),
+    /// whatever the proofs, so the node does not refetch it as a possibly corrupt body.
+    #[test]
+    fn structurally_invalid_bundle_is_bound() {
+        for enc in [vec![0x80u8], vec![0x80, 0x01, 0x00], vec![0x00; 8]] {
+            let req = json!({"bundle": hex::encode(&enc), "height": 100, "branch_id": 1, "network": 2, "activation": 16,
+                             "proof_a": "00", "proof_b": "00"});
+            let mut bound = false;
+            let e = bundle(&req, &mut bound).unwrap_err();
+            assert!(e.starts_with("bundle "), "{e}");
+            assert!(bound, "{e}");
+        }
+        // A request field missing is not a verdict on anything.
+        let mut bound = false;
+        assert!(bundle(&json!({"bundle": "80"}), &mut bound).is_err());
+        assert!(!bound);
+    }
 
     #[test]
     fn b2verify_exit_one_without_a_reject_line_is_a_failure() {
