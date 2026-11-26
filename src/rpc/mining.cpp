@@ -20,6 +20,7 @@
 #include "main.h"
 #include "metrics.h"
 #include "miner.h"
+#include "yugen/state.h"
 #include "net.h"
 #include "pow.h"
 #include "rpc/server.h"
@@ -756,6 +757,15 @@ UniValue getblocktemplate(const UniValue& params, bool fHelp)
         UniValue entry(UniValue::VOBJ);
 
         entry.pushKV("data", EncodeHexTx(tx));
+        // Yugen (spec 0.5.1 §15.1, §16.2): the proofs the transaction commits to, block sidecar data.
+        if (tx.IsYugenBundle()) {
+            if (auto proofs = yugen::GetProofs(tx.GetHash())) {
+                UniValue ps(UniValue::VARR);
+                for (const auto& p : *proofs) ps.push_back(HexStr(p));
+                entry.pushKV("proofs", ps);
+                entry.pushKV("weight", (int64_t)(::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION) + yugen::TxProofBytes(tx)));
+            }
+        }
 
         entry.pushKV("hash", txHash.GetHex());
         entry.pushKV("authdigest", tx.GetAuthDigest().GetHex());
@@ -845,6 +855,8 @@ UniValue getblocktemplate(const UniValue& params, bool fHelp)
     result.pushKV("noncerange", "00000000ffffffff");
     result.pushKV("sigoplimit", (int64_t)MAX_BLOCK_SIGOPS);
     result.pushKV("sizelimit", (int64_t)MAX_BLOCK_SIZE);
+    if (Params().GetConsensus().NetworkUpgradeActive(pindexPrev->nHeight + 1, Consensus::UPGRADE_YUGEN))
+        result.pushKV("weightlimit", (int64_t)yugen::BLOCK_WEIGHT_MAX);
     result.pushKV("curtime", pblock->GetBlockTime());
     result.pushKV("bits", strprintf("%08x", pblock->nBits));
     result.pushKV("height", (int64_t)(pindexPrev->nHeight+1));
@@ -1124,6 +1136,7 @@ UniValue getcoinbasetemplatefor(const UniValue& params, bool fHelp)
     uint64_t nTxsSize = 0;
     uint64_t nTxsSigOps = 0;
     CScript coinbaseFlags;
+    std::vector<std::pair<CAmount, CScript>> yugenRun;
     {
         LOCK2(cs_main, mempool.cs);
 
@@ -1151,6 +1164,7 @@ UniValue getcoinbasetemplatefor(const UniValue& params, bool fHelp)
         CCoinsViewMemPool viewMemPool(pcoinsTip, mempool);
         CCoinsViewCache view(&viewMemPool);
         std::set<uint256> setSeen;
+        std::vector<CTransaction> yugenTxs;
         for (const uint256& txid : vTxids) {
             CTxMemPool::indexed_transaction_set::const_iterator it = mempool.mapTx.find(txid);
             if (it == mempool.mapTx.end() || !view.HaveInputs(it->GetTx()))
@@ -1158,9 +1172,13 @@ UniValue getcoinbasetemplatefor(const UniValue& params, bool fHelp)
             if (!setSeen.insert(txid).second)
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "txids names a transaction twice: " + txid.GetHex());
             nFees += it->GetFee();
+            if (it->GetTx().IsYugen()) yugenTxs.push_back(it->GetTx());
             nTxsSize += it->GetTxSize();
             nTxsSigOps += GetLegacySigOpCount(it->GetTx()) + GetP2SHSigOpCount(it->GetTx(), view);
         }
+
+        // Yugen: the record run the block owes its bundles' provers (spec 0.5.1 §13.3.12).
+        yugenRun = yugen::TemplateRecordRun(yugenTxs, nHeight, chainparams);
 
         // The tag a coinbase built now carries: what CreateNewBlock would write, read into a local.
         if (yellowback::g_yellowback)
@@ -1170,7 +1188,7 @@ UniValue getcoinbasetemplatefor(const UniValue& params, bool fHelp)
     // ---- 4. No lock held: build the coinbase with the node's own builder (for a Sapling address, the proof). ----
     CMutableTransaction mtx;
     try {
-        mtx = CreateCoinbaseTransaction(chainparams, nFees, minerAddress.value(), nHeight, coinbaseFlags);
+        mtx = CreateCoinbaseTransaction(chainparams, nFees, minerAddress.value(), nHeight, coinbaseFlags, yugenRun);
     } catch (const std::exception& e) {
         throw JSONRPCError(RPC_INTERNAL_ERROR, std::string("coinbase construction failed: ") + e.what());
     }

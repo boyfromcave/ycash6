@@ -10,6 +10,7 @@
 #endif
 
 #include "init.h"
+#include "yugen/state.h"
 #include "addrman.h"
 #include "amount.h"
 #include "checkpoints.h"
@@ -69,6 +70,7 @@
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/algorithm/string/split.hpp>
 #include <boost/bind/bind.hpp>
+#include <boost/dll/runtime_symbol_info.hpp>
 #include <boost/interprocess/sync/file_lock.hpp>
 #include <boost/thread.hpp>
 #include <sodium.h>
@@ -540,6 +542,19 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-limitdescendantcount=<n>", strprintf("Do not accept transactions if any ancestor would have <n> or more in-mempool descendants (default: %u)", DEFAULT_DESCENDANT_LIMIT));
         strUsage += HelpMessageOpt("-limitdescendantsize=<n>", strprintf("Do not accept transactions if any ancestor would have more than <n> kilobytes of in-mempool descendants (default: %u).", DEFAULT_DESCENDANT_SIZE_LIMIT));
         strUsage += HelpMessageOpt("-nuparams=hexBranchId:activationHeight", "Use given activation height for specified network upgrade (regtest-only)");
+        strUsage += HelpMessageOpt("-yugenverifier=<path>", "Yugen: the yugen-leafverify helper (contrib/yugen-leafverify); required when Yugen has a height");
+        strUsage += HelpMessageOpt("-yugenbuilder=<path>", "Yugen: the yugen-sendbuild helper (contrib/yugen-sendbuild) z_sendmany runs to pay a Yugen address");
+        strUsage += HelpMessageOpt("-yugenprover=<path>", "Yugen: the wallet prover binary (yewd-yugen, run as `prove a|b`) the builder uses");
+        strUsage += HelpMessageOpt("-yugenhosts=<host:port,host:port>", "Yugen: the two mailbox hosts (yugen-hostd) z_sendmany asks to resolve a short Yugen address (spec §12.3, §17.8)");
+        strUsage += HelpMessageOpt("-yugenwallet=<path>", "Yugen: the wallet engine (yewd-yugen) of the wallet's Yugen account (default: -yugenprover)");
+        strUsage += HelpMessageOpt("-yugensyncdelay=<n>", "Yugen: the largest random delay in seconds after a 16-block boundary before the account's scheduled host sync (default: 60)");
+        strUsage += HelpMessageOpt("-yugenprovetimeout=<n>", "Yugen: seconds before a z_sendmany build and prove is abandoned (default: 1800)");
+        strUsage += HelpMessageOpt("-yugenverifytimeout=<n>", "Yugen: seconds before a verifier helper run is a node failure (default: 600)");
+        strUsage += HelpMessageOpt("-yugenmempoolverifytimeout=<n>", strprintf("Yugen: the same for a mempool candidate (default: %d)", yugen::DEFAULT_MEMPOOL_VERIFY_TIMEOUT));
+        strUsage += HelpMessageOpt("-yugenpeerverifyrate=<n>", strprintf("Yugen: Yugen transactions from peers, whitelisted ones included, judged per minute at most; others wait for the next request (default: %d, 0: no limit)", yugen::DEFAULT_PEER_VERIFY_RATE));
+        strUsage += HelpMessageOpt("-yugenb2verify=<path>", "Yugen: System B's root verifier binary (yugen-proof-b2 b2verify), for bundles");
+        strUsage += HelpMessageOpt("-yugenbplan=<dir>", "Yugen: System B's verifying plan directory (recbench vplan), for bundles");
+        strUsage += HelpMessageOpt("-yugenteststubproofs", "Yugen, regtest only, TEST ONLY: bundle proofs are stubs that bind the statement and nothing else");
         strUsage += HelpMessageOpt("-acceptnonstdtxn", "Accept non-standard transactions into the mempool (regtest-only) (default: 1; 0 enforces the standardness policy)");
         strUsage += HelpMessageOpt("-pqfalcon", "Admit OP_CHECKPQSIG scheme 0x02 (FN-DSA-512) from the vault upgrade, as -pqfalconheight=0 (regtest-only) (default: 0)");
         strUsage += HelpMessageOpt("-pqfalconheight=<h>", "Admit OP_CHECKPQSIG scheme 0x02 (FN-DSA-512) from height <h> once the vault upgrade is active (regtest-only)");
@@ -1610,6 +1625,47 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         }
         if (GetBoolArg("-yugenteststubproofs", false) && chainparams.NetworkIDString() != CBaseChainParams::REGTEST) {
             return InitError("-yugenteststubproofs is for regtest only");
+        }
+    }
+
+    // Yugen: the helper processes (doc/yugen-node.md, Helper build).
+    {
+        // The helpers the build installs next to ycashd (src/Makefile.yugen.include) are the defaults for
+        // -yugenverifier and -yugenbuilder. -yugenprover stays explicit: without it the node keeps no Yugen
+        // account and behaves as stock (doc/yugen-node.md N-A1).
+        {
+            boost::system::error_code ec;
+            const fs::path self = boost::dll::program_location(ec);
+            if (!ec) {
+                for (const auto& [arg, name] : {std::make_pair("-yugenverifier", "yugen-leafverify"),
+                                                std::make_pair("-yugenbuilder", "yugen-sendbuild")}) {
+                    const fs::path p = self.parent_path() / name;
+                    if (mapArgs.count(arg) == 0 && fs::exists(p)) SoftSetArg(arg, p.string());
+                }
+            }
+        }
+        const int yugenHeight = chainparams.GetConsensus().vUpgrades[Consensus::UPGRADE_YUGEN].nActivationHeight;
+        if (yugenHeight != Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT && !yugen::HelperAvailable()) {
+            return InitError("The Yugen upgrade needs the verifier helper: set -yugenverifier=<path to yugen-leafverify>");
+        }
+        // Review item (5): a bundle's System B proof is verified by b2verify with its plan. Without them
+        // the first bundle could never connect, so they are checked here: required off regtest; on
+        // regtest they may be left out together (leaf-only suites, stub bundle proofs), with a warning.
+        if (yugenHeight != Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT) {
+            const std::string b2 = GetArg("-yugenb2verify", ""), plan = GetArg("-yugenbplan", "");
+            const bool regtest = chainparams.NetworkIDString() == CBaseChainParams::REGTEST;
+            if (b2.empty() && plan.empty() && regtest) {
+                LogPrintf("Warning: Yugen: no -yugenb2verify and -yugenbplan: a bundle with real proofs cannot be verified\n");
+            } else if (b2.empty() || plan.empty()) {
+                return InitError("The Yugen upgrade verifies bundles with System B: set -yugenb2verify=<b2verify> and -yugenbplan=<plan directory>");
+            } else if (!fs::is_regular_file(b2)) {
+                return InitError(strprintf("-yugenb2verify: %s is not a file", b2));
+            } else if (!fs::is_directory(plan)) {
+                return InitError(strprintf("-yugenbplan: %s is not a directory", plan));
+            }
+        }
+        if (yugenHeight != Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT && yugenHeight % yugen::ANCHOR_GRID != 0) {
+            return InitError("The Yugen activation height must be a multiple of 16 (spec 0.5.1 §2)");
         }
     }
 

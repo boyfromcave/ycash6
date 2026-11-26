@@ -105,6 +105,8 @@ CMutableTransaction CreateCoinbaseTransaction(const CChainParams& chainparams, C
  *  rule (-ydf included) and the Sapling proof are those of the function above: it calls this one. Holds no lock
  *  and needs none, so getcoinbasetemplatefor proves outside cs_main. */
 CMutableTransaction CreateCoinbaseTransaction(const CChainParams& chainparams, CAmount nFees, const MinerAddress& minerAddress, int nHeight, const CScript& coinbaseFlags);
+// Yugen: with the record run (spec 0.5.1 §13.3.12) as the last transparent outputs, paid out of nFees.
+CMutableTransaction CreateCoinbaseTransaction(const CChainParams& chainparams, CAmount nFees, const MinerAddress& minerAddress, int nHeight, const CScript& coinbaseFlags, const std::vector<std::pair<CAmount, CScript>>& yugenRun);
 
 /** Generate a new block, without valid proof-of-work */
 class BlockAssembler
@@ -121,6 +123,9 @@ private:
 
     // Information on the current status of the block
     uint64_t nBlockSize;
+    uint64_t nYugenProofBytes{0};   // sidecar proof bytes (spec 0.5.1 §16.2 W3)
+    uint64_t nYugenW5{0};           // bundle bytes and proofs (W5)
+    CAmount nYugenPoolDebit{0};     // what the template's Yugen transactions take from the pool (§13.3.2)
     uint64_t nBlockTx;
     unsigned int nBlockSigOps;
     CAmount nFees;

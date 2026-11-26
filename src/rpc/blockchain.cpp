@@ -18,6 +18,7 @@
 #include "metrics.h"
 #include "primitives/transaction.h"
 #include "rpc/server.h"
+#include "yugen/state.h"
 #include "streams.h"
 #include "sync.h"
 #include "util/system.h"
@@ -113,6 +114,24 @@ static UniValue ValuePoolDesc(
         rv.pushKV("valueDeltaZat", *valueDelta);
     }
     return rv;
+}
+
+// Yugen (spec 0.5.2 §13.3.2): the pool balance B after the block, beside Sapling's, when the
+// block is on the active chain at or above Yugen's activation; absent where Yugen has no height.
+static void PushYugenPool(UniValue& pools, const CBlockIndex* bi, bool withDelta)
+{
+    const auto& consensus = Params().GetConsensus();
+    if (consensus.vUpgrades[Consensus::UPGRADE_YUGEN].nActivationHeight == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT) return;
+    std::optional<CAmount> chainValue, delta;
+    if (consensus.NetworkUpgradeActive(bi->nHeight, Consensus::UPGRADE_YUGEN) && chainActive.Contains(bi)) {
+        const auto& st = yugen::Current(Params());
+        auto it = st.blocks.find(bi->nHeight);
+        if (it != st.blocks.end() && it->second.hash == bi->GetBlockHash()) {
+            chainValue = it->second.balanceAfter;
+            if (withDelta) delta = it->second.balanceAfter - it->second.balanceBefore;
+        }
+    }
+    pools.push_back(ValuePoolDesc("yugen", chainValue, delta));
 }
 
 UniValue blockheaderToJSON(const CBlockIndex* blockindex)
@@ -292,6 +311,7 @@ UniValue blockToJSON(const CBlock& block, const CBlockIndex* blockindex, bool tx
     valuePools.push_back(ValuePoolDesc("sprout", blockindex->nChainSproutValue, blockindex->nSproutValue));
     valuePools.push_back(ValuePoolDesc("sapling", blockindex->nChainSaplingValue, blockindex->nSaplingValue));
     valuePools.push_back(ValuePoolDesc("orchard", blockindex->nChainOrchardValue, blockindex->nOrchardValue));
+    PushYugenPool(valuePools, blockindex, true);
     result.pushKV("valuePools", valuePools);
     result.pushKV("transparentPools", valuepools::TransparentPoolsToJSON(blockindex, true));
 
@@ -1723,6 +1743,7 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
     valuePools.push_back(ValuePoolDesc("sprout", tip->nChainSproutValue, std::nullopt));
     valuePools.push_back(ValuePoolDesc("sapling", tip->nChainSaplingValue, std::nullopt));
     valuePools.push_back(ValuePoolDesc("orchard", tip->nChainOrchardValue, std::nullopt));
+    PushYugenPool(valuePools, tip, false);
     obj.pushKV("valuePools",            valuePools);
     obj.pushKV("transparentPools",      valuepools::TransparentPoolsToJSON(tip, false));
 

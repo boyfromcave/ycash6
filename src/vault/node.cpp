@@ -185,7 +185,7 @@ std::optional<std::string> RecheckPQScripts(const CTransaction& tx, const CCoins
     if (tx.IsCoinBase() || GetPQSigOpCount(tx, view) == 0) return std::nullopt;
     // Quantum spec R-A3: OP_CHECKPQSIG is defined over the ZIP-243 sighash of v4 transactions only.
     // Refuse anything else explicitly rather than compute a ZIP-244 digest from the placeholders below.
-    if (tx.nVersionGroupId != SAPLING_VERSION_GROUP_ID) return std::string("non-v4 transaction (R-A3)");
+    if (tx.nVersionGroupId != SAPLING_VERSION_GROUP_ID && tx.nVersionGroupId != YUGEN_VERSION_GROUP_ID) return std::string("non-v4 transaction (R-A3)");  // Yugen: ZIP-243 + hashYugen (N-TX)
     // 6.20.0: the precomputed data takes every input's coin; an unknown coin is a placeholder,
     // inert because only a v4 (ZIP-243) sighash is computed here (checked above).
     std::vector<CTxOut> allPrevOutputs;
@@ -236,7 +236,7 @@ std::optional<std::string> RecheckTemplateScripts(const CTransaction& tx, const 
             // Quantum spec R-A3: the vault templates are defined over the ZIP-243 sighash of v4
             // transactions only; refuse anything else explicitly rather than compute a ZIP-244
             // digest from the placeholders below.
-            if (tx.nVersionGroupId != SAPLING_VERSION_GROUP_ID) return std::string("non-v4 transaction (R-A3)");
+            if (tx.nVersionGroupId != SAPLING_VERSION_GROUP_ID && tx.nVersionGroupId != YUGEN_VERSION_GROUP_ID) return std::string("non-v4 transaction (R-A3)");  // Yugen: ZIP-243 + hashYugen (N-TX)
             // 6.20.0: the precomputed data takes every input's coin; an unknown coin is a
             // placeholder, inert because only a v4 (ZIP-243) sighash is computed here.
             std::vector<CTxOut> allPrevOutputs;

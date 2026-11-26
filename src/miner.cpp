@@ -6,6 +6,7 @@
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
 #include "miner.h"
+#include "yugen/state.h"
 #ifdef ENABLE_MINING
 #include "pow/tromp/equi_miner.h"
 #endif
@@ -100,13 +101,15 @@ private:
     const CChainParams &chainparams;
     const int nHeight;
     const CAmount nFees;
+    const std::vector<std::pair<CAmount, CScript>> yugenRun;
 
 public:
     AddOutputsToCoinbaseTxAndSign(
         CMutableTransaction &mtx,
         const CChainParams &chainparams,
         const int nHeight,
-        const CAmount nFees) : mtx(mtx), chainparams(chainparams), nHeight(nHeight), nFees(nFees) {}
+        const CAmount nFees,
+        const std::vector<std::pair<CAmount, CScript>>& yugenRun = {}) : mtx(mtx), chainparams(chainparams), nHeight(nHeight), nFees(nFees), yugenRun(yugenRun) {}
 
     const libzcash::Zip212Enabled GetZip212Flag() const {
         if (chainparams.GetConsensus().NetworkUpgradeActive(nHeight, Consensus::UPGRADE_CANOPY)) {
@@ -154,7 +157,11 @@ public:
         //  removed.)
         LogPrint("pow", "%s: Miner reward at height %d is %d", __func__, nHeight, miner_reward);
 
-        return miner_reward + nFees;
+        // Yugen: the record run is the last transparent outputs (§13.3.12), paid out of the fees.
+        CAmount runTotal = 0;
+        for (const auto& [v, script] : yugenRun) { mtx.vout.push_back(CTxOut(v, script)); runTotal += v; }
+
+        return miner_reward + nFees - runTotal;
     }
 
     void ComputeBindingSig(rust::Box<sapling::Builder> saplingBuilder, std::optional<orchard::UnauthorizedBundle> orchardBundle) const {
@@ -274,6 +281,11 @@ CMutableTransaction CreateCoinbaseTransaction(const CChainParams& chainparams, C
 
 CMutableTransaction CreateCoinbaseTransaction(const CChainParams& chainparams, CAmount nFees, const MinerAddress& minerAddress, int nHeight, const CScript& coinbaseFlags)
 {
+        return CreateCoinbaseTransaction(chainparams, nFees, minerAddress, nHeight, coinbaseFlags, {});
+}
+
+CMutableTransaction CreateCoinbaseTransaction(const CChainParams& chainparams, CAmount nFees, const MinerAddress& minerAddress, int nHeight, const CScript& coinbaseFlags, const std::vector<std::pair<CAmount, CScript>>& yugenRun)
+{
         CMutableTransaction mtx = CreateNewContextualCMutableTransaction(
                 chainparams.GetConsensus(), nHeight,
                 !std::holds_alternative<libzcash::OrchardRawAddress>(minerAddress) && nPreferredTxVersion < ZIP225_MIN_TX_VERSION);
@@ -290,7 +302,7 @@ CMutableTransaction CreateCoinbaseTransaction(const CChainParams& chainparams, C
 
         // Add outputs and sign
         std::visit(
-            AddOutputsToCoinbaseTxAndSign(mtx, chainparams, nHeight, nFees),
+            AddOutputsToCoinbaseTxAndSign(mtx, chainparams, nHeight, nFees, yugenRun),
             minerAddress);
 
         mtx.vin[0].scriptSig = (CScript() << nHeight << OP_0) + coinbaseFlags;
@@ -325,6 +337,9 @@ void BlockAssembler::resetBlock(const MinerAddress& minerAddress)
     // These counters do not include coinbase tx
     nBlockTx = 0;
     nFees = 0;
+    nYugenProofBytes = 0;
+    nYugenW5 = 0;
+    nYugenPoolDebit = 0;
 
     sproutValue = 0;
     saplingValue = 0;
@@ -423,10 +438,12 @@ CBlockTemplate* BlockAssembler::CreateNewBlock(
     LogPrintf("%s: total size %u (excluding coinbase) txs: %u fees: %ld sigops %d", __func__, nBlockSize, nBlockTx, nFees, nBlockSigOps);
 
     // Create coinbase tx
-    if (next_cb_mtx) {
+    std::vector<std::pair<CAmount, CScript>> yugenRun =
+        yugen::TemplateRecordRun(std::vector<CTransaction>(pblock->vtx.begin() + 1, pblock->vtx.end()), nHeight, chainparams);
+    if (next_cb_mtx && yugenRun.empty()) {
         pblock->vtx[0] = *next_cb_mtx;
     } else {
-        pblock->vtx[0] = CreateCoinbaseTransaction(chainparams, nFees, minerAddress, nHeight);
+        pblock->vtx[0] = CreateCoinbaseTransaction(chainparams, nFees, minerAddress, nHeight, COINBASE_FLAGS, yugenRun);
     }
     pblocktemplate->vTxFees[0] = -nFees;
 
@@ -558,6 +575,23 @@ bool BlockAssembler::TestForBlock(CTxMemPool::txiter iter)
     if (IsExpiredTx(iter->GetTx(), nHeight))
         return false;
 
+    // Yugen (spec 0.5.1 §16.2 W3, W5; review H-2): anchors in the window and nullifiers unspent at
+    // nHeight, and room in the weight. 50,000 bytes stay free for the coinbase record run.
+    if (iter->GetTx().IsYugen()) {
+        if (yugen::StaleInPool(iter->GetTx(), nHeight, -1, chainparams)) return false;
+        const uint64_t pb = yugen::TxProofBytes(iter->GetTx());
+        if (nBlockSize + iter->GetTxSize() + nYugenProofBytes + pb + 50000 > yugen::BLOCK_WEIGHT_MAX) return false;
+        if (iter->GetTx().IsYugenBundle() &&
+            nYugenW5 + iter->GetTxSize() + pb + 50000 > yugen::BLOCK_WEIGHT_MAX - yugen::LEAF_RESERVE) return false;
+        // §13.3.2 turnstile: the pool must hold what the template's transactions take, in order.
+        const CAmount nb = yugen::Current(chainparams).balance - nYugenPoolDebit - yugen::PoolDebit(iter->GetTx());
+        if (nb < 0 || nb > MAX_MONEY) return false;
+        // §13.3.6: a leaf deposit may not take B above cap(h) (a bundle's would be skipped, S3).
+        if (!iter->GetTx().IsYugenBundle() && yugen::PoolDebit(iter->GetTx()) < 0 &&
+            nb > (CAmount)yugen::ValueCap(nHeight, chainparams.GetConsensus().vUpgrades[Consensus::UPGRADE_YUGEN].nActivationHeight))
+            return false;
+    }
+
     // UPGRADE_VAULT: a trial against the running set state, committed below once nothing else can refuse the tx.
     // Try also rechecks PQ input scripts and BIP68 sequence locks at nHeight (parity with v4.5.0, audit 04/F-4; see vault/node.cpp).
     if (vaultRun) {
@@ -622,6 +656,9 @@ void BlockAssembler::AddToBlock(CTxMemPool::txiter iter)
     pblocktemplate->vTxFees.push_back(iter->GetFee());
     pblocktemplate->vTxSigOps.push_back(iter->GetSigOpCount());
     nBlockSize += iter->GetTxSize();
+    nYugenProofBytes += yugen::TxProofBytes(iter->GetTx());
+    if (iter->GetTx().IsYugenBundle()) nYugenW5 += iter->GetTxSize() + yugen::TxProofBytes(iter->GetTx());
+    nYugenPoolDebit += yugen::PoolDebit(iter->GetTx());
     ++nBlockTx;
     nBlockSigOps += iter->GetSigOpCount();
     nFees += iter->GetFee();
