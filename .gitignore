@@ -133,3 +133,9 @@ src/fuzz.cpp
 .env
 poetry.lock
 semgrep-out/
+
+# Yugen helpers built by make (src/Makefile.yugen.include) and their pinned dependency checkouts
+src/yugen-leafverify
+src/yugen-sendbuild
+src/yewd-yugen
+contrib/yugen-*/deps

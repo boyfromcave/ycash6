@@ -1,0 +1,53 @@
+# Copyright (c) 2026 The Ycash developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://www.opensource.org/licenses/mit-license.php .
+
+# The Yugen helper processes (doc/yugen-node.md "Helper build"): yugen-leafverify (-yugenverifier),
+# yugen-sendbuild (-yugenbuilder) and the wallet prover yewd-yugen (-yugenprover). They are never
+# linked into ycashd: each has its own Cargo workspace, lock file and toolchain (rust-toolchain.toml,
+# so cargo is the rustup proxy, not $(CARGO)). Their dependencies are Yugen repositories checked out
+# at the full commits in contrib/yugen-*/PINS by contrib/yugen-pins.sh (via contrib/yugen-*/scripts/deps.sh),
+# from the public URLs there or, with $$YUGEN_LOCAL_ROOT set, from local repositories; a checkout already at
+# its pin is reused without a fetch. Their crates.io dependencies are vendored by depends with ycashd's
+# (depends/Makefile, NO_YUGEN_HELPERS), so the default offline build needs no network (--enable-online-rust
+# fetches instead; doc/yugen-release.md). One target directory inside the build tree; the
+# binaries are copied next to ycashd, where ycashd and qa/rpc-tests look for them.
+
+if ENABLE_YUGEN_HELPERS
+YUGEN_CARGO = cargo
+YUGEN_TARGET_DIR = $(abs_top_builddir)/target/yugen-helpers
+YUGEN_CONTRIB = $(abs_top_srcdir)/contrib
+YUGEN_CARGO_OPTS = build --release --locked --target-dir $(YUGEN_TARGET_DIR)
+if !ENABLE_ONLINE_RUST
+YUGEN_CARGO_OPTS += --offline
+endif
+# Clear what the ycashd Rust build or the caller's shell sets, so each helper builds with its own
+# toolchain file and into YUGEN_TARGET_DIR (a global CARGO_TARGET_DIR would otherwise hide it).
+YUGEN_ENV = env -u RUSTC -u RUSTFLAGS -u RUSTUP_TOOLCHAIN -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET
+YUGEN_SENDBUILD_WALLET = $(YUGEN_CONTRIB)/yugen-sendbuild/deps/clones/yew/yewd/yugen
+
+YUGEN_HELPER_BINS = yugen-leafverify$(EXEEXT) yugen-sendbuild$(EXEEXT) yewd-yugen$(EXEEXT)
+
+yugen-deps:
+	$(AM_V_at)$(YUGEN_ENV) sh $(YUGEN_CONTRIB)/yugen-leafverify/scripts/deps.sh >/dev/null
+	$(AM_V_at)$(YUGEN_ENV) sh $(YUGEN_CONTRIB)/yugen-sendbuild/scripts/deps.sh >/dev/null
+
+# The three cargo runs share YUGEN_TARGET_DIR (cargo locks it), so they run in sequence.
+yugen-cargo-build: yugen-deps
+	$(rust_verbose)cd $(YUGEN_CONTRIB)/yugen-leafverify && $(YUGEN_ENV) $(YUGEN_CARGO) $(YUGEN_CARGO_OPTS) $(cargo_verbose)
+	$(rust_verbose)cd $(YUGEN_CONTRIB)/yugen-sendbuild && $(YUGEN_ENV) $(YUGEN_CARGO) $(YUGEN_CARGO_OPTS) $(cargo_verbose)
+	$(rust_verbose)cd $(YUGEN_SENDBUILD_WALLET) && $(YUGEN_ENV) $(YUGEN_CARGO) $(YUGEN_CARGO_OPTS) --bin yewd-yugen $(cargo_verbose)
+
+$(YUGEN_HELPER_BINS): yugen-cargo-build
+	$(AM_V_at)cp $(YUGEN_TARGET_DIR)/release/$@ $@
+
+yugen-helpers: $(YUGEN_HELPER_BINS)
+
+all-local: yugen-helpers
+
+clean-yugen-helpers:
+	rm -f $(YUGEN_HELPER_BINS)
+	rm -rf $(YUGEN_TARGET_DIR)
+
+.PHONY: yugen-deps yugen-cargo-build yugen-helpers clean-yugen-helpers
+endif

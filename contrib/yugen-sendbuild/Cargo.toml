@@ -1,0 +1,26 @@
+[package]
+name = "yugen-sendbuild"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "ycashd's z_sendmany helper: builds a Yugen deposit transfer to a Yugen address and has it proved by yewd-yugen"
+
+[workspace]
+exclude = ["deps"]
+
+[dependencies]
+yugen-ref = { path = "deps/clones/yew/yewd/yugen/deps/yugen-spec/yugen-ref" }  # the wallet's own path (one package in the lock)
+# The wallet's transfer builder (build.rs, FLAG_LEAFFEE) and prover driver (engine::prove_both); its
+# provers are not linked: they run as `yewd-yugen prove a|b` child processes.
+yewd-yugen = { path = "deps/clones/yew/yewd/yugen/wallet", default-features = false }
+serde_json = "1"
+hex = "0.4"
+getrandom = "0.2"
+
+# yugen-ref names yugen-falcon by its public git URL; the build takes the pinned checkout (offline).
+[patch."https://github.com/boyfromcave/yugen-falcon.git"]
+yugen-falcon = { path = "deps/clones/yew/yewd/yugen/deps/yugen-falcon" }
+
+[profile.release]
+opt-level = 3

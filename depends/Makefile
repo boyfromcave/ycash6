@@ -43,6 +43,18 @@ DOWNLOAD_CONNECT_TIMEOUT:=10
 DOWNLOAD_RETRIES:=3
 CRATE_REGISTRY:=vendored-sources
 CRATE_ARCHIVE = $(SOURCES_PATH)/vendored-crates.tar.gz
+# The Yugen helpers (src/Makefile.yugen.include) are separate Cargo workspaces; their crates.io
+# dependencies go into the same vendored directory, so an offline build (no --enable-online-rust)
+# builds them from a cold cargo cache. Their pinned repositories (contrib/yugen-*/PINS) are checked out
+# first, here, since the lock files name crates inside them. NO_YUGEN_HELPERS=1 skips both (for
+# configure --disable-yugen-helpers).
+NO_YUGEN_HELPERS ?=
+ifeq ($(NO_YUGEN_HELPERS),)
+YUGEN_CONTRIB = $(BASEDIR)/../contrib
+YUGEN_HELPER_DEPS = sh $(YUGEN_CONTRIB)/yugen-leafverify/scripts/deps.sh && sh $(YUGEN_CONTRIB)/yugen-sendbuild/scripts/deps.sh &&
+YUGEN_HELPER_VENDOR = --sync $(YUGEN_CONTRIB)/yugen-leafverify/Cargo.toml --sync $(YUGEN_CONTRIB)/yugen-sendbuild/Cargo.toml \
+  --sync $(YUGEN_CONTRIB)/yugen-sendbuild/deps/clones/yew/yewd/yugen/Cargo.toml
+endif
 
 host:=$(BUILD)
 ifneq ($(HOST),)
@@ -130,7 +142,8 @@ $(host_prefix)/.stamp_$(final_build_id): $(native_packages) $(packages)
 	then echo Extracting pre-vendored crates from $(CRATE_ARCHIVE)...; \
 		tar xf $(CRATE_ARCHIVE) -C $(@D); \
 	else echo Vendoring crates...; \
-		$(@D)/native/bin/cargo vendor --locked --manifest-path $(BASEDIR)/../Cargo.toml $(@D)/$(CRATE_REGISTRY); \
+		$(YUGEN_HELPER_DEPS) \
+		$(@D)/native/bin/cargo vendor --locked --manifest-path $(BASEDIR)/../Cargo.toml $(YUGEN_HELPER_VENDOR) $(@D)/$(CRATE_REGISTRY); \
 	fi
 	$(AT)touch $@
 

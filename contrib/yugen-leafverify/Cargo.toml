@@ -1,0 +1,27 @@
+[package]
+name = "yugen-leafverify"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "ycashd's Yugen leaf-transfer verifier and note-tree helper, run as a separate process"
+
+[workspace]
+exclude = ["deps"]
+
+[dependencies]
+yugen-ref = { path = "deps/yugen-spec/yugen-ref", default-features = false }
+yugen-proof-a = { path = "deps/yugen-proof-a" }
+verifier_e2 = { path = "deps/yugen-proof-a/vendor/leanMultisig/crates/e2/verifier" }
+# The consensus build, as the wallet (yew decision Y-W3b) and the bundle prover: category 1 mixed field, BLAKE3 Merkle.
+yugen-proof-b2 = { path = "deps/yugen-proof-b2", features = ["cat1t", "blake3"] }
+binius-core = { path = "deps/yugen-proof-b2/vendor/binius64/crates/core" }
+serde_json = "1"
+hex = "0.4"
+
+# yugen-ref names yugen-falcon by its public git URL; the build takes the pinned checkout (offline).
+[patch."https://github.com/boyfromcave/yugen-falcon.git"]
+yugen-falcon = { path = "deps/yugen-falcon" }
+
+[profile.release]
+opt-level = 3

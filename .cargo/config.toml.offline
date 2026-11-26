@@ -4,5 +4,13 @@ linker = "aarch64-linux-gnu-gcc"
 [source.crates-io]
 replace-with = "vendored-sources"
 
+# The [patch.crates-io] git crates (Cargo.toml) are vendored with the rest by depends' `cargo vendor`;
+# without this entry an --offline build reads them from ~/.cargo/git and a cold CARGO_HOME fails.
+# Keep url and rev equal to Cargo.toml's.
+[source."git+https://github.com/boyfromcave/librustzcash6.git?rev=057511f1d355ba47515672b9ae9625e7a35029f4"]
+git = "https://github.com/boyfromcave/librustzcash6.git"
+rev = "057511f1d355ba47515672b9ae9625e7a35029f4"
+replace-with = "vendored-sources"
+
 [source.vendored-sources]
 # The directory for this source is set to RUST_VENDORED_SOURCES by src/Makefile.am

@@ -69,6 +69,8 @@ pub(crate) fn network(
         nu6_1: i32_to_optional_height(nu6_1),
         nu6_2: i32_to_optional_height(nu6_2),
         vault: i32_to_optional_height(vault),
+        // Yugen's height reaches this from the node with the consensus commit (UPGRADE_YUGEN).
+        yugen: None,
     };
     let params = match network {
         "main" => Network::Consensus(consensus::Network::MainNetwork),
