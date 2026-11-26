@@ -1725,13 +1725,26 @@ TEST(Yugen, BundleCoinbaseDepositSkipped) {
         EXPECT_EQ(yugen::UndoMask(undo), std::vector<bool>({false, true, true}));
         EXPECT_EQ(yugen::RecordPrevouts(tx, yugen::UndoMask(undo)), std::vector<COutPoint>({a.p}));
     }
-    // An unknown module with a recorded mask that says applied (VerifyDB): the coinbase rule is re-decided.
-    ModuleHook unknown(false);
-    const std::vector<bool> apply{true, true, true};
-    const Outcome o = RunConnect(c, GenBundle(c.h0, {dep, w}), {cb}, {}, 0, &apply);
-    EXPECT_EQ(o.fail, "");
-    EXPECT_EQ(o.applied, std::vector<bool>({false, true}));
-    EXPECT_TRUE(o.spent.empty());
+    // An unknown module with a recorded mask that says applied (VerifyDB): the ordinary deposit is asked, so
+    // the answer is UNKNOWN and the recorded mask decides it; the mature coinbase deposit is re-decided from
+    // the view and skipped whatever the mask says.
+    {
+        CCoinsViewDummy base;
+        CCoinsViewCache view(&base);
+        PutCoin(view, cb);
+        PutCoin(view, a);
+        view.ModifyCoins(cb.p.hash)->nHeight = YugenChain::ACT + 1 - COINBASE_MATURITY;   // mature
+        c.i2.nHeight = YugenChain::ACT + 1; c.i2.pprev = &c.i1;
+        ModuleHook unknown(false);
+        const std::vector<bool> apply{true, true, true};
+        yugen::BlockCoins bc;
+        CTxUndo undo; CAmount delta = 0; CValidationState st;
+        ASSERT_TRUE(yugen::ConnectBundleCoins(tx, view, undo, &c.i2, Params(), SCRIPT_VERIFY_P2SH, bc, delta, st, &apply)) << st.GetRejectReason();
+        EXPECT_EQ(g_askedCount, 1u);   // the ordinary coin was asked: the recorded-mask path is reached
+        EXPECT_EQ(bc.bundles[tx.GetHash()].applied, std::vector<bool>({false, true, true}));
+        EXPECT_TRUE(view.AccessCoins(cb.p.hash)->IsAvailable(cb.p.n));
+        EXPECT_FALSE(view.AccessCoins(a.p.hash)->IsAvailable(a.p.n));
+    }
 }
 
 TEST(Yugen, BundleUnknownModuleTakesRecordedMask) {

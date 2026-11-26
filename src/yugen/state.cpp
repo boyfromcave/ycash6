@@ -618,7 +618,7 @@ bool ConnectBundleCoins(const CTransaction& tx, CCoinsViewCache& view, CTxUndo& 
         // S1: a nullifier spent on chain, earlier in the block or earlier in this bundle.
         bool skip = false;
         for (const auto& nf : t.nf) if (g_state.nullifiers.count(nf) || bc.nfs.count(nf)) skip = true;
-        // S2: a deposit input that is not an unspent output spendable at h (on this line: coinbase maturity);
+        // S2: a deposit input that is not an unspent output spendable at h (on this line: no coinbase coin at all, N-D13);
         // N-D12: or one created in this block, or one the YED module tracks after the parent (a token, a
         // vault, an intent, a bond: the module reads tx.vin only). A coin of this block is skipped whatever
         // it is, so the module's state at the parent decides every other coin exactly.

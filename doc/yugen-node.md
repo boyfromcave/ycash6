@@ -374,7 +374,7 @@ transparent change, which a leaf deposit cannot on mainnet. Spec 0.5.4 §15.6 S2
 maturity.
 
 Four-part check. The leaf path does X (spends a coinbase coin only with no transparent output) in
-`src/consensus/tx_verify.cpp`/`main.cpp` `CheckInputs`/`ContextualCheckTransaction` using mechanism M (the
+`src/main.cpp` `CheckInputs` (coinbase maturity and the shielding rule, ~3041) and `ContextualCheckTransaction` using mechanism M (the
 transaction's own `vout`, read by the shielding rule). The bundle path is Z (record inputs and outputs
 outside `vin`/`vout`), which lacks M. So the adaptation W: a deposit whose spent coin is a coinbase
 output, mature or not, is skipped (S2) exactly as an immature one was: not applied, not verified, the coin
@@ -393,7 +393,14 @@ Where. `ConnectBundleCoins` (block connect, `CoinsAtTip` for the pool's and the 
 Like N-D12's same-block skip, this is stricter than spec 0.5.4 (a spec node applies a mature coinbase
 deposit, a split): no public network activates Yugen on this line (K-1), and the rule is proposed for the
 specification beside N-D12's (`doc/yugen-spec-proposal-0.5.5-vb-module-coins.md`). On the other node
-lines the same rule is to follow (shared-defect rule).
+lines the same rule is to follow (shared-defect rule); kogany must carry it before any network shared
+between the lines, or the lines split on a mature coinbase deposit.
+
+The rule has no activation gate of its own: it applies from Yugen's activation. A regtest or devnet
+datadir built by an older binary that applied a mature coinbase deposit in a bundle must be wiped:
+`verifychain` or `-reindex` would re-decide that deposit as skipped and disagree with the state-file
+replay. A record-run payout that sits at the end of the coinbase (a coinbase output) can only be deposited
+by a leaf, never by a bundle.
 
 Tests: gtest `Yugen.BundleCoinbaseDepositSkipped` (mature coinbase coins skipped, never spent, never asked,
 undo mask; a recorded mask saying applied does not override it), `Yugen.BundleImmatureCoinbaseDeposit`;
