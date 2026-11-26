@@ -158,6 +158,10 @@ public:
         // 2026-10-10): height 0, so IsPQFalconActive follows UPGRADE_VAULT exactly and TOK-PQ binds
         // from the vault upgrade's first block.
         consensus.pqFalconHeight = 0;
+        // Yugen (doc/yugen-node.md, activation): no mainnet or testnet height; regtest by -nuparams only.
+        consensus.vUpgrades[Consensus::UPGRADE_YUGEN].nProtocolVersion = 270200;   // as Vault; no peer cut-off of its own on devnets
+        consensus.vUpgrades[Consensus::UPGRADE_YUGEN].nActivationHeight =
+            Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nProtocolVersion = 0x7FFFFFFF;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
@@ -477,6 +481,10 @@ protected:
         // 2026-10-10): height 0, so IsPQFalconActive follows UPGRADE_VAULT exactly and TOK-PQ binds
         // from the vault upgrade's first block.
         consensus.pqFalconHeight = 0;
+        // Yugen (doc/yugen-node.md, activation): no mainnet or testnet height; regtest by -nuparams only.
+        consensus.vUpgrades[Consensus::UPGRADE_YUGEN].nProtocolVersion = 270200;   // as Vault; no peer cut-off of its own on devnets
+        consensus.vUpgrades[Consensus::UPGRADE_YUGEN].nActivationHeight =
+            Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nProtocolVersion = 0x7FFFFFFF;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
@@ -892,6 +900,10 @@ public:
         consensus.vUpgrades[Consensus::UPGRADE_VAULT].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         consensus.nVaultMinSetMaturity = 2;   // D-Q-31 scaled for the suites (bridge-shaped regtest sets use 2-3) (mainnet and testnet-yb-slow 16,128, testnet-yb-fast 48)
+        // Yugen (doc/yugen-node.md, activation): no mainnet or testnet height; regtest by -nuparams only.
+        consensus.vUpgrades[Consensus::UPGRADE_YUGEN].nProtocolVersion = 270200;   // as Vault; no peer cut-off of its own on devnets
+        consensus.vUpgrades[Consensus::UPGRADE_YUGEN].nActivationHeight =
+            Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nProtocolVersion = 0x7FFFFFFF;
         consensus.vUpgrades[Consensus::UPGRADE_ZFUTURE].nActivationHeight =
             Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT;

@@ -48,6 +48,7 @@ pub(crate) fn network(
     nu6_1: i32,
     nu6_2: i32,
     vault: i32,
+    yugen: i32,
 ) -> Result<Box<Network>, &'static str> {
     let i32_to_optional_height = |n: i32| {
         if n.is_negative() {
@@ -69,8 +70,7 @@ pub(crate) fn network(
         nu6_1: i32_to_optional_height(nu6_1),
         nu6_2: i32_to_optional_height(nu6_2),
         vault: i32_to_optional_height(vault),
-        // Yugen's height reaches this from the node with the consensus commit (UPGRADE_YUGEN).
-        yugen: None,
+        yugen: i32_to_optional_height(yugen),
     };
     let params = match network {
         "main" => Network::Consensus(consensus::Network::MainNetwork),
@@ -114,7 +114,7 @@ mod tests {
         // testnet-yb-fast's heights, not the old Ycash testnet's that TestNetwork hardcodes
         // (Canopy 661,634, no Vault).
         let net = network(
-            "test", 207_500, 280_000, 510_248, 510_250, 510_252, 510_254, -1, -1, -1, -1, 510_400,
+            "test", 207_500, 280_000, 510_248, 510_250, 510_252, 510_254, -1, -1, -1, -1, 510_400, -1,
         )
         .unwrap();
         assert_eq!(net.network_type(), NetworkType::Test);

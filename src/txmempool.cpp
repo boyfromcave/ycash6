@@ -440,6 +440,14 @@ bool CTxMemPool::addUnchecked(const uint256& hash, const CTxMemPoolEntry &entry,
     for (const uint256 &orchardNullifier : tx.GetOrchardBundle().GetNullifiers()) {
         mapOrchardNullifiers[orchardNullifier] = &tx;
     }
+    for (const auto& yt : tx.GetYugenTransfers()) {
+        for (const auto& nf : yt.nf) mapYugenNullifiers[nf] = &tx;
+        for (const auto& in : yt.vin) mapYugenDeposits[COutPoint(uint256(std::vector<unsigned char>(in.txid.begin(), in.txid.end())), in.index)] = &tx;
+    }
+    // Relay order (YugenRelayDepth): a Yugen transaction, or one with a Yugen ancestor in the pool.
+    bool yugenRelated = tx.IsYugen();
+    for (txiter a : setAncestors) yugenRelated = yugenRelated || setYugenRelated.count(a->GetTx().GetHash());
+    if (yugenRelated) setYugenRelated.insert(hash);
 
     nTransactionsUpdated++;
     totalTxSize += entry.GetTxSize();
@@ -571,6 +579,11 @@ void CTxMemPool::removeUnchecked(txiter it)
     for (const uint256 &orchardNullifier : it->GetTx().GetOrchardBundle().GetNullifiers()) {
         mapOrchardNullifiers.erase(orchardNullifier);
     }
+    for (const auto& yt : it->GetTx().GetYugenTransfers()) {
+        for (const auto& nf : yt.nf) mapYugenNullifiers.erase(nf);
+        for (const auto& in : yt.vin) mapYugenDeposits.erase(COutPoint(uint256(std::vector<unsigned char>(in.txid.begin(), in.txid.end())), in.index));
+    }
+    setYugenRelated.erase(it->GetTx().GetHash());
 
     totalTxSize -= it->GetTxSize();
     cachedInnerUsage -= it->DynamicMemoryUsage();
@@ -780,6 +793,75 @@ void CTxMemPool::removeConflicts(const CTransaction &tx, std::list<CTransaction>
             }
         }
     }
+    for (const auto& yt : tx.GetYugenTransfers()) {
+        for (const auto& nf : yt.nf) {
+            auto it = mapYugenNullifiers.find(nf);
+            if (it != mapYugenNullifiers.end() && *it->second != tx) {
+                const CTransaction txConflict = *it->second;
+                remove(txConflict, removed, true);
+            }
+        }
+        // A bundle's deposit and a pooled transaction or bundle spending the same coin (§15.5).
+        for (const auto& in : yt.vin) {
+            const COutPoint out(uint256(std::vector<unsigned char>(in.txid.begin(), in.txid.end())), in.index);
+            auto sp = mapNextTx.find(out);
+            if (sp != mapNextTx.end()) {
+                const CTransaction txConflict = *sp->second.ptx;
+                remove(txConflict, removed, true);
+            }
+            auto dp = mapYugenDeposits.find(out);
+            if (dp != mapYugenDeposits.end() && *dp->second != tx) {
+                const CTransaction txConflict = *dp->second;
+                remove(txConflict, removed, true);
+            }
+        }
+    }
+    for (const CTxIn& txin : tx.vin) {
+        auto dp = mapYugenDeposits.find(txin.prevout);
+        if (dp != mapYugenDeposits.end() && *dp->second != tx) {
+            const CTransaction txConflict = *dp->second;
+            remove(txConflict, removed, true);
+        }
+    }
+}
+
+const CTransaction* CTxMemPool::yugenDepositTx(const COutPoint& out) const
+{
+    LOCK(cs);
+    auto it = mapYugenDeposits.find(out);
+    return it == mapYugenDeposits.end() ? nullptr : it->second;
+}
+
+const CTransaction* CTxMemPool::spenderOf(const COutPoint& out) const
+{
+    LOCK(cs);
+    auto it = mapNextTx.find(out);
+    return it == mapNextTx.end() ? nullptr : it->second.ptx;
+}
+
+bool CTxMemPool::yugenNullifierExists(const std::array<uint8_t, 32>& nf) const
+{
+    LOCK(cs);
+    return mapYugenNullifiers.count(nf) > 0;
+}
+
+const CTransaction* CTxMemPool::yugenNullifierTx(const std::array<uint8_t, 32>& nf) const
+{
+    LOCK(cs);
+    auto it = mapYugenNullifiers.find(nf);
+    return it == mapYugenNullifiers.end() ? nullptr : it->second;
+}
+
+void CTxMemPool::removeYugenStale(const std::function<bool(const CTransaction&)>& stale)
+{
+    LOCK(cs);
+    std::list<CTransaction> drop;
+    for (const auto& e : mapTx) if (e.GetTx().IsYugen() && stale(e.GetTx())) drop.push_back(e.GetTx());
+    for (const auto& tx : drop) {
+        std::list<CTransaction> removed;
+        remove(tx, removed, true);
+        LogPrint("mempool", "Removing stale Yugen txid: %s\n", tx.GetHash().ToString());
+    }
 }
 
 std::vector<uint256> CTxMemPool::removeExpired(unsigned int nBlockHeight)
@@ -878,6 +960,7 @@ void CTxMemPool::_clear()
     mapLinks.clear();
     mapTx.clear();
     mapNextTx.clear();
+    setYugenRelated.clear();
     totalTxSize = 0;
     cachedInnerUsage = 0;
     ++nTransactionsUpdated;
@@ -1033,6 +1116,22 @@ bool CTxMemPool::CompareDepthAndScore(const uint256& hasha, const uint256& hashb
     // But the method name is left as-is because renaming it is not worth the
     // merge conflicts.
     return CompareTxMemPoolEntryByScore()(*i, *j);
+}
+
+uint64_t CTxMemPool::YugenRelayDepth(const uint256& hash)
+{
+    LOCK(cs);
+    // Every other transaction answers at once (review item 6); a Yugen-related one walks its
+    // ancestors up to YUGEN_RELAY_DEPTH_MAX (the count saturates there).
+    if (!setYugenRelated.count(hash)) return 0;
+    indexed_transaction_set::const_iterator it = mapTx.find(hash);
+    if (it == mapTx.end()) return 0;
+    setEntries ancestors;
+    std::string err;
+    uint64_t noLimit = std::numeric_limits<uint64_t>::max();
+    if (!CalculateMemPoolAncestors(*it, ancestors, YUGEN_RELAY_DEPTH_MAX, noLimit, noLimit, noLimit, err, false))
+        return YUGEN_RELAY_DEPTH_MAX;
+    return ancestors.size();
 }
 
 namespace {
@@ -1241,7 +1340,9 @@ size_t CTxMemPool::DynamicMemoryUsage() const {
     // Nullifier set tracking
     total += memusage::DynamicUsage(mapSproutNullifiers) +
              memusage::DynamicUsage(mapSaplingNullifiers) +
-             memusage::DynamicUsage(mapOrchardNullifiers);
+             memusage::DynamicUsage(mapOrchardNullifiers) +
+             memusage::DynamicUsage(mapYugenNullifiers) +
+             memusage::DynamicUsage(mapYugenDeposits);
 
     // DoS mitigation
     total += memusage::DynamicUsage(recentlyEvicted) + memusage::DynamicUsage(limitSet);

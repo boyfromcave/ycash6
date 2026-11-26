@@ -83,11 +83,35 @@ public:
 };
 
 
+// Yugen (spec 0.5.1 §15.1, §16.2): the proofs a bundle transaction commits to are block data beside
+// the transactions. Wire form (yolo's `proof_section`): after `vtx`, only when
+// non-empty, `compactsize(n) || n x [txid(32) || compactsize(k) || k x (compactsize(len) || proof)]`.
+// Network and RPC streams carry it; block files do not (the node keeps proofs in its proof store,
+// yugen/state.cpp) and the block hash and merkle root never cover it (a txid commits to its proofs'
+// hashes). Read only from a stream that knows its end (CDataStream).
+struct YugenProofEntry {
+    uint256 txid;
+    std::vector<std::vector<unsigned char>> proofs;
+    ADD_SERIALIZE_METHODS;
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action) {
+        READWRITE(txid);
+        READWRITE(proofs);
+    }
+};
+
+template <typename S> auto YugenSidecarMore(S& s, int) -> decltype(s.empty(), bool()) { return !s.empty(); }
+template <typename S> bool YugenSidecarMore(S&, long) { return false; }
+template <typename S> auto YugenSidecarStream(S& s, int) -> decltype(s.empty(), bool()) { return !(s.GetType() & (SER_DISK | SER_GETHASH)); }
+template <typename S> bool YugenSidecarStream(S&, long) { return false; }
+
 class CBlock : public CBlockHeader
 {
 public:
     // network and disk
     std::vector<CTransaction> vtx;
+    // network only: the Yugen proof sidecar
+    std::vector<YugenProofEntry> vYugenProofs;
 
     // memory only
     mutable bool fChecked;
@@ -109,12 +133,30 @@ public:
     inline void SerializationOp(Stream& s, Operation ser_action) {
         READWRITE(*(CBlockHeader*)this);
         READWRITE(vtx);
+        if (ser_action.ForRead()) {
+            vYugenProofs.clear();
+            // Bytes after vtx that do not read as a sidecar are ignored, as upstream ignores
+            // trailing bytes (before UPGRADE_YUGEN nothing reads the sidecar at all).
+            if (YugenSidecarStream(s, 0) && YugenSidecarMore(s, 0)) {
+                try { READWRITE(vYugenProofs); } catch (const std::ios_base::failure&) { vYugenProofs.clear(); }
+            }
+        } else if (!vYugenProofs.empty() && YugenSidecarStream(s, 0)) {
+            READWRITE(vYugenProofs);
+        }
+    }
+
+    // Bytes of every proof the block's transactions commit to through the sidecar (§16.2).
+    uint64_t YugenSidecarProofBytes() const {
+        uint64_t n = 0;
+        for (const auto& e : vYugenProofs) for (const auto& p : e.proofs) n += p.size();
+        return n;
     }
 
     void SetNull()
     {
         CBlockHeader::SetNull();
         vtx.clear();
+        vYugenProofs.clear();
         fChecked = false;
     }
 

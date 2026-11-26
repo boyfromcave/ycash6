@@ -27,6 +27,7 @@
 #include <rust/ed25519.h>
 #include <primitives/sapling.h>
 #include <primitives/orchard.h>
+#include <primitives/yugen.h>
 
 // Overwinter transaction version group id
 static constexpr uint32_t OVERWINTER_VERSION_GROUP_ID = 0x03C48270;
@@ -49,6 +50,10 @@ static_assert(SAPLING_TX_VERSION >= SAPLING_MIN_TX_VERSION,
     "Sapling tx version must not be lower than minimum");
 static_assert(SAPLING_TX_VERSION <= SAPLING_MAX_TX_VERSION,
     "Sapling tx version must not be higher than maximum");
+
+// Yugen transaction version group id (ASCII "YGNG"; doc/yugen-node.md, activation): nVersion 4 with
+// fOverwintered, the Sapling v4 fields, then the Yugen field. Valid only under UPGRADE_YUGEN.
+static constexpr uint32_t YUGEN_VERSION_GROUP_ID = 0x59474E47;
 
 // ZIP225 transaction version group id
 // (defined in section 7.1 of the protocol spec)
@@ -459,6 +464,30 @@ struct WTxId
 
 struct CMutableTransaction;
 
+/**
+ * The Yugen field of a Yugen transaction (version group YUGEN_VERSION_GROUP_ID; beta4 Yugen
+ * doc/yugen-node.md, N-TX): the leaf transfer (yugen-spec 0.5.1 §7.1) and its two
+ * wallet proofs. On this line the proofs travel inline (doc/yugen-node.md N-D3); they move to the
+ * block sidecar in M2.
+ */
+// A bundle transaction (spec §15) has the bundle encoding of §15.1 in `transfer` and both inline
+// proof fields empty: its two root proofs are block sidecar data (decision N-D4, doc/yugen-node.md).
+// Its kind is read from `transfer`, never from the proof fields, which the txid does not cover (N-D8).
+struct YugenField {
+    std::vector<unsigned char> transfer;
+    std::vector<unsigned char> proofA;
+    std::vector<unsigned char> proofB;
+
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action) {
+        READWRITE(transfer);
+        READWRITE(proofA);
+        READWRITE(proofB);
+    }
+};
+
 /** The basic transaction that is broadcasted on the network and contained in
  * blocks.  A transaction can contain multiple inputs and outputs.
  */
@@ -533,6 +562,7 @@ public:
     const std::vector<JSDescription> vJoinSplit;
     const ed25519::VerificationKey joinSplitPubKey;
     const ed25519::Signature joinSplitSig;
+    const YugenField yugen;
 
     /** Construct a CTransaction that qualifies as IsNull() */
     CTransaction();
@@ -586,7 +616,14 @@ public:
             nVersionGroupId == ZFUTURE_VERSION_GROUP_ID &&
             nVersion == ZFUTURE_TX_VERSION;
 
-        if (fOverwintered && !(isOverwinterV3 || isSaplingV4 || isZip225V5 || isFuture)) {
+        // Yugen: the v4 layout, then the Yugen field.
+        bool isYugenV4 =
+            fOverwintered &&
+            nVersionGroupId == YUGEN_VERSION_GROUP_ID &&
+            nVersion == SAPLING_TX_VERSION;
+        bool v4Layout = isSaplingV4 || isFuture || isYugenV4;
+
+        if (fOverwintered && !(isOverwinterV3 || isSaplingV4 || isZip225V5 || isFuture || isYugenV4)) {
             throw std::ios_base::failure("Unknown transaction format");
         }
 
@@ -617,16 +654,16 @@ public:
             READWRITE(*const_cast<std::vector<CTxIn>*>(&vin));
             READWRITE(*const_cast<std::vector<CTxOut>*>(&vout));
             READWRITE(*const_cast<uint32_t*>(&nLockTime));
-            if (isOverwinterV3 || isSaplingV4 || isFuture) {
+            if (isOverwinterV3 || v4Layout) {
                 READWRITE(*const_cast<uint32_t*>(&nExpiryHeight));
             }
-            SaplingV4Reader saplingReader(isSaplingV4 || isFuture);
+            SaplingV4Reader saplingReader(v4Layout);
             bool haveSaplingActions;
             if (ser_action.ForRead()) {
                 READWRITE(saplingReader);
                 haveSaplingActions = saplingReader.HaveActions();
             } else {
-                SaplingV4Writer saplingWriter(saplingBundle, isSaplingV4 || isFuture);
+                SaplingV4Writer saplingWriter(saplingBundle, v4Layout);
                 READWRITE(saplingWriter);
                 haveSaplingActions = saplingBundle.IsPresent();
             }
@@ -639,7 +676,7 @@ public:
                     READWRITE(*const_cast<ed25519::Signature*>(&joinSplitSig));
                 }
             }
-            if ((isSaplingV4 || isFuture) && haveSaplingActions) {
+            if (v4Layout && haveSaplingActions) {
                 std::array<unsigned char, 64> bindingSig;
                 if (!ser_action.ForRead()) {
                     bindingSig = saplingBundle.GetDetails().binding_sig();
@@ -648,6 +685,9 @@ public:
                 if (ser_action.ForRead()) {
                     saplingBundle = saplingReader.FinishBundleAssembly(bindingSig);
                 }
+            }
+            if (isYugenV4) {
+                READWRITE(*const_cast<YugenField*>(&yugen));
             }
         }
         if (ser_action.ForRead())
@@ -748,6 +788,13 @@ public:
     // Return sum of (positive valueBalanceSapling or zero) and JoinSplit vpub_new
     CAmount GetShieldedValueIn() const;
 
+    /** The decoded Yugen leaf transfer of a Yugen transaction, if it decodes (spec §7.1). */
+    std::optional<yugen::Transfer> GetYugenTransfer() const;   // a leaf transfer only
+    bool IsYugen() const { return fOverwintered && nVersionGroupId == YUGEN_VERSION_GROUP_ID; }
+    bool IsYugenBundle() const { return IsYugen() && yugen::IsBundleEncoding(yugen.transfer); }   // N-D8: by the committed bytes
+    // Every transfer of the transaction: the leaf's, or a bundle's in list order (empty if it does not decode).
+    std::vector<yugen::Transfer> GetYugenTransfers() const;
+
     // Return the conventional fee for this transaction calculated according to
     // <https://zips.z.cash/zip-0317#fee-calculation>.
     CAmount GetConventionalFee() const;
@@ -792,6 +839,7 @@ struct CMutableTransaction
     std::vector<JSDescription> vJoinSplit;
     ed25519::VerificationKey joinSplitPubKey;
     ed25519::Signature joinSplitSig;
+    YugenField yugen;
 
     CMutableTransaction();
     CMutableTransaction(const CTransaction& tx);
@@ -835,7 +883,15 @@ struct CMutableTransaction
             fOverwintered &&
             nVersionGroupId == ZFUTURE_VERSION_GROUP_ID &&
             nVersion == ZFUTURE_TX_VERSION;
-        if (fOverwintered && !(isOverwinterV3 || isSaplingV4 || isZip225V5 || isFuture)) {
+
+        // Yugen: the v4 layout, then the Yugen field.
+        bool isYugenV4 =
+            fOverwintered &&
+            nVersionGroupId == YUGEN_VERSION_GROUP_ID &&
+            nVersion == SAPLING_TX_VERSION;
+        bool v4Layout = isSaplingV4 || isFuture || isYugenV4;
+
+        if (fOverwintered && !(isOverwinterV3 || isSaplingV4 || isZip225V5 || isFuture || isYugenV4)) {
             throw std::ios_base::failure("Unknown transaction format");
         }
 
@@ -866,16 +922,16 @@ struct CMutableTransaction
             READWRITE(vin);
             READWRITE(vout);
             READWRITE(nLockTime);
-            if (isOverwinterV3 || isSaplingV4 || isFuture) {
+            if (isOverwinterV3 || v4Layout) {
                 READWRITE(nExpiryHeight);
             }
-            SaplingV4Reader saplingReader(isSaplingV4 || isFuture);
+            SaplingV4Reader saplingReader(v4Layout);
             bool haveSaplingActions;
             if (ser_action.ForRead()) {
                 READWRITE(saplingReader);
                 haveSaplingActions = saplingReader.HaveActions();
             } else {
-                SaplingV4Writer saplingWriter(saplingBundle, isSaplingV4 || isFuture);
+                SaplingV4Writer saplingWriter(saplingBundle, v4Layout);
                 READWRITE(saplingWriter);
                 haveSaplingActions = saplingBundle.IsPresent();
             }
@@ -887,7 +943,7 @@ struct CMutableTransaction
                     READWRITE(joinSplitSig);
                 }
             }
-            if ((isSaplingV4 || isFuture) && haveSaplingActions) {
+            if (v4Layout && haveSaplingActions) {
                 std::array<unsigned char, 64> bindingSig;
                 if (!ser_action.ForRead()) {
                     bindingSig = saplingBundle.GetDetails().binding_sig();
@@ -896,6 +952,9 @@ struct CMutableTransaction
                 if (ser_action.ForRead()) {
                     saplingBundle = saplingReader.FinishBundleAssembly(bindingSig);
                 }
+            }
+            if (isYugenV4) {
+                READWRITE(yugen);
             }
         }
     }

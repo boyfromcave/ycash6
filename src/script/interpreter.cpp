@@ -1286,6 +1286,8 @@ const unsigned char ZCASH_PREVOUTS_HASH_PERSONALIZATION[blake2b::PERSONALBYTES] 
     {'Z','c','a','s','h','P','r','e','v','o','u','t','H','a','s','h'};
 const unsigned char ZCASH_SEQUENCE_HASH_PERSONALIZATION[blake2b::PERSONALBYTES] =
     {'Z','c','a','s','h','S','e','q','u','e','n','c','H','a','s','h'};
+const unsigned char YUGEN_TX_HASH_PERSONALIZATION[blake2b::PERSONALBYTES] =
+    {'Z','c','a','s','h','Y','u','g','e','n','T','x','H','a','s','h'};
 const unsigned char ZCASH_OUTPUTS_HASH_PERSONALIZATION[blake2b::PERSONALBYTES] =
     {'Z','c','a','s','h','O','u','t','p','u','t','s','H','a','s','h'};
 const unsigned char ZCASH_JOINSPLITS_HASH_PERSONALIZATION[blake2b::PERSONALBYTES] =
@@ -1384,7 +1386,8 @@ void PrecomputedTransactionData::SetPrecomputed(
         txTo.nVersion == OVERWINTER_TX_VERSION;
     bool isSaplingV4 =
         txTo.fOverwintered &&
-        txTo.nVersionGroupId == SAPLING_VERSION_GROUP_ID &&
+        (txTo.nVersionGroupId == SAPLING_VERSION_GROUP_ID ||
+         txTo.nVersionGroupId == YUGEN_VERSION_GROUP_ID) &&
         txTo.nVersion == SAPLING_TX_VERSION;
 
     if (!txTo.fOverwintered || isOverwinterV3 || isSaplingV4) {
@@ -1412,7 +1415,9 @@ SigVersion SignatureHashVersion(const CTransaction& txTo)
     if (txTo.fOverwintered) {
         if (txTo.nVersionGroupId == ZIP225_VERSION_GROUP_ID) {
             return SIGVERSION_ZIP244;
-        } else if (txTo.nVersionGroupId == SAPLING_VERSION_GROUP_ID) {
+        } else if (txTo.nVersionGroupId == SAPLING_VERSION_GROUP_ID ||
+                   txTo.nVersionGroupId == YUGEN_VERSION_GROUP_ID) {
+            // Yugen: ZIP-243 extended by hashYugen (doc/yugen-node.md N-TX).
             return SIGVERSION_SAPLING;
         } else {
             return SIGVERSION_OVERWINTER;
@@ -1561,6 +1566,12 @@ uint256 SignatureHash(
         if (sigversion == SIGVERSION_SAPLING) {
             // Sapling value balance
             ss << txTo.GetValueBalanceSapling();
+        }
+        if (txTo.fOverwintered && txTo.nVersionGroupId == YUGEN_VERSION_GROUP_ID) {
+            // hashYugen: BLAKE2b-256 of the leaf transfer's bytes (proofs excluded).
+            CBLAKE2bWriter hy(SER_GETHASH, 0, YUGEN_TX_HASH_PERSONALIZATION);
+            hy.write((const char*)txTo.yugen.transfer.data(), txTo.yugen.transfer.size());
+            ss << hy.GetHash();
         }
         // Sighash type
         ss << nHashType;

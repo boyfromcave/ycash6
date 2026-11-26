@@ -42,6 +42,8 @@
 #include "vault/checker.h"
 #include "vault/node.h"
 #include "zip317.h"
+#include "yugen/leaf.h"
+#include "yugen/state.h"
 
 #include <algorithm>
 #include <atomic>
@@ -367,6 +369,11 @@ struct CNodeState {
     int nBlocksInFlightValidHeaders;
     //! Whether we consider this a preferred download peer.
     bool fPreferredDownload;
+    //! Yugen: until when (microseconds) this peer's Yugen transactions are not judged, after one was refused;
+    //! the refusals in a row and the last one's time, for the exponential back-off (yugen::RefusalBackoff).
+    int64_t nYugenRefusedUntil = 0;
+    int nYugenRefusals = 0;
+    int64_t nYugenLastRefusal = 0;
 
     CNodeState() {
         fCurrentlyConnected = false;
@@ -593,6 +600,8 @@ void FindNextBlocksToDownload(NodeId nodeid, unsigned int count, std::vector<CBl
                     state->pindexLastCommonBlock = pindex;
             } else if (mapBlocksInFlight.count(pindex->GetBlockHash()) == 0) {
                 // The block is not already downloaded, and not yet in flight.
+                // Yugen: a block the verifier failed on HELPER_RETRIES_MAX times is not asked for again.
+                if (yugen::HelperGaveUp(pindex->GetBlockHash())) return;
                 if (pindex->nHeight > nWindowEnd) {
                     // We reached the end of the window.
                     if (vBlocks.size() == 0 && waitingfor != nodeid) {
@@ -946,6 +955,12 @@ unsigned int GetLegacySigOpCount(const CTransaction& tx)
     {
         nSigOps += txout.scriptPubKey.GetSigOpCount(false);
     }
+    // Yugen (spec 0.5.4 §15.5): the outputs a bundle's VB records create count as a transaction's
+    // would, applied or not; their script signatures are push-only (B6) and count 0.
+    if (tx.IsYugenBundle())
+        for (const auto& t : tx.GetYugenTransfers())
+            for (const auto& o : t.vout)
+                nSigOps += CScript(o.script.begin(), o.script.end()).GetSigOpCount(false);
     return nSigOps;
 }
 
@@ -1008,6 +1023,7 @@ bool ContextualCheckTransaction(
     bool nu6point1Active = consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_NU6_1);
     bool nu6point2Active = consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_NU6_2);
     bool futureActive = consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_ZFUTURE);
+    bool yugenActive = consensus.NetworkUpgradeActive(nHeight, Consensus::UPGRADE_YUGEN);
 
     assert(!saplingActive || overwinterActive); // Sapling cannot be active unless Overwinter is
     assert(!heartwoodActive || saplingActive);  // Heartwood cannot be active unless Sapling is
@@ -1097,8 +1113,9 @@ bool ContextualCheckTransaction(
 
         // Rules that became inactive after NU5 activation.
         if (!nu5Active) {
-            // Reject transactions with invalid version group id
-            if (tx.nVersionGroupId != SAPLING_VERSION_GROUP_ID) {
+            // Reject transactions with invalid version group id (Yugen's own group is checked below)
+            if (tx.nVersionGroupId != SAPLING_VERSION_GROUP_ID &&
+                tx.nVersionGroupId != YUGEN_VERSION_GROUP_ID) {
                 return state.DoS(
                     dosLevelPotentiallyRelaxing,
                     error("ContextualCheckTransaction(): invalid Sapling tx version"),
@@ -1361,6 +1378,28 @@ bool ContextualCheckTransaction(
         }
     }
 
+    // Yugen (doc/yugen-node.md: activation, N-TX): the Yugen group is valid only from
+    // UPGRADE_YUGEN, as nVersion 4 with no Sapling or Sprout parts (the envelope), and carries one
+    // leaf transfer or one bundle.
+    if (tx.fOverwintered && tx.nVersionGroupId == YUGEN_VERSION_GROUP_ID) {
+        if (!yugenActive) {
+            return state.DoS(
+                dosLevelPotentiallyRelaxing,
+                error("ContextualCheckTransaction(): Yugen transaction before the Yugen upgrade"),
+                REJECT_INVALID, "bad-yugen-tx-before-activation");
+        }
+        if (tx.nVersion != SAPLING_TX_VERSION || tx.GetConsensusBranchId().has_value()) {
+            return state.DoS(100, error("ContextualCheckTransaction(): Yugen transaction version"),
+                REJECT_INVALID, "bad-yugen-tx-version");
+        }
+        if (!yugen::CheckLeafTransferStructure(tx, state)) {
+            return false;
+        }
+        if (!yugen::CheckLeafEnvelope(tx, nHeight, consensus.vUpgrades[Consensus::UPGRADE_YUGEN].nActivationHeight, state)) {
+            return false;
+        }
+    }
+
     // Rules that apply to the future epoch
     if (futureActive) {
         switch (tx.nVersionGroupId) {
@@ -1565,6 +1604,7 @@ bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidatio
         if (tx.nVersionGroupId != OVERWINTER_VERSION_GROUP_ID &&
                 tx.nVersionGroupId != SAPLING_VERSION_GROUP_ID &&
                 tx.nVersionGroupId != ZIP225_VERSION_GROUP_ID &&
+                tx.nVersionGroupId != YUGEN_VERSION_GROUP_ID &&
                 tx.nVersionGroupId != ZFUTURE_VERSION_GROUP_ID) {
             return state.DoS(100, error("CheckTransaction(): unknown tx version group id"),
                     REJECT_INVALID, "bad-tx-version-group-id");
@@ -1590,10 +1630,12 @@ bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidatio
     // joinsplits or Orchard actions may be present.
     // Note that orchard_bundle.SpendsEnabled() is false when no
     // Orchard bundle is present, i.e. when nActionsOrchard == 0.
+    // Yugen: a transfer is a source (its spends and fee come from the pool).
     if (tx.vin.empty() &&
         tx.vJoinSplit.empty() &&
         tx.GetSaplingSpendsCount() == 0 &&
-        !orchard_bundle.SpendsEnabled())
+        !orchard_bundle.SpendsEnabled() &&
+        tx.yugen.transfer.empty())
     {
         return state.DoS(10, false, REJECT_INVALID, "bad-txns-no-source-of-funds");
     }
@@ -1605,10 +1647,12 @@ bool CheckTransactionWithoutProofVerification(const CTransaction& tx, CValidatio
     // Sprout joinsplits or Orchard actions may be present.
     // Note that orchard_bundle.OutputsEnabled() is false when no
     // Orchard bundle is present, i.e. when nActionsOrchard == 0.
+    // Yugen: a transfer is a sink (a deposit sends every input into the pool).
     if (tx.vout.empty() &&
         tx.vJoinSplit.empty() &&
         tx.GetSaplingOutputsCount() == 0 &&
-        !orchard_bundle.OutputsEnabled())
+        !orchard_bundle.OutputsEnabled() &&
+        tx.yugen.transfer.empty())
     {
         return state.DoS(10, false, REJECT_INVALID, "bad-txns-no-sink-of-funds");
     }
@@ -1964,6 +2008,12 @@ bool AcceptToMemoryPool(
         return false;
     }
 
+    // Yugen (spec 0.5.1 §7.9, §15.6): decode, anchors and nullifiers (chain and pool) for the next
+    // block; the proofs are verified after the input and script checks below (review M-1).
+    if (!yugen::PreCheckMempoolTx(tx, pool, chainparams, state)) {
+        return false;
+    }
+
     // DoS mitigation: reject transactions expiring soon
     // Note that if a valid transaction belonging to the wallet is in the mempool and the node is shutdown,
     // upon restart, CWalletTx::AcceptToMemoryPool() will be invoked which might result in rejection.
@@ -2254,6 +2304,11 @@ bool AcceptToMemoryPool(
                 __func__, hash.ToString(), FormatStateMessage(state));
         }
 
+        // Yugen: the proofs (verifier helper), last because they are the expensive check (review M-1).
+        if (!yugen::CheckMempoolTx(tx, pool, chainparams, state)) {
+            return false;
+        }
+
         // The YED module's validity at the next block (upgrade plan U-21): state-dependent (the module's
         // state moves with the tip, which the relaying peer need not share), so DoS 0 (cf. finding 25).
         if (yellowback::g_yellowback) {
@@ -2300,6 +2355,14 @@ bool AcceptToMemoryPool(
         }
 
         {
+            // Yugen, lead decision (a): a bundle supersedes the pool leaf transfers it carries
+            // (PreCheckMempoolTx admitted only those conflicts); evict them and their descendants.
+            if (tx.IsYugenBundle()) {
+                std::list<CTransaction> superseded;
+                pool.removeConflicts(tx, superseded);
+                for (const auto& l : superseded)
+                    LogPrint("mempool", "Yugen bundle %s supersedes %s\n", hash.ToString(), l.GetHash().ToString());
+            }
             // Store transaction in memory
             pool.addUnchecked(hash, entry, setAncestors);
 
@@ -2540,6 +2603,8 @@ bool ReadBlockFromDisk(CBlock& block, const CBlockIndex* pindex, const Consensus
     if (block.GetHash() != pindex->GetBlockHash())
         return error("ReadBlockFromDisk(CBlock&, CBlockIndex*): GetHash() doesn't match index for %s at %s",
                 pindex->ToString(), pindex->GetBlockPos().ToString());
+    if (consensusParams.NetworkUpgradeActive(pindex->nHeight, Consensus::UPGRADE_YUGEN))
+        yugen::AttachSidecar(block);   // Yugen proofs are kept beside the block files (none before activation)
     return true;
 }
 
@@ -2741,6 +2806,23 @@ void static InvalidChainFound(CBlockIndex* pindexNew, const CChainParams& chainP
     CheckForkWarningConditions(chainParams.GetConsensus());
 }
 
+// `ResetBodyState` also clears the header-derived commitment field that `AddToBlockIndex` set
+// (hashChainHistoryRoot from Heartwood, hashFinalSaplingRoot before it, pre-NU5), which no later
+// step sets again: once the block reconnected, `LoadBlockIndex`'s ZIP 221 consistency check
+// would refuse the index at the next start ("block index inconsistency detected"). Restore it as
+// `AddToBlockIndex` does.
+void RestoreHeaderCommitment(CBlockIndex* p, const Consensus::Params& cp)
+{
+    if (cp.NetworkUpgradeActive(p->nHeight, Consensus::UPGRADE_NU5) ||
+        IsActivationHeight(p->nHeight, cp, Consensus::UPGRADE_HEARTWOOD)) {
+        // set in ConnectBlock, as for a block never connected
+    } else if (cp.NetworkUpgradeActive(p->nHeight, Consensus::UPGRADE_HEARTWOOD)) {
+        p->hashChainHistoryRoot = p->hashBlockCommitments;
+    } else {
+        p->hashFinalSaplingRoot = p->hashBlockCommitments;
+    }
+}
+
 /**
  * Reset body state on `root` and every descendant of `root` in
  * `mapBlockIndex`, post-order so that each descendant's `nChainTx` is
@@ -2813,7 +2895,9 @@ static void ResetBodyStateForSubtree(CBlockIndex* root)
                 assert(c->nChainTx == 0);
             }
         }
+        yugen::DropSidecar(p->GetBlockHash());   // Yugen (review C-2): the stored copy's sidecar goes with its body
         p->ResetBodyState();
+        RestoreHeaderCommitment(p, Params().GetConsensus());
         setDirtyBlockIndex.insert(p);
     }
 }
@@ -3267,6 +3351,11 @@ static DisconnectResult DisconnectBlock(const CBlock& block, CValidationState& s
         outs->ClearUnspendable();
 
         CCoins outsBlock(tx, pindex->nHeight);
+        // Yugen (spec 0.5.4 §15.5): a bundle's outputs are its applied VB records'.
+        if (i > 0 && tx.IsYugenBundle()) {
+            outsBlock.vout = yugen::RecordOutputs(tx, yugen::UndoMask(blockUndo.vtxundo[i - 1]));
+            outsBlock.ClearUnspendable();
+        }
         // The CCoins serialization does not serialize negative numbers.
         // No network rules currently depend on the version here, so an inconsistency is harmless
         // but it must be corrected before txout nversion ever influences a network rule.
@@ -3281,6 +3370,20 @@ static DisconnectResult DisconnectBlock(const CBlock& block, CValidationState& s
 
         // unspend nullifiers
         view.SetNullifiers(tx, false);
+
+        // Yugen (spec 0.5.4 §15.6 B9): a bundle's inputs are its applied deposits', after its undo's mask entry.
+        if (i > 0 && tx.IsYugenBundle()) {
+            const CTxUndo& txundo = blockUndo.vtxundo[i - 1];
+            const auto prevouts = yugen::RecordPrevouts(tx, yugen::UndoMask(txundo));
+            if (txundo.vprevout.size() != (txundo.vprevout.empty() ? 0 : prevouts.size() + 1)) {
+                error("DisconnectBlock(): Yugen bundle and undo data inconsistent");
+                return DISCONNECT_FAILED;
+            }
+            for (size_t j = prevouts.size(); j-- > 0;)
+                if (!ApplyTxInUndo(txundo.vprevout[j + 1], view, prevouts[j]))
+                    fClean = false;
+            continue;
+        }
 
         // restore inputs
         if (i > 0) { // not coinbases
@@ -3423,6 +3526,8 @@ static DisconnectResult DisconnectBlock(const CBlock& block, CValidationState& s
             return DISCONNECT_FAILED;
         }
     }
+    // Yugen (spec 0.5.2 §13.3.2, review M-3): undo the block from its undo record.
+    if (updateIndices) yugen::DisconnectBlock(pindex);
     return fClean ? DISCONNECT_OK : DISCONNECT_UNCLEAN;
 }
 
@@ -3794,6 +3899,7 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     // adjusted as transactions are processed.
     CAmount chainSupplyDelta = 0;
     CAmount transparentValueDelta = 0;
+    yugen::BlockCoins yugenCoins;
     size_t total_sapling_tx = 0;
     size_t total_orchard_tx = 0;
 
@@ -4013,6 +4119,15 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
             blockundo.vtxundo.push_back(CTxUndo());
         }
         UpdateCoins(tx, view, i == 0 ? undoDummy : blockundo.vtxundo.back(), pindex->nHeight);
+        // Yugen (spec 0.5.4 §15.5, §15.6 B6): a bundle's VB records spend and create coins here, in block order.
+        if (tx.IsYugen()) {
+            if (!yugen::ConnectBundleCoins(tx, view, i == 0 ? undoDummy : blockundo.vtxundo.back(), pindex, chainparams,
+                                           flags, yugenCoins, transparentValueDelta, state))
+                return false;
+            if (!MoneyDeltaRange(transparentValueDelta))
+                return state.DoS(100, error("%s: transparent value delta out of range: %d at height %d", __func__, transparentValueDelta, pindex->nHeight),
+                    REJECT_INVALID, "bad-transparent-value-delta-out-of-range");
+        }
 
         for (const JSDescription &joinsplit : tx.vJoinSplit) {
             for (const uint256 &note_commitment : joinsplit.commitments) {
@@ -4320,6 +4435,15 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
         return state.DoS(100, error("%s: coinbase output value out of range at height %d", __func__, pindex->nHeight),
             REJECT_INVALID, "bad-cb-output-value-out-of-range");
     }
+    // Yugen (spec 0.5.1 §7.9, §15.6, §16.2, §13.3.12): anchors, nullifiers and proofs of each leaf
+    // transfer and bundle, the sidecar, block weight and the coinbase record run; the pool state
+    // follows the block unless fJustCheck. Fees of bundled transfers the block skips (§15.6 S1) are
+    // not fees of the block.
+    yugen::BlockResult yugenResult;
+    if (!yugen::ConnectBlock(block, pindex, chainparams, fJustCheck, state, yugenResult, yugenCoins.bundles))
+        return false;
+    nFees -= yugenResult.skippedFees;
+
     CAmount cbTotalInputValue = consensusParams.GetBlockSubsidy(pindex->nHeight) + nFees;
     if (!MoneyRange(cbTotalInputValue)) {
         return state.DoS(100, error("%s: coinbase input value out of range at height %d", __func__, pindex->nHeight),
@@ -4558,6 +4682,8 @@ bool static FlushStateToDisk(
         // The vault database commits each block as it connects; sync it with the chainstate.
         if (vault::g_vaultdb && !vault::g_vaultdb->Flush())
             return AbortNode(state, "Failed to write to the vault database");
+        if (!yugen::Flush())
+            return AbortNode(state, "Failed to write the Yugen pool state");
         nLastFlush = nNow;
     }
     // Don't flush the wallet witness cache (SetBestChain()) here, see #4301
@@ -4788,8 +4914,14 @@ bool static DisconnectTip(CValidationState &state, const CChainParams& chainpara
 
     // Update chainActive and related variables.
     UpdateTip(pindexDelete->pprev, chainparams);
+    yugen::EndDisconnect();
     // UPGRADE_VAULT: set state, BIP68 and I-2 change with the tip (plan §15.6).
     if (!fBare) vault::RecheckMempool(mempool, pindexDelete->nHeight, chainparams.GetConsensus());
+    // Yugen (review H-2): pooled transfers anchored at or above the disconnected block lose their anchor.
+    if (!fBare) {
+        const int disconnected = pindexDelete->nHeight;
+        mempool.removeYugenStale([&](const CTransaction& tx) { return yugen::StaleInPool(tx, disconnected, disconnected, chainparams); });
+    }
 
     // Updates to connected wallets are triggered by ThreadNotifyWallets
 
@@ -4845,6 +4977,11 @@ bool static ConnectTip(CValidationState& state, const CChainParams& chainparams,
 
     // Remove transactions that expire at new block height from mempool
     auto ids = mempool.removeExpired(pindexNew->nHeight);
+    // Yugen (review H-2): nullifiers the block spent, anchors that leave the window at the next height.
+    {
+        const int next = pindexNew->nHeight + 1;
+        mempool.removeYugenStale([&](const CTransaction& tx) { return yugen::StaleInPool(tx, next, -1, chainparams); });
+    }
     if (yellowback::g_yellowback) yellowback::g_yellowback->RemoveInvalidVaultSpends(mempool);
 
     for (auto id : ids) {
@@ -6048,8 +6185,9 @@ bool CheckBlock(const CBlock& block,
     // relative to the auth-commitment pre-check (cf. the matching rationale at
     // the sidechain pre-check below).
 
-    // Size limits
-    if (block.vtx.empty() || block.vtx.size() > MAX_BLOCK_SIZE || ::GetSerializeSize(block, SER_NETWORK, PROTOCOL_VERSION) > MAX_BLOCK_SIZE)
+    // Size limits. Yugen (spec §16.2 W2, W3): MAX_BLOCK_SIZE counts the block without its proof sidecar
+    // (SER_DISK never carries it); block and sidecar together are bounded by W3 in yugen::ConnectBlock.
+    if (block.vtx.empty() || block.vtx.size() > MAX_BLOCK_SIZE || ::GetSerializeSize(block, SER_DISK, PROTOCOL_VERSION) > MAX_BLOCK_SIZE)
         return state.DoS(100, error("CheckBlock(): size limits failed"),
                          REJECT_INVALID, "bad-blk-length", BodyCorruption::Possible);
 
@@ -6538,6 +6676,7 @@ static bool AcceptBlock(const CBlock& block, CValidationState& state, const CCha
                 AbortNode(state, "Failed to write block");
             }
         }
+        yugen::SaveSidecar(block, pindex->nHeight, chainparams.GetConsensus());   // Yugen proof sidecar, beside the block file
         setDirtyBlockIndex.insert(pindex);
         if (!ReceivedBlockTransactions(block, state, chainparams, pindex, blockPos)) {
             return error("AcceptBlock(): ReceivedBlockTransactions failed");
@@ -8155,6 +8294,10 @@ void static ProcessGetData(CNode* pfrom, const Consensus::Params& consensusParam
                     CBlock block;
                     if (!ReadBlockFromDisk(block, (*mi).second, consensusParams))
                         assert(!"cannot load block from disk");
+                    // Yugen (review C-2): a proof sidecar is served only once its block connected (its
+                    // proofs matched the committed hashes); a stored copy not yet judged is sent without it.
+                    if (!(*mi).second->IsValid(BLOCK_VALID_CONSENSUS))
+                        block.vYugenProofs.clear();
                     if (inv.type == MSG_BLOCK)
                         pfrom->PushMessage("block", block);
                     else // MSG_FILTERED_BLOCK)
@@ -8851,6 +8994,36 @@ bool static ProcessMessage(const CChainParams& chainparams, CNode* pfrom, string
         bool fMissingInputs = false;
         CValidationState state;
 
+        // Yugen: proof verification runs under cs_main (doc/yugen-node.md, review fixes). A peer whose
+        // Yugen transaction was refused gets no other one judged for a back-off that doubles with each
+        // refusal in a row (10 s to 10 min, yugen::RefusalBackoff); one it sends meanwhile is asked for
+        // again later (AskFor's two-minute retry), not refused.
+        CNodeState* yugenPeer = tx.IsYugen() && !pfrom->fWhitelisted ? State(pfrom->GetId()) : nullptr;
+        auto yugenRefused = [&]() {
+            if (yugenPeer)
+                yugenPeer->nYugenRefusedUntil = yugen::RefusalBackoff(yugenPeer->nYugenRefusals,
+                                                                      yugenPeer->nYugenLastRefusal, GetTimeMicros());
+        };
+        if (yugenPeer && GetTimeMicros() < yugenPeer->nYugenRefusedUntil) {
+            LogPrint("mempool", "Yugen tx %s from peer=%d deferred (%d refusals in a row)\n", txid.ToString(), pfrom->id,
+                     yugenPeer->nYugenRefusals);
+            if (pfrom->setAskFor.erase(wtxid)) pfrom->AskFor(CInv(MSG_TX, txid));
+            return true;
+        }
+        // Review M-2 and item (4), whitelisted peers included: a copy already refused at this tip,
+        // byte for byte with its proofs, is not judged again. Any other Yugen transaction from a peer
+        // spends one token of the shared verification budget (-yugenpeerverifyrate per minute, a fair
+        // share per peer while others wait), taken in yugen::CheckMempoolTx just before the helper,
+        // after the cheap checks passed; without a token it waits for AskFor (round 3).
+        if (tx.IsYugen() && !AlreadyHave(CInv(MSG_WTX, txid, wtxid.authDigest)) && yugen::KnownRefused(tx)) {
+            LogPrint("mempool", "Yugen tx %s from peer=%d refused before at this tip\n", txid.ToString(), pfrom->id);
+            pfrom->setAskFor.erase(wtxid);
+            mapAlreadyAskedFor.erase(wtxid);
+            yugenRefused();
+            return true;
+        }
+        yugen::PeerVerifyScope yugenScope(tx.IsYugen() ? pfrom->GetId() : -1);
+
         pfrom->setAskFor.erase(wtxid);
         mapAlreadyAskedFor.erase(wtxid);
 
@@ -8878,6 +9051,14 @@ bool static ProcessMessage(const CChainParams& chainparams, CNode* pfrom, string
 
             // Recursively process any orphan transactions that depended on this one
             ProcessOrphanTx(chainparams, pfrom->orphan_work_set);
+        }
+        else if (tx.IsYugen() && state.GetRejectReason() == yugen::VERIFY_DEFERRED)
+        {
+            // No verification token (round 3): not a refusal; asked for again in two minutes.
+            LogPrint("mempool", "Yugen tx %s from peer=%d deferred (verification budget)\n", txid.ToString(), pfrom->id);
+            CInv inv(MSG_TX, txid);
+            mapAlreadyAskedFor.insert(std::make_pair(WTxId(inv.hash, inv.hashAux), GetTimeMicros()));
+            pfrom->AskFor(inv);
         }
         // TODO: currently, prohibit joinsplits and shielded spends/outputs/actions from entering mapOrphans
         else if (fMissingInputs &&
@@ -8915,7 +9096,11 @@ bool static ProcessMessage(const CChainParams& chainparams, CNode* pfrom, string
             // these, as they are always bound to the entirety of the
             // transaction regardless of version.
             assert(recentRejects);
-            recentRejects->insert(tx.GetWTxId().ToBytes());
+            // Yugen (N-D7): a leaf's proofs are outside its txid and wtxid, so a copy refused for
+            // its proofs must not keep out the transaction with valid ones.
+            if (!(tx.IsYugen() && state.CorruptionPossible()))
+                recentRejects->insert(tx.GetWTxId().ToBytes());
+            if (state.IsInvalid()) yugenRefused();
 
             if (pfrom->fWhitelisted && GetBoolArg("-whitelistforcerelay", DEFAULT_WHITELISTFORCERELAY)) {
                 // Always relay transactions received from whitelisted peers, even
@@ -9415,6 +9600,16 @@ bool ProcessMessages(const CChainParams& chainparams, CNode* pfrom)
 class CompareInvMempoolOrder
 {
     CTxMemPool *mp;
+    // In-mempool ancestor counts of Yugen transactions and their descendants (0 for every other
+    // transaction, whose order is therefore upstream's), taken once per trickle so the order is a
+    // strict weak order. (shared: std::make_heap and std::pop_heap copy the comparator)
+    std::shared_ptr<std::map<uint256, uint64_t>> depth = std::make_shared<std::map<uint256, uint64_t>>();
+    uint64_t Depth(const uint256& h)
+    {
+        auto it = depth->find(h);
+        if (it == depth->end()) it = depth->emplace(h, mp->YugenRelayDepth(h)).first;
+        return it->second;
+    }
 public:
     CompareInvMempoolOrder(CTxMemPool *mempool)
     {
@@ -9424,7 +9619,15 @@ public:
     bool operator()(std::set<uint256>::iterator a, std::set<uint256>::iterator b)
     {
         /* As std::make_heap produces a max-heap, we want the entries with the
-         * highest feerate to sort later. */
+         * fewest in-mempool ancestors, then the highest feerate, to sort later.
+         * The ancestor count is that of a Yugen transaction or a descendant of one, else 0, so
+         * two other transactions compare exactly as upstream (key 0, then CompareDepthAndScore).
+         * A Yugen parent is announced before its child even when the child pays the higher
+         * feerate (a Yugen withdrawal carries ~0.7 MB of proofs, so the Sapling send that
+         * spends it does); a peer that receives a shielded child first cannot keep it as an
+         * orphan and rejects it until the next block. */
+        uint64_t da = Depth(*a), db = Depth(*b);
+        if (da != db) return da > db;
         return mp->CompareDepthAndScore(*b, *a);
     }
 };

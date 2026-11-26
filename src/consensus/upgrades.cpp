@@ -100,6 +100,13 @@ const struct NUInfo NetworkUpgradeInfo[Consensus::MAX_NETWORK_UPGRADES] = {
         .strInfo = "Ycash vault primitive (docs/plans/yellowback-upgrade-plan.md)",
     },
     {
+        // ASCII "YGN0" (yugen-spec 0.5.1 §2 BRANCH_ID). No collision with any Zcash or Ycash ID
+        // (NU7 is 0x77190ad9 by ZIP 259). No Equihash override: inherits (192, 7).
+        .nBranchId = 0x59474e30,
+        .strName = "Yugen",
+        .strInfo = "Ycash Yugen post-quantum shielded pool (devnet only)",
+    },
+    {
         .nBranchId = 0xffffffff,
         .strName = "ZFUTURE",
         .strInfo = "Future network upgrade (integration testing only)",

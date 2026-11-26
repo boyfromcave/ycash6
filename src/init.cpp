@@ -1566,7 +1566,8 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
             // U-9): its height must not back-fill theirs, or -nuparams=6d5b7a31:<h> alone would
             // also activate NU5, NU6, NU6.1 and NU6.2 at <h>. The testnet shadow upgrade follows
             // Canopy the same way (docs/plans/yellowback-testnet-shadow-fork-plan.md).
-            if (i != Consensus::UPGRADE_VAULT && i != Consensus::UPGRADE_SHADOW) {
+            // Yugen likewise: -nuparams=59474e30:<h> needs an explicit Vault height (checked below).
+            if (i != Consensus::UPGRADE_VAULT && i != Consensus::UPGRADE_SHADOW && i != Consensus::UPGRADE_YUGEN) {
                 nActivationHeight = consensus.vUpgrades[i].nActivationHeight;
             }
         }
@@ -1594,6 +1595,21 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                     return InitError("NU5..NU6.2 cannot be scheduled together with the Vault upgrade (quantum spec R-A3; this node builds V1 history-tree leaves in the Vault epoch)");
                 }
             }
+        }
+    }
+
+    // Yugen (doc/yugen-node.md, activation): requires Vault active at or below its height; the
+    // TEST-ONLY stub bundle proofs are for regtest only.
+    {
+        const auto& upgrades = chainparams.GetConsensus().vUpgrades;
+        const int yugenHeight = upgrades[Consensus::UPGRADE_YUGEN].nActivationHeight;
+        const int vaultHeight = upgrades[Consensus::UPGRADE_VAULT].nActivationHeight;
+        if (yugenHeight != Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT &&
+            (vaultHeight == Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT || vaultHeight > yugenHeight)) {
+            return InitError("The Yugen upgrade requires Vault active at or below its height");
+        }
+        if (GetBoolArg("-yugenteststubproofs", false) && chainparams.NetworkIDString() != CBaseChainParams::REGTEST) {
+            return InitError("-yugenteststubproofs is for regtest only");
         }
     }
 

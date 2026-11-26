@@ -57,8 +57,11 @@ static constexpr double MAX_ADDR_RATE_PER_SECOND{0.1};
  *  based increments won't go above this, but the MAX_ADDR_TO_SEND increment following GETADDR
  *  is exempt from this limit. */
 static constexpr size_t MAX_ADDR_PROCESSING_TOKEN_BUCKET{MAX_ADDR_TO_SEND};
-/** Maximum length of incoming protocol messages (no message over 2 MiB is currently acceptable). */
-static const unsigned int MAX_PROTOCOL_MESSAGE_LENGTH = 2 * 1024 * 1024;
+/** Maximum length of incoming protocol messages. Relay policy, not consensus. Yugen: a block
+ *  message carries its proof sidecar, so it may reach the block weight W3 (4,000,000 bytes, spec
+ *  0.5.1 §16.2) plus the sidecar framing; 4 MiB + 256 KiB covers both (stock was 2 MiB). It stays
+ *  under the default -maxreceivebuffer flood limit (5,000,000 bytes). */
+static const unsigned int MAX_PROTOCOL_MESSAGE_LENGTH = 4 * 1024 * 1024 + 256 * 1024;
 /** Maximum length of strSubVer in `version` message */
 static const unsigned int MAX_SUBVERSION_LENGTH = 256;
 /** -listen default */

@@ -59,6 +59,9 @@ enum UpgradeIndex : uint32_t {
     // Ycash vault primitive (docs/plans/yellowback-upgrade-plan.md §15.1). Activates without NU5,
     // which Ycash never activates; CurrentEpoch() takes the highest active index.
     UPGRADE_VAULT,
+    // Yugen, the post-quantum shielded pool (yugen-spec 0.5.1; doc/yugen-node.md, activation). Requires
+    // Vault active at or below its height. Regtest/devnet only (-nuparams=59474e30:<h>).
+    UPGRADE_YUGEN,
     // Add new network upgrades before this line.
     // NOTE: Also add new upgrades to NetworkUpgradeInfo in upgrades.cpp
     UPGRADE_ZFUTURE,

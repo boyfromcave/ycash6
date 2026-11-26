@@ -97,7 +97,7 @@ CMutableTransaction::CMutableTransaction(const CTransaction& tx) : nVersion(tx.n
                                                                    vin(tx.vin), vout(tx.vout), nLockTime(tx.nLockTime),
                                                                    saplingBundle(tx.GetSaplingBundle()),
                                                                    orchardBundle(tx.GetOrchardBundle()),
-                                                                   vJoinSplit(tx.vJoinSplit), joinSplitPubKey(tx.joinSplitPubKey), joinSplitSig(tx.joinSplitSig)
+                                                                   vJoinSplit(tx.vJoinSplit), joinSplitPubKey(tx.joinSplitPubKey), joinSplitSig(tx.joinSplitSig), yugen(tx.yugen)
 {
 }
 
@@ -137,6 +137,23 @@ void CTransaction::UpdateHash() const
 {
     CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
     ss << *this;
+    if (fOverwintered && nVersionGroupId == YUGEN_VERSION_GROUP_ID) {
+        // Yugen (v4 layout plus the Yugen field, which serializes last): SHA-256d of the
+        // serialization with both proof fields empty, computed here because librustzcash does not
+        // parse the Yugen group (review M-4, decision N-D7, doc/yugen-node.md): the txid covers
+        // what the signature hash covers (ZIP-243 plus hashYugen over the transfer bytes) and no
+        // proof byte, so a relay that re-encodes or re-randomises a proof cannot change it. A
+        // bundle (proofs empty) hashes as before. The auth digest stays the pre-NU5 [0xff; 32].
+        const size_t proofBytes = ::GetSerializeSize(yugen.proofA, SER_NETWORK, PROTOCOL_VERSION) +
+                                  ::GetSerializeSize(yugen.proofB, SER_NETWORK, PROTOCOL_VERSION);
+        CHashWriter hw(SER_GETHASH, 0);
+        hw.write((const char*)ss.data(), ss.size() - proofBytes);
+        const unsigned char emptyProofs[2] = {0, 0};
+        hw.write((const char*)emptyProofs, 2);
+        *const_cast<uint256*>(&wtxid.hash) = hw.GetHash();
+        std::fill(const_cast<uint256*>(&wtxid.authDigest)->begin(), const_cast<uint256*>(&wtxid.authDigest)->end(), 0xff);
+        return;
+    }
     // CONSENSUS: `zcash_transaction_digests` reparses the serialized transaction through
     // librustzcash, which enforces consensus encoding rules (e.g. canonical Orchard element
     // encodings, and from NU6.2 the canonical Orchard proof size, keyed on the transaction's
@@ -167,7 +184,7 @@ CTransaction::CTransaction(const CMutableTransaction &tx) : nVersion(tx.nVersion
                                                             vin(tx.vin), vout(tx.vout), nLockTime(tx.nLockTime),
                                                             saplingBundle(tx.saplingBundle),
                                                             orchardBundle(tx.orchardBundle),
-                                                            vJoinSplit(tx.vJoinSplit), joinSplitPubKey(tx.joinSplitPubKey), joinSplitSig(tx.joinSplitSig)
+                                                            vJoinSplit(tx.vJoinSplit), joinSplitPubKey(tx.joinSplitPubKey), joinSplitSig(tx.joinSplitSig), yugen(tx.yugen)
 {
     UpdateHash();
 }
@@ -181,7 +198,7 @@ CTransaction::CTransaction(
                               vin(tx.vin), vout(tx.vout), nLockTime(tx.nLockTime),
                               saplingBundle(tx.saplingBundle),
                               orchardBundle(tx.orchardBundle),
-                              vJoinSplit(tx.vJoinSplit), joinSplitPubKey(tx.joinSplitPubKey), joinSplitSig(tx.joinSplitSig)
+                              vJoinSplit(tx.vJoinSplit), joinSplitPubKey(tx.joinSplitPubKey), joinSplitSig(tx.joinSplitSig), yugen(tx.yugen)
 {
     assert(evilDeveloperFlag);
 }
@@ -194,7 +211,7 @@ CTransaction::CTransaction(CMutableTransaction &&tx) : nVersion(tx.nVersion),
                                                        saplingBundle(std::move(tx.saplingBundle)),
                                                        orchardBundle(std::move(tx.orchardBundle)),
                                                        vJoinSplit(std::move(tx.vJoinSplit)),
-                                                       joinSplitPubKey(std::move(tx.joinSplitPubKey)), joinSplitSig(std::move(tx.joinSplitSig))
+                                                       joinSplitPubKey(std::move(tx.joinSplitPubKey)), joinSplitSig(std::move(tx.joinSplitSig)), yugen(std::move(tx.yugen))
 {
     UpdateHash();
 }
@@ -213,6 +230,7 @@ CTransaction& CTransaction::operator=(const CTransaction &tx) {
     *const_cast<std::vector<JSDescription>*>(&vJoinSplit) = tx.vJoinSplit;
     *const_cast<ed25519::VerificationKey*>(&joinSplitPubKey) = tx.joinSplitPubKey;
     *const_cast<ed25519::Signature*>(&joinSplitSig) = tx.joinSplitSig;
+    *const_cast<YugenField*>(&yugen) = tx.yugen;
     *const_cast<uint256*>(&wtxid.hash) = tx.wtxid.hash;
     *const_cast<uint256*>(&wtxid.authDigest) = tx.wtxid.authDigest;
     return *this;
@@ -257,6 +275,17 @@ CAmount CTransaction::GetValueOut() const
         }
     }
 
+    if (auto yt = GetYugenTransfer()) {
+        // A deposit (negative value_balance beyond the transfer's fee) takes from the transparent pool.
+        int64_t d = yt->TransparentDelta();
+        if (d < 0) {
+            nValueOut += -d;
+            if (!MoneyRange(nValueOut)) {
+                throw std::runtime_error("CTransaction::GetValueOut(): value out of range");
+            }
+        }
+    }
+
     for (const auto& jsDescription : vJoinSplit) {
         // NB: vpub_old "takes" money from the transparent value pool just as outputs do
         if (!MoneyRange(jsDescription.vpub_old)) {
@@ -270,9 +299,47 @@ CAmount CTransaction::GetValueOut() const
     return nValueOut;
 }
 
+std::vector<yugen::Transfer> CTransaction::GetYugenTransfers() const
+{
+    std::vector<yugen::Transfer> out;
+    if (!IsYugen()) return out;
+    if (IsYugenBundle()) {
+        std::vector<uint8_t> slots;
+        std::string why;
+        if (!yugen::DecodeBundleTransfers(yugen.transfer, out, slots, why)) out.clear();
+        return out;
+    }
+    if (auto t = GetYugenTransfer()) out.push_back(*t);
+    return out;
+}
+
+std::optional<yugen::Transfer> CTransaction::GetYugenTransfer() const
+{
+    if (!IsYugen() || IsYugenBundle()) return std::nullopt;
+    std::string why;
+    return yugen::Decode(yugen.transfer, why);
+}
+
 CAmount CTransaction::GetShieldedValueIn() const
 {
     CAmount nValue = 0;
+
+    for (const auto& bt : IsYugenBundle() ? GetYugenTransfers() : std::vector<yugen::Transfer>{}) {
+        // A bundle's transfers (value balance 0 on this line) give their fees, as inputs do; the
+        // fees of transfers a block skips (§15.6 S1) are taken back in yugen::ConnectBlock.
+        nValue += (CAmount)bt.Fee();
+        if (!MoneyRange(nValue)) throw std::runtime_error("CTransaction::GetShieldedValueIn(): Yugen value out of range");
+    }
+    if (auto yt = GetYugenTransfer()) {
+        // A withdrawal and the transfer's fee give to the transparent pool, as inputs do.
+        int64_t d = yt->TransparentDelta();
+        if (d > 0) {
+            if (d > MAX_MONEY) {
+                throw std::runtime_error("CTransaction::GetShieldedValueIn(): Yugen value out of range");
+            }
+            nValue += d;
+        }
+    }
 
     auto valueBalanceSapling = saplingBundle.GetValueBalance();
     if (valueBalanceSapling >= 0) {

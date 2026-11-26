@@ -356,6 +356,9 @@ private:
     std::map<uint256, const CTransaction*> mapSproutNullifiers;
     std::map<libzcash::nullifier_t, const CTransaction*> mapSaplingNullifiers;
     std::map<uint256, const CTransaction*> mapOrchardNullifiers;
+    std::map<std::array<uint8_t, 32>, const CTransaction*> mapYugenNullifiers;   // review H-2
+    std::map<COutPoint, const CTransaction*> mapYugenDeposits;   // the coins pooled bundles' deposits spend (§15.5)
+    std::set<uint256> setYugenRelated;   // Yugen transactions and their in-pool descendants (relay order)
     RecentlyEvictedList* recentlyEvicted = new RecentlyEvictedList(GetNodeClock(), DEFAULT_MEMPOOL_EVICTION_MEMORY_MINUTES * 60);
     MempoolLimitTxSet* limitSet = new MempoolLimitTxSet(DEFAULT_MEMPOOL_TOTAL_COST_LIMIT);
 
@@ -509,6 +512,11 @@ public:
     void clear();
     void _clear(); // unlocked
     bool CompareDepthAndScore(const uint256& hasha, const uint256& hashb);
+    /** The number of in-mempool ancestors of `hash` when it or one of them is a Yugen transaction,
+     *  else 0 (also when it is not in the pool), so that inventory announces a Yugen parent before
+     *  its child and leaves the order of every other transaction as it was (CompareInvMempoolOrder). */
+    uint64_t YugenRelayDepth(const uint256& hash);
+    static const uint64_t YUGEN_RELAY_DEPTH_MAX = 100;
     void queryHashes(std::vector<uint256>& vtxid);
     void pruneSpent(const uint256& hash, CCoins &coins);
     unsigned int GetTransactionsUpdated() const;
@@ -554,6 +562,15 @@ public:
     bool CalculateMemPoolAncestors(const CTxMemPoolEntry &entry, setEntries &setAncestors, uint64_t limitAncestorCount, uint64_t limitAncestorSize, uint64_t limitDescendantCount, uint64_t limitDescendantSize, std::string &errString, bool fSearchForParents = true);
 
     bool nullifierExists(const uint256& nullifier, ShieldedType type) const;
+    bool yugenNullifierExists(const std::array<uint8_t, 32>& nf) const;
+    // The pool transaction holding a Yugen nullifier, or nullptr (bundle supersession, lead decision (a)).
+    const CTransaction* yugenNullifierTx(const std::array<uint8_t, 32>& nf) const;
+    // The pooled bundle whose VB record deposit spends `out`, and the pooled transaction that spends
+    // `out` as an input; nullptr if none.
+    const CTransaction* yugenDepositTx(const COutPoint& out) const;
+    const CTransaction* spenderOf(const COutPoint& out) const;
+    // Review H-2: removes pooled Yugen transactions that `stale` refuses for the next block.
+    void removeYugenStale(const std::function<bool(const CTransaction&)>& stale);
 
     std::pair<std::vector<CTransaction>, uint64_t> DrainRecentlyAdded();
     void SetNotifiedSequence(uint64_t recentlyAddedSequence);

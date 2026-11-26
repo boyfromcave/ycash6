@@ -440,6 +440,9 @@ libbitcoin_server_a_SOURCES = \
   yellowback/index.cpp \
   yellowback/policy.cpp \
   rpc/yellowback.cpp \
+  yugen/leaf.cpp \
+  yugen/spawn.cpp \
+  yugen/state.cpp \
   rpc/vault.cpp \
   vault/checker.cpp \
   vault/db.cpp \
