@@ -176,11 +176,13 @@ struct PeerVerifyScope {
     // Whether a candidate in this scope took a token, so reached the helper's judgement. Only such a
     // refusal starts the peer's back-off: one refused by the cheap checks (a nullifier spent at the
     // tip, an anchor) cost no verification, and an honest peer sends one whenever it answers a stale
-    // request (a leaf confirmed inside a bundle keeps no coin, so AlreadyHave misses it). A local fault
-    // after the token (inner.IsError(): the YED module cannot answer, the helper failed or timed out)
-    // judged nothing either.
+    // request (a leaf confirmed inside a bundle keeps no coin, so AlreadyHave misses it). A helper
+    // failure or timeout after the token counts as a refusal (the peer's proof bytes can cause it); a
+    // node-local fault no transaction bytes cause (the YED module cannot answer, the pool state) does not.
     bool Judged() const;
 };
+// The reject reason prefix of a helper failure or timeout (a state error, never a verdict on a block).
+static const char* const VERIFIER_FAILED = "yugen-verifier-failed";
 // The reject reason of a mempool candidate that found no token: not a refusal (main.cpp asks again).
 static const char* const VERIFY_DEFERRED = "yugen-verify-deferred";
 // Round 3: the back-off after a peer's refused Yugen transaction: 10 s, doubled per refusal in a row

@@ -804,7 +804,7 @@ static bool ApplyBlockInner(PoolState& s, BlockRecord& rec, const CBlock& block,
     uint64_t w5Weight = 0, w5Bytes = 0, sidecarBytes = 0;
     size_t sidecarUsed = 0;
     auto fail = [&](const std::string& why) {
-        return state.Error("yugen-verifier-failed: " + why);   // never a verdict on the block (review H-1)
+        return state.Error(std::string(VERIFIER_FAILED) + ": " + why);   // never a verdict on the block (review H-1)
     };
     for (const CTransaction& tx : block.vtx) {
         if (!tx.IsYugen()) continue;
@@ -1462,16 +1462,21 @@ bool CheckMempoolTx(const CTransaction& tx, const CTxMemPool& pool, const CChain
     MempoolTimeout shortTimeout;   // review M-2
     CValidationState inner;
     BundleCoinsMap coins;
-    // A local fault (inner.IsError(): the YED module cannot answer, the helper failed or timed out) is no
-    // judgement of the transaction, so it starts no relay back-off for the peer (PeerVerifyScope::Judged).
+    // Every refusal from here on may follow from the proofs (a leaf's are outside its txid and wtxid, a
+    // bundle's come from the proof store), so it is BodyCorruption::Possible: main.cpp keeps its wtxid
+    // out of recentRejects, and a copy with other proofs, from any peer, is judged on its own.
+    // The back-off (PeerVerifyScope::Judged): a helper failure or timeout counts as a refusal does, since
+    // the peer's proof bytes can make the helper panic, exit badly or run out of time. Only a fault of
+    // this node that no transaction bytes cause judged nothing: the YED module unable to say which coins
+    // it tracks (CoinsAtTip), or the pool state itself (Trial's other IsError()).
     if (!CoinsAtTip({tx}, tip, params, coins, inner)) {
         if (inner.IsError()) g_scopeJudged = false;
-        return state.DoS(0, false, REJECT_INVALID, inner.GetRejectReason());
+        return state.DoS(0, false, REJECT_INVALID, inner.GetRejectReason(), BodyCorruption::Possible);
     }
     if (!Trial(one, tip->nHeight + 1, tip, params, inner, nullptr, coins, &nfs)) {
         if (!inner.IsError()) g_refused.put(key, inner.GetRejectReason());
-        else g_scopeJudged = false;
-        return state.DoS(0, false, REJECT_INVALID, inner.GetRejectReason());
+        else if (inner.GetRejectReason().rfind(VERIFIER_FAILED, 0) != 0) g_scopeJudged = false;
+        return state.DoS(0, false, REJECT_INVALID, inner.GetRejectReason(), BodyCorruption::Possible);
     }
     if (tx.IsYugenBundle() && nfs != 2 * tx.GetYugenTransfers().size())
         return state.DoS(0, false, REJECT_INVALID, "bad-yugen-bundle-skips");   // every transfer must apply in the pool

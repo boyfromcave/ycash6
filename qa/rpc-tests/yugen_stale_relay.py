@@ -14,13 +14,15 @@ started the peer's back-off, and the peer's next real Yugen transaction waited f
 retry, two minutes later (spend_matrix: `Mempool sync failed` on the yewd backend).
 
 The leaves are real deposits made by the Yugen wallet engine (YEWD_YUGEN) with both wallet proofs.
-Node 0 builds the chain and the leaves; node 1 is fed blocks by hand and one P2P peer (a probe):
+Node 0 builds the chain and the leaves; node 1 is fed blocks by hand and two P2P peers (probes A
+and B):
 
-- a confirmed leaf from the probe is refused, and the probe's next leaf is taken at once;
-- a leaf whose helper run fails (a local fault, not a verdict) starts no back-off: the probe's next
-  leaf is taken at once;
-- a guard: a leaf refused by the helper (a proof byte flipped) still starts the back-off, so the
-  probe's honest copy right after it is not judged;
+- a confirmed leaf from A is refused, and A's next leaf is taken at once;
+- a leaf whose helper run fails (the helper panics: exit 101) starts A's back-off, as a refusal does:
+  the proof bytes are the peer's, so a failure they cause must cost it (A's next leaf is deferred);
+  the same leaf from B is then taken, since its proofs are outside the wtxid (no recentRejects entry);
+- a leaf refused by the helper (a proof byte flipped) starts A's back-off, so A's honest copy right
+  after it is not judged, and B's honest copy is taken: the bad-proof copy censors nothing;
 - a leaf whose transparent parent node 1 does not know is not kept as an orphan: orphans are accepted
   outside any verification scope, so its proofs would be verified with no token and no back-off.
 """
@@ -59,12 +61,12 @@ class YugenStaleRelayTest(BitcoinTestFramework):
         self.setup_clean_chain = True
 
     def setup_network(self, split=False):
-        # No node links: node 1 hears of transactions from the probe only. Node 1's helper fails its
-        # proof checks while the flag file exists (a local fault, as a crash or a timeout).
+        # No node links: node 1 hears of transactions from the probes only. Node 1's helper panics in
+        # its proof checks (a Rust panic exits 101) while the flag file exists.
         self.flag = os.path.join(self.options.tmpdir, 'helper-fails')
         faulty = os.path.join(self.options.tmpdir, 'faulty-helper.sh')
         with open(faulty, 'w') as f:
-            f.write('#!/bin/sh\ncase "$1" in verify) [ -e "%s" ] && exit 1;; esac\nexec "%s" "$@"\n' % (self.flag, HELPER))
+            f.write('#!/bin/sh\ncase "$1" in verify) [ -e "%s" ] && { echo "thread main panicked" >&2; exit 101; };; esac\nexec "%s" "$@"\n' % (self.flag, HELPER))
         os.chmod(faulty, 0o755)
         args1 = [a for a in ARGS if not a.startswith('-yugenverifier=')] + ['-yugenverifier=' + faulty]
         self.nodes = start_nodes(2, self.options.tmpdir, [ARGS + ['-debug=mempool'], args1 + ['-debug=mempool']])
@@ -129,8 +131,16 @@ class YugenStaleRelayTest(BitcoinTestFramework):
 
         probe = TestNode()
         probe.add_connection(NodeConn('127.0.0.1', p2p_port(1), n1, probe, 'regtest', PROTO))
+        other = TestNode()
+        other.add_connection(NodeConn('127.0.0.1', p2p_port(1), n1, other, 'regtest', PROTO))
         NetworkThread().start()
         probe.wait_for_verack()
+        other.wait_for_verack()
+        log_path = os.path.join(self.options.tmpdir, 'node1', 'regtest', 'debug.log')
+
+        def deferred(txid, n):
+            with open(log_path) as f:
+                return re.search(r'Yugen tx %s from peer=\d+ deferred \(%d refusals in a row\)' % (txid, n), f.read())
 
         # 1. The stale leaf, as an honest peer serves it on the AskFor retry, then a real one.
         probe.send_message(msg_rawtx(bytes.fromhex(stale_hex)))
@@ -140,20 +150,32 @@ class YugenStaleRelayTest(BitcoinTestFramework):
         probe.sync_with_ping(timeout=120)
         assert fresh in n1.getrawmempool(), 'the leaf after a stale one was deferred (back-off)'
         peers = n1.getpeerinfo()
-        assert_equal(len(peers), 1)
-        assert_equal(peers[0].get('banscore', 0), 0)
+        assert_equal(len(peers), 2)
+        assert_equal([p.get('banscore', 0) for p in peers], [0, 0])
 
-        # 2. A helper run that fails is the node's fault, not a verdict: the probe's next leaf is taken.
+        # 2. A helper that panics on A's leaf: A's proof bytes may be the cause, so the failure costs A
+        # the back-off (A's next leaf is deferred). The leaf's wtxid does not cover its proofs, so the
+        # failure keeps no copy out: the same leaf from B is taken.
         open(self.flag, 'w').close()
         probe.send_message(msg_rawtx(bytes.fromhex(fault_hex)))
         probe.sync_with_ping(timeout=120)
+        t_fault = time.time()
         assert fault not in n1.getrawmempool()
         os.remove(self.flag)
         probe.send_message(msg_rawtx(bytes.fromhex(after_hex)))
         probe.sync_with_ping(timeout=120)
-        assert after in n1.getrawmempool(), 'the leaf after a helper fault was deferred (back-off)'
+        assert after not in n1.getrawmempool(), 'a helper failure started no back-off'
+        assert deferred(after, 1), 'not deferred'
+        other.send_message(msg_rawtx(bytes.fromhex(fault_hex)))
+        other.sync_with_ping(timeout=120)
+        assert fault in n1.getrawmempool(), 'a helper failure on one copy kept the leaf out'
+        other.send_message(msg_rawtx(bytes.fromhex(after_hex)))
+        other.sync_with_ping(timeout=120)
+        assert after in n1.getrawmempool()
 
-        # 3. Guard: a leaf the helper refuses (the last proof byte flipped) still starts the back-off.
+        # 3. A leaf the helper refuses (the last proof byte flipped) starts A's back-off, and keeps no
+        # honest copy out: the victim's leaf with valid proofs from B is taken.
+        time.sleep(max(0, 11 - (time.time() - t_fault)))    # A's first back-off (10 s) runs out
         b = bytearray(bytes.fromhex(third_hex))
         b[-1] ^= 0x01
         probe.send_message(msg_rawtx(bytes(b)))
@@ -162,14 +184,14 @@ class YugenStaleRelayTest(BitcoinTestFramework):
         probe.send_message(msg_rawtx(bytes.fromhex(third_hex)))
         probe.sync_with_ping(timeout=120)
         assert third not in n1.getrawmempool(), 'a judged refusal no longer starts the back-off'
-        with open(os.path.join(self.options.tmpdir, 'node1', 'regtest', 'debug.log')) as f:
-            log = f.read()
-        assert re.search(r'Yugen tx %s from peer=\d+ deferred \(1 refusals in a row\)' % third, log), 'not deferred'
+        assert deferred(third, 2), 'not deferred'
+        other.send_message(msg_rawtx(bytes.fromhex(third_hex)))
+        other.sync_with_ping(timeout=120)
+        assert third in n1.getrawmempool(), 'a bad-proof copy censored the honest leaf'
 
         # 4. An orphan leaf: its parent (the deposit's funding) is in a block node 1 has not seen. An
-        # honest leaf is too large for the orphan pool anyway, so the probe sends a copy with short
-        # proofs, which only the helper refuses.
-        time.sleep(11)                                       # the guard's back-off (10 s) runs out
+        # honest leaf is too large for the orphan pool anyway, so B (never refused) sends a copy with
+        # short proofs, which only the helper refuses.
         while (n0.getblockcount() + 1) % 16 == 0:            # the leaf's anchor must be one node 1 has
             n0.generate(1)
         self.feed()
@@ -180,18 +202,18 @@ class YugenStaleRelayTest(BitcoinTestFramework):
         orphan = r if isinstance(r, str) else r['txid']
         orphan_hex = n0.getrawtransaction(orphan)
         assert fund in [i['txid'] for i in n0.decoderawtransaction(orphan_hex)['vin']]
-        probe.send_message(msg_rawtx(bytes.fromhex(shrink_leaf_proofs(orphan_hex, 1000))))
-        probe.sync_with_ping(timeout=120)
+        other.send_message(msg_rawtx(bytes.fromhex(shrink_leaf_proofs(orphan_hex, 1000))))
+        other.sync_with_ping(timeout=120)
         assert orphan not in n1.getrawmempool()
-        probe.send_message(msg_rawtx(bytes.fromhex(fund_hex)))
-        probe.sync_with_ping(timeout=120)
+        other.send_message(msg_rawtx(bytes.fromhex(fund_hex)))
+        other.sync_with_ping(timeout=120)
         assert fund in n1.getrawmempool()
         assert orphan not in n1.getrawmempool(), 'an orphan Yugen leaf was accepted outside any verification scope'
-        with open(os.path.join(self.options.tmpdir, 'node1', 'regtest', 'debug.log')) as f:
+        with open(log_path) as f:
             log = f.read()
         assert 'stored orphan tx %s' % orphan not in log, 'a Yugen leaf was kept as an orphan'
         assert 'verify %s' % orphan not in log, 'an orphan Yugen leaf reached the helper'
-        assert_equal(n1.getpeerinfo()[0].get('banscore', 0), 0)
+        assert_equal([p.get('banscore', 0) for p in n1.getpeerinfo()], [0, 0])
 
 
 if __name__ == '__main__':
