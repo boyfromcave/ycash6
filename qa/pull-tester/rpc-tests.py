@@ -331,6 +331,7 @@ EXTENDED_SCRIPTS = [
     'yugen_bundle.py',
     'yugen_bundle_vb.py',
     'yugen_bundle_vb_module.py',
+    'yugen_bundle_vb_coinbase.py',
     'yugen_bundle_relay.py',
     'yugen_bundle_supersede.py',
     'yugen_wallet_encrypted.py',

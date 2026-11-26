@@ -192,7 +192,7 @@ changes. A deposit's other fields are covered by its inputs' signatures. Test: g
   evaluates each transfer against the state left by every earlier transaction, so a later
   transaction spending a deposited coin must fail and a record output must be spendable later in the
   block; (a) cannot give either. It decides S1 (pool and block nullifiers) and S2 (coin unspent,
-  coinbase maturity), checks the coin templates and the balance, spends the inputs and creates the
+  any coinbase coin since N-D13), checks the coin templates and the balance, spends the inputs and creates the
   outputs at the txid (indices across all records; a skipped record's are null). The script check
   needs the transfer hash, which only the helper computes (§7.3), so it runs in `yugen::ConnectBlock`
   after B5 (`DepositSignatureChecker`: `dep_sighash`, SIGHASH_ALL only, the flags in force plus
@@ -367,6 +367,40 @@ node (`-yellowbacktestfault=error:mempool`; test_bitcoin
   `depth-six` is refused by the node itself. Tests: the helper's
   `tests::structurally_invalid_bundle_is_bound` (`cargo test --release`), `Yugen.BundleVectors`.
 
+## Decision N-D13: a bundle's deposit of a coinbase coin is skipped (lead architect, 2026-11-26; was K-2)
+The issue (K-2): ycashd's `fCoinbaseMustBeShielded` (mainnet and testnet) is a rule of `CheckInputs` on a
+transaction's own `vout`; a bundle has none (B1a), so a record could deposit a coinbase coin and keep
+transparent change, which a leaf deposit cannot on mainnet. Spec 0.5.4 §15.6 S2 names only coinbase
+maturity.
+
+Four-part check. The leaf path does X (spends a coinbase coin only with no transparent output) in
+`src/consensus/tx_verify.cpp`/`main.cpp` `CheckInputs`/`ContextualCheckTransaction` using mechanism M (the
+transaction's own `vout`, read by the shielding rule). The bundle path is Z (record inputs and outputs
+outside `vin`/`vout`), which lacks M. So the adaptation W: a deposit whose spent coin is a coinbase
+output, mature or not, is skipped (S2) exactly as an immature one was: not applied, not verified, the coin
+left unspent, recorded in the undo mask, and the replay reads it from there. Coinbase coins deposit by a
+leaf, where the shielding rule applies unchanged.
+
+Tier answer: a rule on the existing VB record's S2 decision, from the coin view's `IsCoinBase` (no new
+field, no new index lookup, no new state). A failure (B6) was the alternative; the skip is chosen for the
+same reason as N-D12's: a bundle may name an outpoint before it exists, and a coin's coinbase status is a
+property of the coin, not of the bundle's bytes, so a failure would let a third party void a bundle.
+
+Where. `ConnectBundleCoins` (block connect, `CoinsAtTip` for the pool's and the template's dry runs, the
+`VerifyDB` re-connect: the rule is re-decided from the view, never taken from the recorded mask) and
+`StaleInPool` (a pooled bundle whose deposit is a coinbase coin is stale; the pool refuses such a bundle,
+`bad-yugen-bundle-skips`). The module's pre-scan leaves a coinbase deposit out, so it is never asked about.
+Like N-D12's same-block skip, this is stricter than spec 0.5.4 (a spec node applies a mature coinbase
+deposit, a split): no public network activates Yugen on this line (K-1), and the rule is proposed for the
+specification beside N-D12's (`doc/yugen-spec-proposal-0.5.5-vb-module-coins.md`). On the other node
+lines the same rule is to follow (shared-defect rule).
+
+Tests: gtest `Yugen.BundleCoinbaseDepositSkipped` (mature coinbase coins skipped, never spent, never asked,
+undo mask; a recorded mask saying applied does not override it), `Yugen.BundleImmatureCoinbaseDeposit`;
+`qa/rpc-tests/yugen_bundle_vb_coinbase.py` (the pool refuses the bundle; an assembled block with the
+deposit connects with it skipped; `verifychain 4`; invalidate and reconsider; replay without the state
+file).
+
 ## Known issues for beta4
 - **K-1, consensus, not built: withdrawal classification (§13.3.5, §15.6 B6 "applied").** A spec
   0.5.4 node classifies each withdrawal: queued if `G + a > K`, immediate if `a ≤ τ` (100 YEC) and
@@ -379,17 +413,8 @@ node (`-yellowbacktestfault=error:mempool`; test_bitcoin
   network activates Yugen on this line; it runs on regtest and devnets only. Building it is a pool-state change on leaves and bundles alike
   (window state and its undo, a locked-coin rule in `CheckInputs`, queue service in the block, the
   fee split); it must land, on every node line, before any activation height is set.
-- **K-2, decision: a bundled deposit of a coinbase coin may have transparent change.** Spec 0.5.4
-  §15.5 and §15.6 S2 list what may not be spent at `h` (coinbase maturity, exit maturity, a queued
-  withdrawal's lock, a voided output) and nothing more; the script interpreter is the only other check
-  on a deposit input. ycashd's `fCoinbaseMustBeShielded` (mainnet and testnet; off on regtest) is a
-  rule of `CheckInputs` on a transaction's own `vout`, which a bundle does not have (B1a), so it does
-  not reach a record. A leaf deposit of a coinbase coin with change is refused on mainnet by that
-  rule; the same deposit in a bundle is valid. The node follows the spec: adding the rule to records
-  here alone would split this line from a spec node. Question for
-  the specification: either add "a coinbase coin with change in `vout_i`" to the deposit-coin rule
-  (a failure, B6, like the script rule) or state that the shielding rule does not apply to records.
-  Maturity (100 blocks) is applied (S2).
+- **K-2: closed by N-D13** (lead architect, 2026-11-26): a bundled deposit of a coinbase coin is an S2
+  skip, so the question of a coinbase coin with transparent change in a record no longer arises.
 - **K-3, wallet and indexes: record coins are not tracked.** A bundle's inputs and outputs are not
   in its `vin`/`vout`, and the wallet and the insight indexes read only those. What a user sees:
   (a) a withdrawal (`z_sendmany` from the Yugen account to a transparent address of this wallet, or

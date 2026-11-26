@@ -1696,6 +1696,44 @@ TEST(Yugen, BundleImmatureCoinbaseDeposit) {
     EXPECT_EQ(g_askedCount, 0u);
 }
 
+TEST(Yugen, BundleCoinbaseDepositSkipped) {
+    // N-D13 (K-2): a coinbase coin is skipped (S2) whatever its maturity: never spent, never asked about,
+    // recorded skipped in the undo mask; a recorded mask that says applied does not override it.
+    YugenChain c("accept");
+    ASSERT_TRUE(c.ConnectSeed());
+    const GenCoin cb{COutPoint(uint256S("cc"), 0), CoinState::COINBASE, 2000000};
+    const GenCoin a{COutPoint(uint256S("cd"), 0), CoinState::P2PKH, 2000000};
+    const GenTransfer dep{-2000000, 1, 2, {}, {cb.p}};
+    const GenTransfer depA{-2000000, 5, 6, {}, {a.p}};
+    const GenTransfer w{400000, 3, 4, {{400000, PayTo(3)}}, {}};
+    const CTransaction tx = GenBundle(c.h0, {dep, depA, w});
+    for (int age : {COINBASE_MATURITY, COINBASE_MATURITY + 1000}) {
+        CCoinsViewDummy base;
+        CCoinsViewCache view(&base);
+        PutCoin(view, cb);
+        PutCoin(view, a);
+        view.ModifyCoins(cb.p.hash)->nHeight = YugenChain::ACT + 1 - age;   // mature under the maturity rule
+        c.i2.nHeight = YugenChain::ACT + 1; c.i2.pprev = &c.i1;
+        ModuleHook hook;
+        yugen::BlockCoins bc;
+        CTxUndo undo; CAmount delta = 0; CValidationState st;
+        ASSERT_TRUE(yugen::ConnectBundleCoins(tx, view, undo, &c.i2, Params(), SCRIPT_VERIFY_P2SH, bc, delta, st)) << st.GetRejectReason();
+        EXPECT_EQ(bc.bundles[tx.GetHash()].applied, std::vector<bool>({false, true, true}));
+        EXPECT_TRUE(view.AccessCoins(cb.p.hash)->IsAvailable(cb.p.n));
+        EXPECT_FALSE(view.AccessCoins(a.p.hash)->IsAvailable(a.p.n));
+        EXPECT_EQ(g_askedCount, 1u);   // only the ordinary coin
+        EXPECT_EQ(yugen::UndoMask(undo), std::vector<bool>({false, true, true}));
+        EXPECT_EQ(yugen::RecordPrevouts(tx, yugen::UndoMask(undo)), std::vector<COutPoint>({a.p}));
+    }
+    // An unknown module with a recorded mask that says applied (VerifyDB): the coinbase rule is re-decided.
+    ModuleHook unknown(false);
+    const std::vector<bool> apply{true, true, true};
+    const Outcome o = RunConnect(c, GenBundle(c.h0, {dep, w}), {cb}, {}, 0, &apply);
+    EXPECT_EQ(o.fail, "");
+    EXPECT_EQ(o.applied, std::vector<bool>({false, true}));
+    EXPECT_TRUE(o.spent.empty());
+}
+
 TEST(Yugen, BundleUnknownModuleTakesRecordedMask) {
     // N-D12, active-chain re-verify: with the module unable to answer, a deposit that passes every other S2
     // test takes its decision from the recorded mask; every other decision is re-made (a missing or immature

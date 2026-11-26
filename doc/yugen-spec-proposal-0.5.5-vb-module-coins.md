@@ -24,6 +24,10 @@ primitive and its registered rule modules (the YED module), never sees them. Two
 > in its state after the block's parent (for YED: a token, a vault, an intent or an attestor bond). The
 > transfer is skipped; a skipped deposit is not verified (§15.5).
 
+and (N-D13, lead architect's ruling 2026-11-26, from K-2): "or that is a coinbase output (whatever its
+maturity)". A coinbase coin deposits by a leaf, where the network's coinbase shielding rule reads the
+transaction's own outputs; a record has none, so a bundled deposit could keep transparent change.
+
 **§15.1 / §15.6 B6** (a new clause, decided whether the transfer is skipped or not, as the gross cap K):
 
 > A record output whose script is a vault primitive act, or matches the vault (V) or intent (I)

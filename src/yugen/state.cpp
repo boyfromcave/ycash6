@@ -600,7 +600,7 @@ bool ConnectBundleCoins(const CTransaction& tx, CCoinsViewCache& view, CTxUndo& 
         for (size_t k = 0; eligible && k < t.vin.size(); k++) {
             const COutPoint p = Prevout(t.vin[k]);
             const CCoins* c = view.AccessCoins(p.hash);
-            if (!c || !c->IsAvailable(p.n) || (c->IsCoinBase() && h - c->nHeight < COINBASE_MATURITY) || c->nHeight >= h) eligible = false;
+            if (!c || !c->IsAvailable(p.n) || c->IsCoinBase() || c->nHeight >= h) eligible = false;
         }
         if (!eligible) continue;
         askedAt[j] = asked.size();
@@ -627,7 +627,8 @@ bool ConnectBundleCoins(const CTransaction& tx, CCoinsViewCache& view, CTxUndo& 
             for (size_t k = 0; k < t.vin.size(); k++) {
                 const COutPoint p = Prevout(t.vin[k]);
                 const CCoins* c = view.AccessCoins(p.hash);
-                if (!c || !c->IsAvailable(p.n) || (c->IsCoinBase() && h - c->nHeight < COINBASE_MATURITY)) { skip = true; break; }
+                // N-D13 (K-2): a coinbase coin, mature or not, is skipped; it deposits by a leaf.
+                if (!c || !c->IsAvailable(p.n) || c->IsCoinBase()) { skip = true; break; }
                 if (c->nHeight >= h) { skip = true; break; }
                 if (answer == ModuleAnswer::KNOWN) { if (askedAt[j] != NOT_ASKED && tracked[askedAt[j] + k]) { skip = true; break; } }
                 else moduleAsked = true;
@@ -1566,12 +1567,12 @@ bool StaleInPool(const CTransaction& tx, int nextHeight, int disconnectedHeight,
     }
     for (const auto& t : ts) for (const auto& nf : t.nf) if (st.nullifiers.count(nf)) return true;
     // §15.6 S2: a deposit whose coin the next block cannot spend would be skipped (the pool takes only
-    // bundles whose every transfer applies).
+    // bundles whose every transfer applies); N-D13: a coinbase coin is always skipped.
     for (const auto& t : ts)
         for (const auto& in : t.vin) {
             const COutPoint p = Prevout(in);
             const CCoins* c = pcoinsTip->AccessCoins(p.hash);
-            if (!c || !c->IsAvailable(p.n) || (c->IsCoinBase() && nextHeight - c->nHeight < COINBASE_MATURITY)) return true;
+            if (!c || !c->IsAvailable(p.n) || c->IsCoinBase()) return true;
         }
     // §13.3.2: after a reorganisation the pool may no longer hold what the transaction takes.
     CAmount nb = st.balance - PoolDebit(tx);
