@@ -333,7 +333,7 @@ TEST(Yugen, KindMarkerIsFirstByte) {
     }
 }
 
-// The kind of every spec vector (yugen-spec 0.5.4 77af005: vectors/transfer.json, vectors/bundle.json).
+// The kind of every spec vector (yugen-spec 0.5.5 e93f977: vectors/transfer.json, vectors/bundle.json).
 TEST(Yugen, KindOfSpecVectors) {
     const char* tp = std::getenv("YUGEN_TRANSFER_VECTORS");
     const char* bp = std::getenv("YUGEN_BUNDLE_VECTORS");
@@ -847,7 +847,7 @@ static std::string NodeDecode(const std::vector<unsigned char>& b)
     return it == names.end() ? why : it->second;
 }
 
-// Every case of yugen-spec 0.5.4 (77af005) vectors/bundle.json that the node decides: each
+// Every case of yugen-spec 0.5.5 (e93f977) vectors/bundle.json that the node decides: each
 // decode-reject the node refuses, with the spec's error wherever the first failure is in a part the
 // node decodes (the VB records, the transfers); the rest the node decodes and leaves to the helper,
 // listed here by name. Each bundle's record outputs (index, value, script) and expiry height, and the

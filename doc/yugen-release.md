@@ -23,7 +23,7 @@ Every source is a public URL at an exact commit:
 | what | where pinned | repository |
 |---|---|---|
 | librustzcash6 (`zcash_*`, `f4jumble`) | `Cargo.toml` `[patch.crates-io]`, `Cargo.lock`, `.cargo/config.toml.offline` | `https://github.com/boyfromcave/librustzcash6.git` @ `057511f1d355` (contains bfd5027b) |
-| Yugen specification and `yugen-ref` | `contrib/yugen-*/PINS` | `https://github.com/boyfromcave/yugen-spec.git` @ `77af00586e66` |
+| Yugen specification and `yugen-ref` | `contrib/yugen-*/PINS` | `https://github.com/boyfromcave/yugen-spec.git` @ `e93f9775c017` |
 | Falcon | same | `https://github.com/boyfromcave/yugen-falcon.git` @ `874438b9f6c1` |
 | proof system A | same | `https://github.com/boyfromcave/yugen-proof-a.git` @ `bbe5c5f6441a` |
 | proof system B2 | same | `https://github.com/boyfromcave/yugen-proof-b2.git` @ `3e7a5d061285` |
