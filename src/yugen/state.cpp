@@ -73,6 +73,7 @@ struct BoundedMap {
         while (order.size() > max) { map.erase(order.front()); order.pop_front(); }
     }
     const V* get(const K& k) const { auto it = map.find(k); return it == map.end() ? nullptr : &it->second; }
+    void clear() { map.clear(); order.clear(); }
     void erase(const K& k)
     {
         if (map.erase(k)) order.erase(std::find(order.begin(), order.end(), k));
@@ -81,6 +82,11 @@ struct BoundedMap {
 
 // Round 3: verifier failures per block hash and per body (block hash and sidecar), bounded.
 static BoundedMap<uint256, int> g_helperFailures(1000), g_helperBodyFailures(1000);
+// Review item (4): refusals of mempool candidates by everything they carry, proofs included, and
+// the tip they were judged at, so that one copy replayed from many peers is judged once per tip.
+// Emptied whenever the tip moves (ConnectBlock, DisconnectBlock): the tip in the key alone would
+// bring an entry back after a reorg to the same tip (A, B, A).
+static BoundedMap<uint256, std::string> g_refused(REFUSED_CACHE_MAX);
 
 static PoolState g_state;
 // Between yugen::DisconnectBlock and EndDisconnect (DisconnectTip resurrects the block's
@@ -110,7 +116,8 @@ static fs::path TmpDir()
 // verifying systems), -yugenmempoolverifytimeout for a mempool candidate. Exit 0 = OK; exit 10
 // with a "REJECT " line = REJECT (a verdict on the input); anything else, including exit 1 (a Rust
 // `main` returning `Err`), 101 (a panic), a timeout, a signal or a missing binary, = FAIL (a fault
-// of this node, never a verdict: reviews H-1, H-2, M-2). It runs under cs_main, as all block
+// of this node, never a verdict: reviews H-1, H-2, M-2). A FAIL where the helper never ran on the
+// input (a pipe, fork or exec failure) says HELPER_NOT_RUN. It runs under cs_main, as all block
 // validation here does.
 static HelperResult RunHelper(const std::vector<std::string>& args)
 {
@@ -125,10 +132,10 @@ static HelperResult RunHelper(const std::vector<std::string>& args)
     pid_t pid;
     {
         std::lock_guard<std::mutex> sg(SpawnMutex());  // no other child inherits this pipe (N-A5)
-        if (!PipeCloexec(fd)) { r.line = "pipe failed"; return r; }
+        if (!PipeCloexec(fd)) { r.line = std::string(HELPER_NOT_RUN) + "pipe failed"; return r; }
         pid = fork();
     }
-    if (pid < 0) { close(fd[0]); close(fd[1]); r.line = "fork failed"; return r; }
+    if (pid < 0) { close(fd[0]); close(fd[1]); r.line = std::string(HELPER_NOT_RUN) + "fork failed"; return r; }
     if (pid == 0) {
         setpgid(0, 0);
         dup2(fd[1], 1);
@@ -168,6 +175,7 @@ static HelperResult RunHelper(const std::vector<std::string>& args)
     size_t nl = r.all.find('\n');
     r.line = r.all.substr(0, nl);
     if (timedOut) { r.line = "timeout"; return r; }
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 127) r.line = std::string(HELPER_NOT_RUN) + "exec failed";   // the child's _exit(127)
     if (WIFEXITED(status) && WEXITSTATUS(status) == 0) r.kind = HelperResult::OK;
     else if (WIFEXITED(status) && WEXITSTATUS(status) == HELPER_EXIT_REJECT && r.line.rfind("REJECT ", 0) == 0) r.kind = HelperResult::REJECT;
     if (r.kind != HelperResult::OK) LogPrint("yugen", "yugen: helper %s: exit %d: %s\n", args.empty() ? "" : args[0],
@@ -248,7 +256,11 @@ static HelperResult VerifyProofs(const CTransaction& tx, const Transfer& t, int 
     fs::path p = TmpDir() / (key.GetHex() + ".json");
     {
         std::ofstream o(p.string());
-        o << doc;
+        if (!(o << doc).flush()) {
+            boost::system::error_code ec;
+            fs::remove(p, ec);
+            return HelperResult{HelperResult::FAIL, std::string(HELPER_NOT_RUN) + "temp file write failed", ""};
+        }
     }
     int64_t t0 = GetTimeMillis();
     auto hr = RunHelper({"verify", p.string()});
@@ -726,7 +738,14 @@ static HelperResult BundleHelper(const CTransaction& tx, const std::vector<std::
         NetworkByte(params), h, ActivationHeight(params), StubProofs() ? "true" : "false", applied.empty() ? "true" : "false",
         GetArg("-yugenb2verify", ""), GetArg("-yugenbplan", ""), applied.empty() ? "" : ",\"applied\":[" + mask + "]");
     fs::path p = TmpDir() / (key.GetHex() + ".json");
-    { std::ofstream o(p.string()); o << doc; }
+    {
+        std::ofstream o(p.string());
+        if (!(o << doc).flush()) {
+            boost::system::error_code ec;
+            fs::remove(p, ec);
+            return {HelperResult::FAIL, std::string(HELPER_NOT_RUN) + "temp file write failed", ""};
+        }
+    }
     int64_t t0 = GetTimeMillis();
     auto hr = RunHelper({"bundle", p.string()});
     fs::remove(p);
@@ -1216,6 +1235,7 @@ const PoolState& Current(const CChainParams& params)
 
 void DisconnectBlock(const CBlockIndex* pindex)
 {
+    g_refused.clear();
     if (g_state.tip == pindex->GetBlockHash() && !UndoTip(g_state)) g_state = PoolState();
     g_tipOverride = pindex->pprev;
 }
@@ -1295,6 +1315,7 @@ bool ConnectBlock(const CBlock& block, const CBlockIndex* pindex, const CChainPa
         return state.DoS(dos, false, REJECT_INVALID, "yugen-verifier-failed", BodyCorruption::Possible);
     }
     if (ok && !fJustCheck) {
+        g_refused.clear();
         g_helperFailures.erase(hash);
         PruneProofStore(pindex->nHeight - (int)MAX_REORG_LENGTH);
     }
@@ -1367,10 +1388,6 @@ bool PreCheckMempoolTx(const CTransaction& tx, const CTxMemPool& pool, const CCh
         return state.DoS(0, false, REJECT_INVALID, "bad-yugen-bundle-proofs-missing");
     return true;
 }
-
-// Review item (4): refusals of mempool candidates by everything they carry, proofs included, and
-// the tip they were judged at, so that one copy replayed from many peers is judged once per tip.
-static BoundedMap<uint256, std::string> g_refused(REFUSED_CACHE_MAX);
 
 static uint256 RefusalKey(const CTransaction& tx, const std::vector<std::vector<unsigned char>>* proofs)
 {
@@ -1445,7 +1462,8 @@ int64_t RefusalBackoff(int& refusals, int64_t& lastRefusal, int64_t nowMicros)
 // Every refusal here is DoS 0 (review M-3): each depends on the state at the tip (anchors, the
 // nullifier set, the turnstile, and the proofs, which verify against the anchor's root and block
 // hash), which a peer on another tip need not share; the structure was judged (DoS 100) before. A
-// helper failure is DoS 0 too (review H-1); it is remembered at this tip as a refusal is (item 4).
+// helper failure is DoS 0 too (review H-1); one that is a verdict on the bytes is remembered at
+// this tip as a refusal is (item 4).
 bool CheckMempoolTx(const CTransaction& tx, const CTxMemPool& pool, const CChainParams& params,
                     CValidationState& state)
 {
@@ -1461,7 +1479,7 @@ bool CheckMempoolTx(const CTransaction& tx, const CTxMemPool& pool, const CChain
         one.vYugenProofs.push_back({tx.GetHash(), *p});
     }
     const uint256 key = RefusalKey(tx, tx.IsYugenBundle() ? &one.vYugenProofs[0].proofs : nullptr);
-    if (const std::string* why = g_refused.get(key)) return state.DoS(0, false, REJECT_INVALID, *why);
+    if (const std::string* why = g_refused.get(key)) return state.DoS(0, false, REJECT_INVALID, *why, BodyCorruption::Possible);
     // Round 3: a candidate from a peer spends a token of the shared budget here, after the cheap checks
     // (CheckTransaction, the structure, PreCheckMempoolTx, inputs and scripts) and the refusal cache.
     if (g_scopePeer >= 0 && !g_peerBudget.Take(GetTimeMicros(), GetArg("-yugenpeerverifyrate", DEFAULT_PEER_VERIFY_RATE), g_scopePeer))
@@ -1475,27 +1493,38 @@ bool CheckMempoolTx(const CTransaction& tx, const CTxMemPool& pool, const CChain
     // bundle's come from the proof store), so it is BodyCorruption::Possible: main.cpp keeps its wtxid
     // out of recentRejects, and a copy with other proofs, from any peer, is judged on its own.
     // The back-off (PeerVerifyScope::Judged): a helper failure or timeout counts as a refusal does, since
-    // the peer's proof bytes can make the helper panic, exit badly or run out of time. This node cannot
-    // tell those from its own helper faults (a pipe, fork or exec failure, a timeout under local load,
-    // a malformed answer), so they count as judged too. Only a fault that does not reach the helper
-    // judged nothing: the YED module unable to say which coins it tracks (CoinsAtTip), or the pool
-    // state itself (Trial's other IsError()).
-    // A helper failure is remembered in the refusal cache as a refusal is, until the tip changes: the
-    // same bytes (proofs included) replayed by other peers do not run the helper again, and a copy
+    // the peer's proof bytes can make the helper panic, exit badly or run out of time. Only a fault that
+    // kept the helper from running on the bytes judged nothing: HELPER_NOT_RUN (a pipe, fork or exec
+    // failure, a temp-file write failure), the YED module unable to say which coins it tracks
+    // (CoinsAtTip), or the pool state itself (Trial's other IsError()).
+    // The refusal cache (until the tip changes) takes a refusal, and a helper failure that is a verdict
+    // on the bytes: the helper ran and failed (a panic, a bad exit) or answered malformed. It does not
+    // take a timeout or HELPER_NOT_RUN (node-local, retried), nor a helper failure outside a peer scope
+    // (sendrawtransaction, the wallet's rebroadcast), so a transient fault never blocks this node's own
+    // transaction. The same bytes replayed by other peers then do not run the helper again, and a copy
     // with other proofs has another key. Known trade-off: an attacker who exploits a difference of
-    // helper version or hardware (a copy that fails or times out here only) can have honest relayers
-    // of those bytes deferred, never banned (DoS 0), until the next block.
+    // helper version or hardware (a copy that fails here only) can have honest relayers of those bytes
+    // deferred, never banned (DoS 0): each refused copy, first or replayed, is one refusal in the
+    // relayer's back-off (RefusalBackoff: 10 s doubling to 10 min, reset after 20 quiet minutes), so
+    // for as long as it is fed such bytes, past the next block.
     if (!CoinsAtTip({tx}, tip, params, coins, inner)) {
         if (inner.IsError()) g_scopeJudged = false;
         return state.DoS(0, false, REJECT_INVALID, inner.GetRejectReason(), BodyCorruption::Possible);
     }
     if (!Trial(one, tip->nHeight + 1, tip, params, inner, nullptr, coins, &nfs)) {
-        if (!inner.IsError() || inner.GetRejectReason().rfind(VERIFIER_FAILED, 0) == 0) g_refused.put(key, inner.GetRejectReason());
-        else g_scopeJudged = false;
-        return state.DoS(0, false, REJECT_INVALID, inner.GetRejectReason(), BodyCorruption::Possible);
+        const std::string& why = inner.GetRejectReason();
+        const std::string failed = std::string(VERIFIER_FAILED) + ": ";   // fail() in ApplyBlockInner
+        const bool helperFailed = why.rfind(VERIFIER_FAILED, 0) == 0;
+        const bool notRun = why.rfind(failed + HELPER_NOT_RUN, 0) == 0;
+        if (!inner.IsError() || (helperFailed && !notRun && why != failed + "timeout" && g_scopePeer >= 0))
+            g_refused.put(key, why.substr(0, REFUSED_REASON_MAX));
+        if (inner.IsError() && (!helperFailed || notRun)) g_scopeJudged = false;
+        return state.DoS(0, false, REJECT_INVALID, why, BodyCorruption::Possible);
     }
-    if (tx.IsYugenBundle() && nfs != 2 * tx.GetYugenTransfers().size())   // every transfer must apply in the pool
+    if (tx.IsYugenBundle() && nfs != 2 * tx.GetYugenTransfers().size()) {   // every transfer must apply in the pool
+        g_refused.put(key, "bad-yugen-bundle-skips");                        // depends on the tip and the bytes only
         return state.DoS(0, false, REJECT_INVALID, "bad-yugen-bundle-skips", BodyCorruption::Possible);
+    }
     return true;
 }
 

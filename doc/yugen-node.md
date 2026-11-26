@@ -476,15 +476,22 @@ Tests: `qa/yugen/test_leafverify.py` (helper contract), helper unit test
   minutes. Only a refusal after a token was taken (the helper's judgement) or a replay of a refused
   copy counts. A helper failure or timeout after the token (`yugen-verifier-failed`: a panic, an exit
   other than 0 and 10, a timeout) counts too: the peer's proof bytes can cause one, so a peer must not
-  have the helper run for free (as it could while such a failure cleared the mark). The node cannot
-  tell such a failure from a helper fault of its own (a pipe, fork or exec failure, a timeout under
-  local load), so those count as judged too. Only a fault before the helper judged nothing and does
-  not count: the YED module cannot say which coins it tracks (`CoinsAtTip`), or the pool state itself
-  fails. A helper failure is remembered in the refusal cache as a refusal is, until the tip changes,
-  so the same bytes replayed by other (Sybil) peers do not run the helper again; a copy with other
-  proofs has another key and is judged on its own. Known trade-off: an attacker who exploits a
-  difference of helper version or hardware (bytes that fail or time out on some nodes only) can have
-  honest relayers of those bytes deferred until the next block, never banned. A broken local helper thus
+  have the helper run for free (as it could while such a failure cleared the mark). Only a fault that
+  kept the helper from running on the bytes judged nothing and does not count: a pipe, fork or exec
+  failure or a temp-file write failure (`helper not run: `), the YED module cannot say which coins it
+  tracks (`CoinsAtTip`), or the pool state itself fails. The refusal cache takes every refusal
+  (`bad-yugen-bundle-skips` included) and a helper failure that is a verdict on the bytes (the helper
+  ran and failed, or answered malformed), its reason cut to 200 characters; not a timeout or a
+  `helper not run` fault (node-local, retried), and not a helper failure outside a peer scope
+  (`sendrawtransaction`, the wallet's rebroadcast), so a transient fault never blocks the node's own
+  transaction. The cache is emptied whenever the tip moves (a connect or a disconnect, so a reorg back
+  to the same tip reuses nothing), so the same bytes replayed by other (Sybil) peers do not run the
+  helper again at this tip; a copy with other proofs has another key and is judged on its own. Known
+  trade-off: an attacker who exploits a difference of helper version or hardware (bytes that fail on
+  some nodes only) can have honest relayers of those bytes deferred, never banned: each refused copy,
+  first or replayed, is one refusal in the relayer's back-off (10 s doubling to 10 min, reset after 20
+  quiet minutes), so a relayer fed such bytes is deferred for as long as they keep coming, past the
+  next block. A broken local helper thus
   backs off honest peers too (a delay, never a ban score); the block path's `HELPER_SAME_BODY_DOS`
   is not mirrored here, since every peer relays the same honest leaves and a broken local helper would
   then score them all. Every refusal after the token is `BodyCorruption::Possible` explicitly (the
@@ -498,6 +505,9 @@ Tests: `qa/yugen/test_leafverify.py` (helper contract), helper unit test
   Tests: `Yugen.PeerVerifyBudgetFairShare`, `Yugen.RefusalBackoffDoubles`,
   `Yugen.MempoolHelperFailureIsRemembered` (a second peer's copy of failing bytes runs no helper, a copy
   with other proofs does), `Yugen.MempoolModuleFaultIsNotJudged` (a node-local fault starts no back-off),
+  `Yugen.MempoolLocalHelperFaultIsNotRemembered` (a missing helper binary: no back-off, not cached; a
+  timeout: back-off, not cached; a failure of the node's own transaction: not cached),
+  `Yugen.MempoolBundleSkipsIsRemembered`,
   rpc `yugen_stale_relay` (a helper that panics starts the back-off; the same bytes from another peer
   are refused until the tip changes, then taken; a leaf first sent with a flipped proof byte keeps no
   honest copy from another peer out).

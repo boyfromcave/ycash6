@@ -617,7 +617,7 @@ struct YugenChain {
                  "case \"$1\" in\n"
                  "root) echo \"ROOT " << std::string(96, 'a') << "\" ;;\n"
                  "regroot) echo " << std::string(96, 'b') << " ;;\n"
-                 "verify) [ \"$YUGEN_FAKE_VERIFY\" = fail ] && exit 1; echo ACCEPT ;;\n"
+                 "verify) [ \"$YUGEN_FAKE_VERIFY\" = fail ] && exit 1; [ \"$YUGEN_FAKE_VERIFY\" = slow ] && sleep 5; echo ACCEPT ;;\n"
                  "bundle) echo \"ACCEPT {\\\"records\\\":[$YUGEN_FAKE_RECORDS],\\\"stmt\\\":\\\"00\\\",\\\"transfers\\\":[$YUGEN_FAKE_TRANSFERS]}\" ;;\n"
                  "*) exit 1 ;;\n"
                  "esac\n";
@@ -762,13 +762,13 @@ TEST(Yugen, BundleTrialWritesNoProofFile) {
 TEST(Yugen, BundleMalformedAcceptIsAHelperFailure) {
     YugenChain c("accept");
     ASSERT_TRUE(c.ConnectSeed());
+    struct Unset { ~Unset() { unsetenv("YUGEN_FAKE_RECORDS"); } } unset;   // even when an assertion fails
     setenv("YUGEN_FAKE_RECORDS", "{\"script\":5,\"pay\":1}", 1);
     CTransaction bundle = AnchoredBundle(c.h0);
     CBlock b = YugenChain::Block({YugenChain::Leaf(6, 7), bundle});
     b.vYugenProofs.push_back({bundle.GetHash(), {{9, 9}, {9}}});
     CValidationState st;
     EXPECT_FALSE(c.Connect(b, true, st));
-    unsetenv("YUGEN_FAKE_RECORDS");
     EXPECT_EQ(c.Calls("bundle"), 1);
     EXPECT_TRUE(st.CorruptionPossible());                  // never a verdict
     EXPECT_EQ(st.GetRejectReason().rfind(yugen::VERIFIER_FAILED, 0), 0u) << st.GetRejectReason();
@@ -1548,6 +1548,81 @@ TEST(Yugen, MempoolModuleFaultIsNotJudged) {
     EXPECT_FALSE(judged);
     EXPECT_FALSE(yugen::KnownRefused(bundle));
     EXPECT_EQ(c.Calls("bundle"), 0);
+}
+
+// A node-local helper fault is not a verdict on the bytes, so it is not remembered: a helper that never
+// ran (a missing binary) starts no back-off either; a timeout starts the back-off (the peer's bytes can
+// cause one) but is retried. A helper failure on the node's own transaction (no peer scope) is not
+// remembered, so a transient fault never blocks it.
+TEST(Yugen, MempoolLocalHelperFaultIsNotRemembered) {
+    {
+        YugenChain c("accept");
+        ASSERT_TRUE(c.ConnectSeed());
+        ASSERT_TRUE(yugen::HelperAvailable());               // the registry root is known before the helper goes
+        MempoolAtTip m(c, {});
+        mapArgs["-yugenverifier"] = (c.dir / "no-such-helper").string();
+        const CTransaction leaf = YugenChain::Leaf(13, 14);
+        auto [ok, why, judged] = m.Check(leaf, 1);
+        EXPECT_FALSE(ok);
+        EXPECT_EQ(why, std::string(yugen::VERIFIER_FAILED) + ": " + yugen::HELPER_NOT_RUN + "exec failed");
+        EXPECT_FALSE(judged);
+        EXPECT_FALSE(yugen::KnownRefused(leaf));
+    }
+    {
+        YugenChain c("slow");
+        ASSERT_TRUE(c.ConnectSeed());
+        MempoolAtTip m(c, {});
+        mapArgs["-yugenmempoolverifytimeout"] = "1";
+        const CTransaction leaf = YugenChain::Leaf(15, 16);
+        auto [ok, why, judged] = m.Check(leaf, 1);
+        mapArgs.erase("-yugenmempoolverifytimeout");
+        EXPECT_FALSE(ok);
+        EXPECT_EQ(why, std::string(yugen::VERIFIER_FAILED) + ": timeout");
+        EXPECT_TRUE(judged);
+        EXPECT_FALSE(yugen::KnownRefused(leaf));
+    }
+    {
+        YugenChain c("fail");
+        ASSERT_TRUE(c.ConnectSeed());
+        MempoolAtTip m(c, {});
+        const CTransaction leaf = YugenChain::Leaf(17, 18);
+        auto [ok, why, judged] = m.Check(leaf, -1);           // sendrawtransaction, the wallet's rebroadcast
+        EXPECT_FALSE(ok);
+        EXPECT_EQ(why.rfind(yugen::VERIFIER_FAILED, 0), 0u) << why;
+        EXPECT_FALSE(yugen::KnownRefused(leaf));
+        auto [ok2, why2, judged2] = m.Check(leaf, 1);         // the same bytes from a peer: a verdict
+        EXPECT_FALSE(ok2);
+        EXPECT_TRUE(judged2);
+        EXPECT_TRUE(yugen::KnownRefused(leaf));
+    }
+}
+
+// bad-yugen-bundle-skips depends on the tip and the bytes only, so it is remembered: a second peer's copy
+// runs no helper. At tip 33 (a leaf spent nullifier 1), a bundle's withdrawal spending it is skipped.
+TEST(Yugen, MempoolBundleSkipsIsRemembered) {
+    YugenChain c("accept");
+    ASSERT_TRUE(c.ConnectSeed());
+    ModuleHook hook;
+    CValidationState st;
+    ASSERT_TRUE(c.Connect(YugenChain::Block({YugenChain::Leaf(1, 2)}), false, st)) << st.GetRejectReason();
+    MempoolAtTip m(c, {});
+    m.next.nHeight = YugenChain::ACT + 2; m.next.pprev = &c.i2;
+    yugen::DisconnectBlock(&m.next);                          // the candidates are for block 34
+    const GenTransfer spent{400000, 1, 50, {{400000, PayTo(3)}}, {}}, fine{400000, 40, 41, {{400000, PayTo(4)}}, {}};
+    const CTransaction bundle = GenBundle(c.h0, {spent, fine});
+    yugen::PutProofs(bundle.GetHash(), {{1, 2, 3}, {4, 5}});
+    auto [ok1, why1, judged1] = m.Check(bundle, 1);
+    EXPECT_FALSE(ok1);
+    EXPECT_EQ(why1, "bad-yugen-bundle-skips");
+    EXPECT_TRUE(judged1);
+    const int runs = c.Calls("bundle");
+    EXPECT_GE(runs, 1);
+    EXPECT_TRUE(yugen::KnownRefused(bundle));
+    auto [ok2, why2, judged2] = m.Check(bundle, 2);
+    EXPECT_FALSE(ok2);
+    EXPECT_EQ(why2, why1);
+    EXPECT_FALSE(judged2);                                    // the cache answered: no token, no helper
+    EXPECT_EQ(c.Calls("bundle"), runs);
 }
 
 TEST(Yugen, BundleDepositSpentNullifier) {
