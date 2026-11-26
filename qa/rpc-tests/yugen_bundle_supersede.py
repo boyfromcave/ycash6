@@ -104,6 +104,8 @@ class YugenBundleSupersedeTest(BitcoinTestFramework):
         self.reg = self.helper('regroot')
         self.wdir = tempfile.mkdtemp(prefix='yewd-yugen-', dir=self.options.tmpdir)
         n0.generate(140)
+        # the wallet learns of blocks on its notification thread: wait for it before spending
+        sync_blocks([n0, n1])
         dep = self.wallet('depositaddress')
         dep = dep if isinstance(dep, str) else dep['address']
         fund = n0.sendtoaddress(dep, 5)
