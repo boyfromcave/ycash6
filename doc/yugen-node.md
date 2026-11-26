@@ -473,7 +473,12 @@ Tests: `qa/yugen/test_leafverify.py` (helper contract), helper unit test
   minutes, never a refusal). A peer that took its share (`-yugenpeerverifyrate` / the peers that
   asked within the minute) takes a token only while one is left for each other peer that waited. A peer's
   back-off after a refusal doubles per refusal in a row, 10 s to 10 min, and restarts after 20 quiet
-  minutes. Tests: `Yugen.PeerVerifyBudgetFairShare`, `Yugen.RefusalBackoffDoubles`.
+  minutes. Only a refusal after a token was taken (the helper's judgement) or a replay of a refused
+  copy counts: a refusal by the cheap checks costs no verification, and an honest peer sends one
+  whenever it answers a stale request (a leaf confirmed inside a bundle leaves no coin, so
+  `AlreadyHave` misses it and the two-minute retry fetches it: `bad-yugen-nullifier-spent`). Counting
+  those deferred the peer's next real transaction by two minutes (spend_matrix `Mempool sync failed`).
+  Tests: `Yugen.PeerVerifyBudgetFairShare`, `Yugen.RefusalBackoffDoubles`, rpc `yugen_stale_relay`.
 - Helper retries (medium): `HELPER_RETRIES_MAX` (5) verifier failures of one block hash, then the
   block is no longer requested (`FindNextBlocksToDownload`) until a restart, with a log line; the
   same body (block hash and sidecar) failing a second time scores its sender 10 (`HELPER_SAME_BODY_DOS`), once

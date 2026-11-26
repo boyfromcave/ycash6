@@ -1417,9 +1417,11 @@ bool VerifyBudget::Take(int64_t nowMicros, int64_t perMinute, int64_t peer)
 
 static VerifyBudget g_peerBudget;
 static int64_t g_scopePeer = -1;
+static bool g_scopeJudged = false;
 
-PeerVerifyScope::PeerVerifyScope(int64_t peer) { g_scopePeer = peer; }
-PeerVerifyScope::~PeerVerifyScope() { g_scopePeer = -1; }
+PeerVerifyScope::PeerVerifyScope(int64_t peer) { g_scopePeer = peer; g_scopeJudged = false; }
+PeerVerifyScope::~PeerVerifyScope() { g_scopePeer = -1; g_scopeJudged = false; }
+bool PeerVerifyScope::Judged() const { return g_scopeJudged; }
 
 int64_t RefusalBackoff(int& refusals, int64_t& lastRefusal, int64_t nowMicros)
 {
@@ -1457,6 +1459,7 @@ bool CheckMempoolTx(const CTransaction& tx, const CTxMemPool& pool, const CChain
     // (CheckTransaction, the structure, PreCheckMempoolTx, inputs and scripts) and the refusal cache.
     if (g_scopePeer >= 0 && !g_peerBudget.Take(GetTimeMicros(), GetArg("-yugenpeerverifyrate", DEFAULT_PEER_VERIFY_RATE), g_scopePeer))
         return state.DoS(0, false, REJECT_INVALID, VERIFY_DEFERRED, BodyCorruption::Possible);
+    if (g_scopePeer >= 0) g_scopeJudged = true;
     size_t nfs = 0;
     MempoolTimeout shortTimeout;   // review M-2
     CValidationState inner;

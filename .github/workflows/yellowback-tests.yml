@@ -193,7 +193,7 @@ env:
   SANITIZER_SCRIPTS: yellowback_index
   # The functional scripts the nightly job runs by name, each in its own step (the Rust attest agent, the devnet,
   # a ycash6-stock build, the prune floor). qa/yellowback-audit.sh counts them as run by CI.
-  NIGHTLY_SCRIPTS: yellowback_attest_agent yellowback_cancel_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity yellowback_demo_v6 vault_prune_floor yugen_activation yugen_leaf yugen_turnstile yugen_bundle yugen_bundle_vb yugen_bundle_vb_module yugen_bundle_relay yugen_bundle_supersede yugen_wallet_stock wallet_spent_notify_lag relay_parent_first
+  NIGHTLY_SCRIPTS: yellowback_attest_agent yellowback_cancel_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity yellowback_demo_v6 vault_prune_floor yugen_activation yugen_leaf yugen_turnstile yugen_bundle yugen_bundle_vb yugen_bundle_vb_module yugen_bundle_relay yugen_bundle_supersede yugen_stale_relay yugen_wallet_stock wallet_spent_notify_lag relay_parent_first
   # Audit 07/F-11: the files whose change runs the PR legs lockorder-pr and sanitizers-pr (an extended
   # regex over `git diff --name-only` of the PR), and the functional subset lockorder-pr runs (each also
   # in YELLOWBACK_SCRIPTS; the full suite stays in the nightly lockorder job).
@@ -2001,7 +2001,7 @@ jobs:
           python3 qa/yugen/test_leafverify.py   # the verifier helper's result contract (exit 0 / 10 / failure)
           qa/pull-tester/rpc-tests.py --fail-on-skip -j1 --nozmq --nocleanup \
             yugen_activation yugen_leaf yugen_turnstile yugen_bundle yugen_bundle_vb yugen_bundle_vb_module yugen_bundle_relay yugen_bundle_supersede \
-            yugen_strip yugen_wallet_stock wallet_spent_notify_lag relay_parent_first
+            yugen_strip yugen_stale_relay yugen_wallet_stock wallet_spent_notify_lag relay_parent_first
       - name: The plan section 4 demonstration (extended)
         # ycash6 plan section 4 / Phase 6: the checklist walked on one eight-node chain with a transcript
         # line per item (yellowback_demo_v6.py, ~10 minutes). Node 1 is the ycash6-stock build from

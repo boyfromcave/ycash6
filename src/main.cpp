@@ -9120,7 +9120,8 @@ bool static ProcessMessage(const CChainParams& chainparams, CNode* pfrom, string
             // its proofs must not keep out the transaction with valid ones.
             if (!(tx.IsYugen() && state.CorruptionPossible()))
                 recentRejects->insert(tx.GetWTxId().ToBytes());
-            if (state.IsInvalid()) yugenRefused();
+            // Only a refusal the helper judged (a token taken) starts the back-off (PeerVerifyScope::Judged).
+            if (state.IsInvalid() && yugenScope.Judged()) yugenRefused();
 
             if (pfrom->fWhitelisted && GetBoolArg("-whitelistforcerelay", DEFAULT_WHITELISTFORCERELAY)) {
                 // Always relay transactions received from whitelisted peers, even

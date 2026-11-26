@@ -326,6 +326,7 @@ EXTENDED_SCRIPTS = [
     'yugen_activation.py',
     'yugen_leaf.py',
     'yugen_strip.py',
+    'yugen_stale_relay.py',
     'yugen_turnstile.py',
     'yugen_bundle.py',
     'yugen_bundle_vb.py',
