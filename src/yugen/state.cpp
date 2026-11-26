@@ -518,6 +518,25 @@ static unsigned int ConsensusScriptFlags(int h, const Consensus::Params& consens
 
 static bool Ensure(const CBlockIndex* pindex, const CChainParams& params, std::string& err);
 
+// The transfer's own failures of the bundle, skipped or not, as pure functions of the transfer (the reject
+// reason, or nullptr): B6 first, a withdrawal above the window's gross cap K (§13.3.5); then N-D12, a
+// record output the vault primitive or the YED module would read (an act, a V- or I-shaped script):
+// neither sees record outputs, so it pays by a leaf. ConnectBundleCoins's pre-scan and its loop both
+// decide by this one function, so the deposits the module is asked about are exactly those the loop
+// can reach.
+static const char* BundleFailure(const Transfer& t, uint64_t K)
+{
+    if (t.valueBalance > 0 && (uint64_t)t.valueBalance > K) return "bad-yugen-bundle-withdrawal-above-k";
+    for (const auto& o : t.vout) {
+        const CScript spk(o.script.begin(), o.script.end());
+        vault::VaultParams vp;
+        vault::IntentParams ip;
+        if (vault::IsActOutput(spk) || vault::MatchVault(spk, vp) != vault::Shape::NONE || vault::MatchIntent(spk, ip) != vault::Shape::NONE)
+            return "bad-yugen-bundle-record-output";
+    }
+    return nullptr;
+}
+
 ModuleAnswer (*g_moduleTracks)(const std::vector<COutPoint>& outs, const CBlockIndex* pprev, std::vector<bool>& tracked) = nullptr;
 
 bool ConnectBundleCoins(const CTransaction& tx, CCoinsViewCache& view, CTxUndo& undo, const CBlockIndex* pindex,
@@ -546,23 +565,12 @@ bool ConnectBundleCoins(const CTransaction& tx, CCoinsViewCache& view, CTxUndo& 
     // spends coins and adds nullifiers, so a deposit left out here is skipped (or never reached) below
     // whatever the module says, and the decisions are those of asking for every coin; a peer's deposits of
     // missing outpoints cost a coins lookup each, not four module lookups.
-    auto failsBundle = [&](const Transfer& t) {
-        if (t.valueBalance > 0 && (uint64_t)t.valueBalance > K) return true;
-        for (const auto& o : t.vout) {
-            const CScript spk(o.script.begin(), o.script.end());
-            vault::VaultParams vp;
-            vault::IntentParams ip;
-            if (vault::IsActOutput(spk) || vault::MatchVault(spk, vp) != vault::Shape::NONE || vault::MatchIntent(spk, ip) != vault::Shape::NONE)
-                return true;
-        }
-        return false;
-    };
     const size_t NOT_ASKED = (size_t)-1;
     std::vector<COutPoint> asked;
     std::vector<size_t> askedAt(ts.size(), NOT_ASKED);   // a deposit's first coin's position in `asked`
     for (size_t j = 0; j < ts.size(); j++) {
         const auto& t = ts[j];
-        if (failsBundle(t)) break;
+        if (BundleFailure(t, K)) break;
         if (t.valueBalance >= 0) continue;
         bool eligible = true;
         for (const auto& nf : t.nf) if (g_state.nullifiers.count(nf) || bc.nfs.count(nf)) eligible = false;
@@ -582,18 +590,8 @@ bool ConnectBundleCoins(const CTransaction& tx, CCoinsViewCache& view, CTxUndo& 
     std::vector<CTxInUndo> spent;
     for (size_t j = 0; j < ts.size(); j++) {
         const auto& t = ts[j];
-        // B6 first: a withdrawal above the window's gross cap K fails the bundle, skipped or not (§13.3.5).
-        if (t.valueBalance > 0 && (uint64_t)t.valueBalance > K)
-            return state.DoS(100, false, REJECT_INVALID, "bad-yugen-bundle-withdrawal-above-k");
-        // N-D12: a record output the vault primitive or the YED module would read (an act, a V- or I-shaped
-        // script) fails the bundle, skipped or not: neither sees record outputs, so it pays by a leaf.
-        for (const auto& o : t.vout) {
-            const CScript spk(o.script.begin(), o.script.end());
-            vault::VaultParams vp;
-            vault::IntentParams ip;
-            if (vault::IsActOutput(spk) || vault::MatchVault(spk, vp) != vault::Shape::NONE || vault::MatchIntent(spk, ip) != vault::Shape::NONE)
-                return state.DoS(100, false, REJECT_INVALID, "bad-yugen-bundle-record-output");
-        }
+        // B6's K and N-D12's record outputs fail the bundle, skipped or not (BundleFailure).
+        if (const char* why = BundleFailure(t, K)) return state.DoS(100, false, REJECT_INVALID, why);
         // S1: a nullifier spent on chain, earlier in the block or earlier in this bundle.
         bool skip = false;
         for (const auto& nf : t.nf) if (g_state.nullifiers.count(nf) || bc.nfs.count(nf)) skip = true;

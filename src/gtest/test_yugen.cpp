@@ -1280,6 +1280,386 @@ TEST(Yugen, BundleRecordInputTrackedByModule) {
     EXPECT_FALSE(st.GetToken(vb.coin).has_value());
 }
 
+// ConnectBundleCoins over bundles of any shape (one leaf node of one to four transfers, each a deposit
+// or a withdrawal with its VB record), against coins in chosen states. The decisions only: no helper,
+// no signatures (ConnectBlock checks those).
+#include "consensus/consensus.h"
+
+#include <random>
+
+namespace {
+struct GenTransfer {
+    int64_t vb;
+    uint8_t nf0, nf1;
+    std::vector<std::pair<uint64_t, CScript>> vout;
+    std::vector<COutPoint> vin;
+};
+CTransaction GenBundle(const uint256& h0, const std::vector<GenTransfer>& ts)
+{
+    std::vector<unsigned char> b{yugen::BUNDLE_VERSION, 0x01, (uint8_t)((YugenChain::ACT / 16) & 0xff)};
+    b.insert(b.end(), 48, 0xaa);
+    b.insert(b.end(), 48, 0xbb);
+    b.insert(b.end(), h0.begin(), h0.end());
+    b.insert(b.end(), {0x00, 0x00, 0x00, (uint8_t)ts.size()});   // empty payee table; one leaf node
+    b.insert(b.end(), ts.size() <= 2 ? 6 : 8, 0x00);
+    for (const auto& g : ts) {
+        std::vector<unsigned char> t(yugen::FIXED_LEN, 0);
+        t[1] = (YugenChain::ACT / 16) & 0xff;
+        t[2] = yugen::VB;
+        t[4] = g.nf0;
+        t[4 + 32] = g.nf1;
+        VbBundle::Le(t, (uint64_t)g.vb, 8);
+        b.insert(b.end(), t.begin(), t.end());
+        VbBundle::Compact(b, g.vout.size());
+        for (const auto& o : g.vout) {
+            VbBundle::Le(b, o.first, 8);
+            VbBundle::Compact(b, o.second.size());
+            b.insert(b.end(), o.second.begin(), o.second.end());
+        }
+        if (g.vb > 0) continue;
+        VbBundle::Compact(b, g.vin.size());
+        for (const auto& p : g.vin) {
+            b.insert(b.end(), p.hash.begin(), p.hash.end());
+            VbBundle::Le(b, p.n, 4);
+            VbBundle::Compact(b, 0);
+        }
+    }
+    b.insert(b.end(), 64, 0x00);
+    CMutableTransaction m = YugenTx(b, 0, 0);
+    m.nExpiryHeight = YugenChain::ACT + yugen::ANCHOR_WINDOW;
+    const CTransaction tx(m);
+    EXPECT_EQ(tx.GetYugenTransfers().size(), ts.size());
+    return tx;
+}
+
+// A deposit coin's state in the view before the bundle.
+enum class CoinState { ABSENT, P2PKH, P2SH, SPENT, COINBASE, SAME_BLOCK };
+struct GenCoin {
+    COutPoint p;
+    CoinState s;
+    CAmount value;
+};
+CScript PayTo(uint8_t b) { return GetScriptForDestination(CKeyID(uint160(std::vector<unsigned char>(20, b)))); }
+CScript Shaped()
+{
+    vault::VaultParams v;
+    v.tag = yellowback::YED_TAG;
+    v.cancelSetId = uint256S("11");
+    v.setId = uint256S("22");
+    v.delay = 10;
+    v.ownerHeight = 500;
+    v.appHeight = 500;
+    v.owner = CPQKeyID(pq::SCHEME_SLH_DSA_SHA2_128S, uint256S("33"));
+    return vault::BuildVault(v);
+}
+void PutCoin(CCoinsViewCache& view, const GenCoin& c)
+{
+    if (c.s == CoinState::ABSENT) return;
+    CCoinsModifier m = view.ModifyCoins(c.p.hash);
+    m->nHeight = c.s == CoinState::SAME_BLOCK ? YugenChain::ACT + 1 : 1;
+    m->fCoinBase = c.s == CoinState::COINBASE;
+    m->vout.resize(c.p.n + 2);
+    m->vout[c.p.n + 1] = CTxOut(1000, PayTo(0x77));   // keeps the entry when the coin itself is spent
+    m->vout[c.p.n] = c.s == CoinState::SPENT ? CTxOut() : CTxOut(c.value, c.s == CoinState::P2SH ? GetScriptForDestination(CScriptID(PayTo(0x01))) : PayTo(0x01));
+}
+
+// What the module answers (the test's hook) and how many coins it was asked about.
+std::set<COutPoint> g_tracked;
+bool g_known = true;
+size_t g_askedCount = 0;
+yugen::ModuleAnswer Hook(const std::vector<COutPoint>& outs, const CBlockIndex*, std::vector<bool>& t)
+{
+    g_askedCount += outs.size();
+    t.clear();
+    for (const auto& o : outs) t.push_back(g_tracked.count(o) > 0);
+    return g_known ? yugen::ModuleAnswer::KNOWN : yugen::ModuleAnswer::UNKNOWN;
+}
+struct ModuleHook {
+    ModuleHook(bool known = true) { g_tracked.clear(); g_known = known; g_askedCount = 0; yugen::g_moduleTracks = Hook; }
+    ~ModuleHook() { yugen::g_moduleTracks = nullptr; g_tracked.clear(); g_known = true; }
+};
+
+// A bundle's outcome: the reject reason ("error" for a node-local failure), else the applied mask and the
+// deposit coins spent.
+struct Outcome {
+    std::string fail;
+    std::vector<bool> applied;
+    std::set<COutPoint> spent;
+    bool operator==(const Outcome& o) const { return fail == o.fail && applied == o.applied && spent == o.spent; }
+};
+std::ostream& operator<<(std::ostream& os, const Outcome& o)
+{
+    os << "fail=" << o.fail << " applied=";
+    for (bool a : o.applied) os << a;
+    return os << " spent=" << o.spent.size();
+}
+
+Outcome RunConnect(YugenChain& c, const CTransaction& tx, const std::vector<GenCoin>& coins,
+                   const std::set<std::array<uint8_t, 32>>& nfs, CAmount debited, const std::vector<bool>* recorded)
+{
+    CCoinsViewDummy base;
+    CCoinsViewCache view(&base);
+    for (const auto& k : coins) PutCoin(view, k);
+    c.i2.nHeight = YugenChain::ACT + 1; c.i2.pprev = &c.i1;
+    yugen::BlockCoins bc;
+    bc.nfs = nfs;
+    bc.debited = debited;
+    CTxUndo undo; CAmount delta = 0; CValidationState st;
+    Outcome o;
+    if (!yugen::ConnectBundleCoins(tx, view, undo, &c.i2, Params(), SCRIPT_VERIFY_P2SH, bc, delta, st, recorded)) {
+        o.fail = st.IsError() ? "error" : st.GetRejectReason();
+        return o;
+    }
+    o.applied = bc.bundles[tx.GetHash()].applied;
+    for (const auto& k : coins) {
+        if (k.s == CoinState::ABSENT || k.s == CoinState::SPENT) continue;
+        const CCoins* e = view.AccessCoins(k.p.hash);
+        if (!e || !e->IsAvailable(k.p.n)) o.spent.insert(k.p);
+    }
+    return o;
+}
+
+std::array<uint8_t, 32> Nf(uint8_t b) { std::array<uint8_t, 32> n{}; n[0] = b; return n; }
+} // namespace
+
+TEST(Yugen, BundlePreScanStopsAtFailingTransfer) {
+    // N-D12 cost and B6: the module is asked only about deposits before the first transfer that fails the
+    // bundle; the bundle fails with that transfer's reason whatever the module says.
+    YugenChain c("accept");
+    ASSERT_TRUE(c.ConnectSeed());
+    const GenCoin a{COutPoint(uint256S("a1"), 0), CoinState::P2PKH, 2000000};
+    const uint64_t K = yugen::GrossCap(YugenChain::ACT + 1, YugenChain::ACT);
+    const GenTransfer dep{-1500000, 1, 2, {{500000, PayTo(1)}}, {a.p}};
+    const GenTransfer aboveK{(int64_t)K + 1, 3, 4, {{K + 1, PayTo(2)}}, {}};
+    const GenTransfer shaped{400000, 5, 6, {{400000, Shaped()}}, {}};
+    const GenTransfer fine{400000, 7, 8, {{400000, PayTo(3)}}, {}};
+    ModuleHook hook;
+    g_tracked.insert(a.p);   // the module would skip the deposit: the failure still wins
+    auto run = [&](const std::vector<GenTransfer>& ts) { g_askedCount = 0; return RunConnect(c, GenBundle(c.h0, ts), {a}, {}, 0, nullptr); };
+    EXPECT_EQ(run({aboveK, dep}).fail, "bad-yugen-bundle-withdrawal-above-k");
+    EXPECT_EQ(g_askedCount, 0u);
+    EXPECT_EQ(run({shaped, dep}).fail, "bad-yugen-bundle-record-output");
+    EXPECT_EQ(g_askedCount, 0u);
+    EXPECT_EQ(run({fine, shaped, dep, dep}).fail, "bad-yugen-bundle-record-output");
+    EXPECT_EQ(g_askedCount, 0u);
+    // A deposit before the failing transfer is asked; the bundle still fails.
+    EXPECT_EQ(run({dep, aboveK}).fail, "bad-yugen-bundle-withdrawal-above-k");
+    EXPECT_EQ(g_askedCount, 1u);
+    g_tracked.clear();
+    const Outcome ok = run({dep, fine});
+    EXPECT_EQ(ok.fail, "");
+    EXPECT_EQ(ok.applied, std::vector<bool>({true, true}));
+    EXPECT_EQ(g_askedCount, 1u);
+}
+
+TEST(Yugen, BundleDepositSpentNullifier) {
+    // S1: a deposit whose nullifier is spent (earlier in the block, or by an earlier transfer of the same
+    // bundle) is skipped and its coin stays unspent; a nullifier spent before the bundle costs no module lookup.
+    YugenChain c("accept");
+    ASSERT_TRUE(c.ConnectSeed());
+    const GenCoin a{COutPoint(uint256S("a2"), 1), CoinState::P2PKH, 2000000};
+    const GenTransfer dep{-2000000, 9, 10, {}, {a.p}};
+    ModuleHook hook;
+    {
+        const Outcome o = RunConnect(c, GenBundle(c.h0, {dep}), {a}, {Nf(10)}, 0, nullptr);
+        EXPECT_EQ(o.fail, "");
+        EXPECT_EQ(o.applied, std::vector<bool>({false}));
+        EXPECT_TRUE(o.spent.empty());
+        EXPECT_EQ(g_askedCount, 0u);
+    }
+    {
+        const GenTransfer w{400000, 9, 11, {{400000, PayTo(3)}}, {}};
+        const Outcome o = RunConnect(c, GenBundle(c.h0, {w, dep}), {a}, {}, 0, nullptr);
+        EXPECT_EQ(o.fail, "");
+        EXPECT_EQ(o.applied, std::vector<bool>({true, false}));
+        EXPECT_TRUE(o.spent.empty());
+    }
+    {
+        const Outcome o = RunConnect(c, GenBundle(c.h0, {dep}), {a}, {}, 0, nullptr);
+        EXPECT_EQ(o.applied, std::vector<bool>({true}));
+        EXPECT_EQ(o.spent, std::set<COutPoint>({a.p}));
+    }
+}
+
+TEST(Yugen, BundleImmatureCoinbaseDeposit) {
+    // S2: a coinbase coin short of COINBASE_MATURITY is skipped, never spent and never asked about.
+    YugenChain c("accept");
+    ASSERT_TRUE(c.ConnectSeed());
+    ASSERT_LT(YugenChain::ACT + 1 - 1, COINBASE_MATURITY);
+    const GenCoin cb{COutPoint(uint256S("cb"), 0), CoinState::COINBASE, 2000000};
+    const GenTransfer dep{-2000000, 1, 2, {}, {cb.p}};
+    const GenTransfer w{400000, 3, 4, {{400000, PayTo(3)}}, {}};
+    ModuleHook hook;
+    const Outcome o = RunConnect(c, GenBundle(c.h0, {dep, w}), {cb}, {}, 0, nullptr);
+    EXPECT_EQ(o.fail, "");
+    EXPECT_EQ(o.applied, std::vector<bool>({false, true}));
+    EXPECT_TRUE(o.spent.empty());
+    EXPECT_EQ(g_askedCount, 0u);
+}
+
+TEST(Yugen, BundleUnknownModuleTakesRecordedMask) {
+    // N-D12, active-chain re-verify: with the module unable to answer, a deposit that passes every other S2
+    // test takes its decision from the recorded mask; every other decision is re-made (a missing or immature
+    // coin, a spent nullifier: skipped whatever the mask says; a withdrawal: applied whatever it says), and
+    // a mask too short to decide the deposit is a node-local failure.
+    YugenChain c("accept");
+    ASSERT_TRUE(c.ConnectSeed());
+    const GenCoin a{COutPoint(uint256S("a3"), 0), CoinState::P2PKH, 2000000};
+    const GenTransfer dep{-2000000, 1, 2, {}, {a.p}};
+    const GenTransfer w{400000, 3, 4, {{400000, PayTo(3)}}, {}};
+    const CTransaction tx = GenBundle(c.h0, {dep, w});
+    ModuleHook hook(false);
+    auto run = [&](std::vector<GenCoin> coins, const std::vector<bool>* rec, std::set<std::array<uint8_t, 32>> nfs = {}) {
+        return RunConnect(c, tx, coins, nfs, 0, rec);
+    };
+    const std::vector<bool> skip{false, true}, apply{true, true}, applyDepOnly{true, false}, shortMask{};
+    EXPECT_EQ(run({a}, &skip).applied, std::vector<bool>({false, true}));
+    EXPECT_TRUE(run({a}, &skip).spent.empty());
+    EXPECT_EQ(run({a}, &applyDepOnly).applied, std::vector<bool>({true, true}));
+    EXPECT_EQ(run({a}, &apply).spent, std::set<COutPoint>({a.p}));
+    EXPECT_EQ(run({a}, nullptr).fail, "error");
+    EXPECT_EQ(run({a}, &shortMask).fail, "error");
+    GenCoin missing = a; missing.s = CoinState::ABSENT;
+    GenCoin young = a; young.s = CoinState::COINBASE;
+    GenCoin same = a; same.s = CoinState::SAME_BLOCK;
+    for (const auto& k : {missing, young, same}) {
+        const Outcome o = run({k}, &apply);
+        EXPECT_EQ(o.fail, "");
+        EXPECT_EQ(o.applied, std::vector<bool>({false, true}));
+        EXPECT_EQ(run({k}, nullptr).fail, "");   // never reaches the module: no mask needed
+    }
+    EXPECT_EQ(run({a}, &apply, {Nf(2)}).applied, std::vector<bool>({false, true}));
+    EXPECT_EQ(run({a}, nullptr, {Nf(2)}).fail, "");
+}
+
+namespace {
+// The decisions of §15.6 B6, S1 to S3 written out directly, asking the module about every deposit coin
+// (no pre-scan): the oracle for Yugen.BundleDecisionsMatchAskEveryCoin.
+Outcome AskEveryCoin(const std::vector<GenTransfer>& ts, const std::vector<GenCoin>& coins, std::set<std::array<uint8_t, 32>> nfs,
+                     CAmount debited, const std::vector<bool>* recorded, const CScript& shaped)
+{
+    const int h = YugenChain::ACT + 1;
+    const uint64_t K = yugen::GrossCap(h, YugenChain::ACT);
+    const CAmount cap = (CAmount)yugen::ValueCap(h, YugenChain::ACT);
+    std::map<COutPoint, GenCoin> byP;
+    for (const auto& k : coins) byP[k.p] = k;
+    Outcome o;
+    for (size_t j = 0; j < ts.size(); j++) {
+        const auto& g = ts[j];
+        if (g.vb > 0 && (uint64_t)g.vb > K) return Outcome{"bad-yugen-bundle-withdrawal-above-k", {}, {}};
+        for (const auto& v : g.vout) if (v.second == shaped) return Outcome{"bad-yugen-bundle-record-output", {}, {}};
+        bool skip = nfs.count(Nf(g.nf0)) || nfs.count(Nf(g.nf1));
+        if (!skip && g.vb < 0) {
+            bool tracked = false;
+            for (const auto& p : g.vin) {
+                const auto it = byP.find(p);
+                const CoinState s = it == byP.end() ? CoinState::ABSENT : it->second.s;
+                if (s == CoinState::ABSENT || s == CoinState::SPENT || s == CoinState::COINBASE || s == CoinState::SAME_BLOCK || o.spent.count(p)) skip = true;
+                tracked = tracked || g_tracked.count(p);
+            }
+            if (!skip && g_known) skip = tracked;
+            else if (!skip) {
+                if (!recorded || j >= recorded->size()) return Outcome{"error", {}, {}};
+                skip = !(*recorded)[j];
+            }
+        }
+        yugen::Transfer t;
+        t.valueBalance = g.vb;   // fee class 0, no flags but VB: the fee GenBundle's transfers carry
+        t.flags = yugen::VB;
+        const CAmount delta = t.TransparentDelta();
+        if (!skip && g.vb < 0 && 0 - debited - delta > cap) skip = true;
+        o.applied.push_back(!skip);
+        if (skip) continue;
+        debited += delta;
+        nfs.insert(Nf(g.nf0));
+        nfs.insert(Nf(g.nf1));
+        if (g.vb > 0) continue;
+        int64_t in = 0, owed = -g.vb;
+        for (const auto& v : g.vout) owed += v.first;
+        for (const auto& p : g.vin) {
+            if (byP[p].s == CoinState::P2SH) return Outcome{"bad-yugen-bundle-deposit-coin", {}, {}};
+            o.spent.insert(p);
+            in += byP[p].value;
+        }
+        if (in != owed) return Outcome{"bad-yugen-bundle-deposit-balance", {}, {}};
+    }
+    return o;
+}
+} // namespace
+
+TEST(Yugen, BundleDecisionsMatchAskEveryCoin) {
+    // N-D12: ConnectBundleCoins asks the module only about deposits its pre-scan finds eligible; its decisions
+    // must be those of asking about every coin. Randomized bundles (deposits and withdrawals, shared and
+    // reused coins, spent nullifiers, coins missing, spent, P2SH, immature, of the same block or tracked,
+    // unbalanced deposits, S3's cap, failing transfers anywhere) under a known module and under an unknown
+    // one with a recorded mask (full, short or none), compared outcome for outcome.
+    YugenChain c("accept");
+    ASSERT_TRUE(c.ConnectSeed());
+    const uint64_t K = yugen::GrossCap(YugenChain::ACT + 1, YugenChain::ACT);
+    const CAmount cap = (CAmount)yugen::ValueCap(YugenChain::ACT + 1, YugenChain::ACT);
+    const CScript shaped = Shaped();
+    std::mt19937_64 rng(0x59756765ULL);
+    auto u = [&](uint64_t lo, uint64_t hi) { return std::uniform_int_distribution<uint64_t>(lo, hi)(rng); };
+    auto p = [&](double x) { return std::bernoulli_distribution(x)(rng); };
+    ModuleHook hook;
+    size_t everyCoin = 0, asked = 0, failures = 0, applied = 0, skipped = 0, errors = 0;
+    for (int iter = 0; iter < 3000; iter++) {
+        std::vector<GenCoin> coins;
+        for (int i = 0; i < 6; i++)
+            coins.push_back({COutPoint(uint256S(strprintf("%x", 0x100 * (iter + 1) + i)), (uint32_t)u(0, 1)), (CoinState)u(0, 5), (CAmount)u(100000, 3000000)});
+        g_tracked.clear();
+        for (const auto& k : coins) if (p(0.3)) g_tracked.insert(k.p);
+        std::vector<GenTransfer> ts(u(1, 4));
+        for (auto& g : ts) {
+            g.nf0 = (uint8_t)u(1, 10);
+            do g.nf1 = (uint8_t)u(1, 10); while (g.nf1 == g.nf0);
+            if (p(0.55)) {
+                const size_t a = u(0, 5), b = u(0, 5);
+                g.vin.push_back(coins[a].p);
+                if (b != a && p(0.4)) g.vin.push_back(coins[b].p);
+                CAmount sum = 0;
+                for (const auto& q : g.vin) for (const auto& k : coins) if (k.p == q) sum += k.value;
+                const CAmount change = p(0.7) ? (CAmount)u(0, sum / 2) : 0;
+                if (change > 0 || p(0.1)) g.vout.push_back({(uint64_t)change, p(0.05) ? shaped : PayTo(4)});
+                g.vb = -(sum - change) + (p(0.1) ? (p(0.5) ? 1 : -1) : 0);
+            } else {
+                g.vb = p(0.07) ? (int64_t)K + 1 : (int64_t)u(1, 2000000);
+                g.vout.push_back({(uint64_t)g.vb, p(0.07) ? shaped : PayTo(5)});
+            }
+        }
+        std::set<std::array<uint8_t, 32>> nfs;
+        for (uint8_t i = 1; i <= 10; i++) if (p(0.1)) nfs.insert(Nf(i));
+        const CAmount debited = -(cap - (CAmount)u(0, 4000000));
+        g_known = p(0.7);
+        std::vector<bool> mask;
+        const std::vector<bool>* recorded = nullptr;
+        if (!g_known && !p(0.25)) {
+            for (size_t j = 0; j < ts.size(); j++) mask.push_back(p(0.5));
+            if (p(0.33)) mask.pop_back();
+            recorded = &mask;
+        }
+        const CTransaction tx = GenBundle(c.h0, ts);
+        const Outcome want = AskEveryCoin(ts, coins, nfs, debited, recorded, shaped);
+        g_askedCount = 0;
+        const Outcome got = RunConnect(c, tx, coins, nfs, debited, recorded);
+        ASSERT_EQ(got, want) << "iteration " << iter;
+        size_t depositCoins = 0;
+        for (const auto& g : ts) if (g.vb < 0) depositCoins += g.vin.size();
+        EXPECT_LE(g_askedCount, depositCoins) << "iteration " << iter;
+        everyCoin += depositCoins;
+        asked += g_askedCount;
+        if (want.fail == "error") errors++;
+        else if (!want.fail.empty()) failures++;
+        for (bool x : want.applied) (x ? applied : skipped)++;
+    }
+    // The run covers each outcome, and the pre-scan saves lookups.
+    EXPECT_GT(failures, 100u);
+    EXPECT_GT(errors, 20u);
+    EXPECT_GT(applied, 500u);
+    EXPECT_GT(skipped, 500u);
+    EXPECT_LT(asked, everyCoin);
+}
+
 TEST(Yugen, LeafValueCapAndGrossCap) {
     // §13.3.6: a leaf deposit that takes B above cap(h) makes the block invalid; §13.3.5: a leaf
     // withdrawal above K is invalid.
