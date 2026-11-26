@@ -745,7 +745,7 @@ Result of `yed_getinfo`:
 
 ```json
 {
-  "rpcversion": 11,
+  "rpcversion": 12,
   "enabled": true,
   "network": "regtest",
   "height": 331,

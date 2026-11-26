@@ -527,6 +527,18 @@ BOOST_AUTO_TEST_CASE(spendable_cents_and_mempool_spender)
     PutToken(*index, a, mine, 10000);
     PutToken(*index, b, mine, 2500);
     PutToken(*index, foreign, CScript() << OP_TRUE, 777);         // not this wallet's
+    {
+        // A token the index assigned is an unspent output of the chain: put a and b in the UTXO set too.
+        // CWallet::IsSpent reads a coin the UTXO set no longer holds as spent (block notification lag),
+        // so a token missing from it would read as spent once the wallet holds a spender of it.
+        LOCK(cs_main);
+        for (const COutPoint& o : {a, b}) {
+            CCoinsModifier c = pcoinsTip->ModifyCoins(o.hash);
+            c->nHeight = 1;
+            c->vout.resize(o.n + 1);
+            c->vout[o.n] = CTxOut(TOKEN_VALUE, mine);
+        }
+    }
     auto cents = [&]() {
         LOCK2(cs_main, wallet->cs_wallet);
         LOCK(mempool.cs);              // lock order (N25), as yed_getbalance: IsSpent reads the mempool
@@ -565,6 +577,41 @@ BOOST_AUTO_TEST_CASE(spendable_cents_and_mempool_spender)
     }
     mempool.clear();
     BOOST_CHECK(cents() == std::make_pair((int64_t)12500, (int64_t)12500));
+}
+
+// CWallet::IsSpent's block-notification-lag rule (a coin the UTXO set no longer holds is spent) does not hide an
+// unconfirmed received coin: one created by a mempool transaction, whose wallet spender was refused, stays unspent.
+BOOST_AUTO_TEST_CASE(unconfirmed_coin_with_refused_spender_is_unspent)
+{
+    const CScript mine = OwnScript(wallet);
+    CMutableTransaction recv;
+    recv.vin.push_back(CTxIn(Out(0x71, 0)));
+    recv.vout.push_back(CTxOut(5000, mine));
+    const CTransaction rtx(recv);
+    CMutableTransaction spend;
+    spend.vin.push_back(CTxIn(COutPoint(rtx.GetHash(), 0)));
+    spend.vout.push_back(CTxOut(4000, CScript() << OP_TRUE));
+    const CTransaction stx(spend);
+    TestMemPoolEntryHelper entry;
+    mempool.addUnchecked(rtx.GetHash(), entry.FromTx(recv));    // received, unconfirmed
+    {
+        LOCK2(cs_main, wallet->cs_wallet);
+        wallet->LoadWalletTx(CWalletTx(wallet, rtx));
+        wallet->LoadWalletTx(CWalletTx(wallet, stx));               // the spender: neither mined nor in the mempool
+    }
+    auto spent = [&]() {
+        LOCK2(cs_main, wallet->cs_wallet);
+        LOCK(mempool.cs);
+        return wallet->IsSpent(rtx.GetHash(), 0, std::nullopt);
+    };
+    BOOST_CHECK(!spent());
+    // The spender enters the mempool: spent.
+    mempool.addUnchecked(stx.GetHash(), entry.FromTx(spend));
+    BOOST_CHECK(spent());
+    // Both leave the mempool and the coin is not in the UTXO set (as when a block mined both and the wallet
+    // has not been notified yet): the lag rule reads it as spent.
+    mempool.clear();
+    BOOST_CHECK(spent());
 }
 
 // N3 (cf. DigiByte v9.26.7 38895edb): the carrier record is on disk before the commit runs, is dropped when the commit

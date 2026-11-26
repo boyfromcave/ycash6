@@ -139,7 +139,9 @@ BOOST_AUTO_TEST_CASE(vault_upgrade_info)
     // 6.20.0: after NU6.2 and the testnet shadow fork's upgrade (docs/plans/yellowback-testnet-shadow-fork-plan.md)
     BOOST_CHECK(Consensus::UPGRADE_SHADOW == Consensus::UPGRADE_NU6_2 + 1);
     BOOST_CHECK(Consensus::UPGRADE_VAULT == Consensus::UPGRADE_SHADOW + 1);
-    BOOST_CHECK(Consensus::UPGRADE_ZFUTURE == Consensus::UPGRADE_VAULT + 1);
+    // Yugen clone: UPGRADE_YUGEN sits between Vault and ZFUTURE.
+    BOOST_CHECK(Consensus::UPGRADE_YUGEN == Consensus::UPGRADE_VAULT + 1);
+    BOOST_CHECK(Consensus::UPGRADE_ZFUTURE == Consensus::UPGRADE_YUGEN + 1);
     BOOST_CHECK(IsConsensusBranchId(VAULT_BRANCH_ID));
     // 6.20.0 keeps Equihash in NetworkUpgradeInfo and walks back to the last override: Vault
     // has none, so it inherits the Ycash upgrade's (192, 7), the epoch before it; regtest keeps

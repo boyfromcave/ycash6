@@ -2,6 +2,7 @@
 
 #include "chainparams.h"
 #include "consensus/upgrades.h"
+#include "primitives/transaction.h"
 
 #include <optional>
 
@@ -199,4 +200,30 @@ TEST_F(UpgradesTest, NextActivationHeight) {
     EXPECT_EQ(NextActivationHeight(nActivationHeight, params), std::nullopt);
     EXPECT_EQ(NextActivationHeight(nActivationHeight + 1, params), std::nullopt);
     EXPECT_EQ(NextActivationHeight(1000000, params), std::nullopt);
+}
+
+// Yugen (doc/yugen-node.md, activation): branch id 0x59474e30 after Vault, no height on mainnet or
+// any testnet profile, distinct from every other branch id and from Zcash NU7's 0x77190ad9.
+TEST(YugenUpgrade, BranchIdAndNoPublicHeight) {
+    EXPECT_EQ(NetworkUpgradeInfo[Consensus::UPGRADE_YUGEN].nBranchId, 0x59474e30u);
+    EXPECT_EQ(Consensus::UPGRADE_YUGEN, Consensus::UPGRADE_VAULT + 1);
+    for (int idx = Consensus::BASE_SPROUT; idx < Consensus::MAX_NETWORK_UPGRADES; idx++) {
+        if (idx != Consensus::UPGRADE_YUGEN) {
+            EXPECT_NE(NetworkUpgradeInfo[idx].nBranchId, 0x59474e30u);
+        }
+    }
+    EXPECT_NE(0x59474e30u, 0x77190ad9u);
+    for (auto net : {CBaseChainParams::MAIN, CBaseChainParams::TESTNET, CBaseChainParams::REGTEST}) {
+        SelectParams(net);
+        const auto& params = Params().GetConsensus();
+        EXPECT_EQ(params.vUpgrades[Consensus::UPGRADE_YUGEN].nActivationHeight,
+                  Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT) << net;
+        EXPECT_EQ(NetworkUpgradeState(5000000, params, Consensus::UPGRADE_YUGEN), UPGRADE_DISABLED) << net;
+    }
+    // Previous epoch of Yugen is Vault's.
+    SelectParams(CBaseChainParams::REGTEST);
+    EXPECT_EQ(PrevEpochBranchId(0x59474e30, Params().GetConsensus()), 0x6d5b7a31u);
+    EXPECT_NE(YUGEN_VERSION_GROUP_ID, SAPLING_VERSION_GROUP_ID);
+    EXPECT_NE(YUGEN_VERSION_GROUP_ID, ZIP225_VERSION_GROUP_ID);
+    EXPECT_NE(YUGEN_VERSION_GROUP_ID, 0xD884B698u);   // Zcash v6 (zakura-chain)
 }

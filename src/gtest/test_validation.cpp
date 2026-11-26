@@ -768,3 +768,37 @@ TEST(Validation, BanOnPoolValueOutOfRange) {
     EnsureUnreferencedAsKeyOfMapBlocksUnlinked(&fakeIndex1);
     EnsureUnreferencedAsKeyOfMapBlocksUnlinked(&fakeIndex2);
 }
+
+// ResetBodyState clears the header-derived commitment field; RestoreHeaderCommitment (called after
+// it in ResetBodyStateForSubtree) puts it back as AddToBlockIndex set it.
+TEST(Validation, ResetBodyStateKeepsHeaderCommitment) {
+    SelectParams(CBaseChainParams::REGTEST);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_OVERWINTER, 1);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_SAPLING, 1);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_BLOSSOM, 1);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_HEARTWOOD, 5);
+    const Consensus::Params& cp = Params().GetConsensus();
+    const uint256 root = uint256S("1234");
+
+    for (int height : {3, 10}) {
+        CBlockIndex index;
+        index.nHeight = height;
+        index.nStatus = BLOCK_VALID_CONSENSUS | BLOCK_HAVE_DATA;
+        index.hashBlockCommitments = root;
+        if (height < 5) index.hashFinalSaplingRoot = root; else index.hashChainHistoryRoot = root;
+
+        index.ResetBodyState();
+        RestoreHeaderCommitment(&index, cp);
+
+        if (height < 5) {
+            EXPECT_EQ(index.hashFinalSaplingRoot, root);
+        } else {
+            EXPECT_EQ(index.hashChainHistoryRoot, root);
+        }
+    }
+
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_HEARTWOOD, Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_BLOSSOM, Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_SAPLING, Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);
+    UpdateNetworkUpgradeParameters(Consensus::UPGRADE_OVERWINTER, Consensus::NetworkUpgrade::NO_ACTIVATION_HEIGHT);
+}

@@ -140,6 +140,7 @@ BASE_SCRIPTS= [
     'vault_dos.py',
     # An SLH-DSA spend that arrives before its parent is parked as an orphan (audit 07/F-6).
     'vault_pq_relay.py',
+    'relay_parent_first.py',
     # The node wallet's post-quantum keys (quantum plan Q5): vault_getnewowner, default PQ owners,
     # owner spends (selectors 2 / 3) at size-priced fees, TX_PQPKH coins, dump/import, encryption.
     'vault_pq_wallet.py',
@@ -203,6 +204,8 @@ BASE_SCRIPTS= [
     'wallet_persistence.py',
     'wallet_listnotes.py',
     'wallet_listunspent.py',
+    'wallet_spent_notify_lag.py',
+    'yugen_wallet_stock.py',
     'wallet_golden_5_6_0.py',
     'wallet_tarnished_5_6_0.py',
     # vv Tests less than 60s vv
@@ -317,6 +320,21 @@ ZMQ_SCRIPTS = [
     "zmq_concurrent_test.py"]
 
 EXTENDED_SCRIPTS = [
+    # Yugen (doc/yugen-node.md): need the helpers built in src/ (make). The proving ones are slow and
+    # need several GB of memory, so they run in the extended (nightly) tier; spend_matrix.py runs its
+    # four parts there through SPEND_MATRIX_PART (qa/yugen/run-spend-matrix.sh locally).
+    'yugen_activation.py',
+    'yugen_leaf.py',
+    'yugen_strip.py',
+    'yugen_turnstile.py',
+    'yugen_bundle.py',
+    'yugen_bundle_vb.py',
+    'yugen_bundle_relay.py',
+    'yugen_bundle_supersede.py',
+    'yugen_wallet_encrypted.py',
+    'yugen_wallet_rescan.py',
+    'yugen_wallet.py',
+    'spend_matrix.py',
     # Needs a release build of contrib/yellowback/attest (Rust); SKIPs without one.
     'yellowback_attest_agent.py',
     # The cancel-limit design's safety brake automated (CAN-2 + C4b, owner 2026-10-13): four agents cancel a
@@ -422,6 +440,13 @@ def main():
         test_list = [t for t in ALL_SCRIPTS if
                 (t in tests or re.sub(".py$", "", t) in tests)]
 
+        # A named script that is in no list is an error, never a silent pass (a run that names
+        # only unknown scripts used to exit 0 with "No valid test scripts specified").
+        known = set(ALL_SCRIPTS) | {re.sub(".py$", "", t) for t in ALL_SCRIPTS}
+        unknown = [t for t in tests if t not in known and not t.startswith('-')]
+        if unknown:
+            print("Unknown test scripts (not in any list of rpc-tests.py): " + ", ".join(unknown))
+            sys.exit(1)
         print("Running individually selected tests: ")
         for t in test_list:
             print("\t" + t)
@@ -446,7 +471,7 @@ def main():
     if not test_list:
         print("No valid test scripts specified. Check that your test is in one "
               "of the test lists in rpc-tests.py, or run rpc-tests.py with no arguments to run all tests")
-        sys.exit(0)
+        sys.exit(1)
 
     if args.help:
         # Print help for rpc-tests.py, then print help of the first script and exit.

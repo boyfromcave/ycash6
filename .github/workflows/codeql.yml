@@ -15,7 +15,7 @@ name: codeql
 #   never fails on an alert; code scanning's own PR check shows alerts a PR introduces.
 on:
   push:
-    branches: ['upgrade/vault']
+    branches: ['upgrade/vault', 'upgrade/yugen']
   pull_request:
   schedule:
     - cron: '41 4 * * 1'

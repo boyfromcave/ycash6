@@ -51,6 +51,7 @@ ycash_gtest_SOURCES = \
 	gtest/test_transaction_builder.h \
 	gtest/test_txid.cpp \
 	gtest/test_upgrades.cpp \
+	gtest/test_yugen.cpp \
 	gtest/test_util_string.cpp \
 	gtest/test_validation.cpp \
 	gtest/test_valuepools.cpp \

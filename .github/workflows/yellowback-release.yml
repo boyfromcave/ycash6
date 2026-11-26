@@ -26,7 +26,7 @@
 #   push of a tag v*            build, smoke-test, sign, create a draft release (a prerelease when
 #                               the version has -rc/-beta).
 #                               The tag must equal configure.ac's version, the version must be the
-#                               line's (6.21.x harden, 6.22.x upgrade; O-7), and the release rules of
+#                               line's (6.21.x harden, 6.22.x upgrade, 6.23.x Yugen; O-7), and the release rules of
 #                               the stage the version names must hold (qa/yellowback-release-heights.sh
 #                               --release-version; testnet plan §5.1: a beta needs no release
 #                               parameters but, from 6.22.0-beta3 on, the fast testnet's YDF mandate
@@ -138,10 +138,11 @@ jobs:
             echo "tag ${GITHUB_REF_NAME} != configure.ac version v$version"; exit 1
           fi
           # One release line per node line (upgrade plan O-7): the harden line (no src/vault/)
-          # releases 6.21.x, the network-upgrade line (src/vault/ present) 6.22.x. A tag on the
-          # wrong line's version is refused, and so is a strict proving run's; a proving run with
-          # strict=false only warns.
-          if [ -d src/vault ]; then line=upgrade; want=6.22; else line=harden; want=6.21; fi
+          # releases 6.21.x, the network-upgrade line (src/vault/ present) 6.22.x, the Yugen line
+          # (src/yugen/ present, upgrade/yugen) 6.23.x. A tag on the wrong line's version is refused,
+          # and so is a strict proving run's; a proving run with strict=false only warns.
+          if [ -d src/yugen ]; then line=yugen; want=6.23
+          elif [ -d src/vault ]; then line=upgrade; want=6.22; else line=harden; want=6.21; fi
           if [ "$maj.$min" != "$want" ]; then
             msg="the $line line releases $want.x, but configure.ac says $maj.$min.$rev"
             if [ "$STRICT" = true ]; then echo "$msg"; exit 1; fi
@@ -203,8 +204,8 @@ jobs:
             qa/yellowback-release-heights.sh --release-version "$VERSION" --other-json "$RUNNER_TEMP/vault-params-other.json"
           else
             # A proving run with strict=false: the version's own stage when it renders as a 6.22
-            # release, else final; warnings only.
-            relver=(); python3 qa/yellowback-vault-params.py stage "$VERSION" | grep -q '^6\.22 ' && relver=(--release-version "$VERSION")
+            # (or, on the Yugen line, 6.23) release, else final; warnings only.
+            relver=(); python3 qa/yellowback-vault-params.py stage "$VERSION" | grep -q '^6\.2[23] ' && relver=(--release-version "$VERSION")
             if git fetch --depth 1 "$url" "+refs/heads/upgrade/vault:refs/remotes/ycash-dd/upgrade-vault"; then
               python3 qa/yellowback-vault-params.py extract --git-ref refs/remotes/ycash-dd/upgrade-vault > "$RUNNER_TEMP/vault-params-other.json"
               qa/yellowback-release-heights.sh --warn "${relver[@]}" --other-json "$RUNNER_TEMP/vault-params-other.json"
@@ -313,6 +314,15 @@ jobs:
           c=$(ls depends/*/native/bin/cargo | head -1)
           RUSTC="$(dirname "$c")/rustc" "$c" fetch --locked --manifest-path Cargo.toml
 
+      - name: Rust toolchain for the Yugen helpers
+        # The Yugen line (src/yugen/) also builds yugen-leafverify, yugen-sendbuild and yewd-yugen
+        # (src/Makefile.yugen.include) with the toolchain their rust-toolchain.toml names, from the
+        # public repositories at the full commits in contrib/yugen-*/PINS (doc/yugen-release.md).
+        if: hashFiles('src/yugen/leaf.cpp') != ''
+        run: |
+          tc=$(sed -n 's/^channel = "\(.*\)"$/\1/p' contrib/yugen-leafverify/rust-toolchain.toml)
+          rustup toolchain install "$tc" --profile minimal
+
       - name: Number of cores
         id: nproc
         run: echo "count=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu)" >> "$GITHUB_OUTPUT"
@@ -349,6 +359,13 @@ jobs:
             make -C src install-strip DESTDIR="$PWD/stage" bindir=/bin
             ext=; [ "$PLATFORM" = windows ] && ext=.exe
             for b in ycashd ycash-cli ycash-tx ycashd-wallet-tool; do cp "stage/bin/$b$ext" "dist/$PKG/"; done
+          fi
+          # The Yugen line ships its three helpers next to ycashd (ycashd finds them there; without
+          # yewd-yugen a wallet keeps no Yugen account). They are built for the runner's own target
+          # only, so a cross or legacy package of this line is refused rather than shipped without them.
+          if [ -d src/yugen ]; then
+            if [ "$KIND" != native ]; then echo "the Yugen line packages only native builds (the helpers are not cross-built)"; exit 1; fi
+            for b in yugen-leafverify yugen-sendbuild yewd-yugen; do cp "src/$b" "dist/$PKG/"; strip "dist/$PKG/$b"; done
           fi
           cp COPYING "dist/$PKG/"
           ls -l "dist/$PKG"

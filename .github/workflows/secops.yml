@@ -25,7 +25,7 @@ name: secops
 # Triggers: every pull_request, push to upgrade/vault, nightly 03:43 UTC, workflow_dispatch.
 on:
   push:
-    branches: ['upgrade/vault']
+    branches: ['upgrade/vault', 'upgrade/yugen']
   pull_request:
   schedule:
     - cron: '43 3 * * *'

@@ -89,6 +89,7 @@ on:
     branches: &node-line-branches
       - harden/yellowback
       - upgrade/vault
+      - upgrade/yugen
       - upgrade/vault-in-term
       - upgrade/quantum-vaults
       - feature/yellowback
@@ -192,7 +193,7 @@ env:
   SANITIZER_SCRIPTS: yellowback_index
   # The functional scripts the nightly job runs by name, each in its own step (the Rust attest agent, the devnet,
   # a ycash6-stock build, the prune floor). qa/yellowback-audit.sh counts them as run by CI.
-  NIGHTLY_SCRIPTS: yellowback_attest_agent yellowback_cancel_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity yellowback_demo_v6 vault_prune_floor
+  NIGHTLY_SCRIPTS: yellowback_attest_agent yellowback_cancel_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity yellowback_demo_v6 vault_prune_floor yugen_activation yugen_leaf yugen_turnstile yugen_bundle yugen_bundle_vb yugen_bundle_relay yugen_bundle_supersede yugen_wallet_stock wallet_spent_notify_lag relay_parent_first
   # Audit 07/F-11: the files whose change runs the PR legs lockorder-pr and sanitizers-pr (an extended
   # regex over `git diff --name-only` of the PR), and the functional subset lockorder-pr runs (each also
   # in YELLOWBACK_SCRIPTS; the full suite stays in the nightly lockorder job).
@@ -313,8 +314,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # upgrade/vault only (owner, 2026-10-09), not the whole *node-line-branches anchor.
-        branch: [upgrade/vault]
+        # upgrade/vault only (owner, 2026-10-09), not the whole *node-line-branches anchor; upgrade/yugen
+        # joins (decision Y-18, doc/yugen-node.md). Takes effect from the default
+        # branch's copy: upgrade/vault must carry this line for the Yugen nightly to run.
+        branch: [upgrade/vault, upgrade/yugen]
     steps:
       - name: Dispatch this workflow on the branch
         env:
@@ -428,8 +431,9 @@ jobs:
         # output that rpc-tests.py reads (SRCDIR/BUILDDIR are this same workspace path on every
         # runner of this repository, so the shards can use it as is).
         run: |
+          # The Yugen helpers (doc/yugen-node.md "Helper build") ride along on the Yugen line.
           tar czf "$RUNNER_TEMP/node-bin.tgz" src/ycashd src/ycash-cli src/ycash-tx src/test/test_bitcoin \
-            qa/pull-tester/tests_config.ini
+            qa/pull-tester/tests_config.ini $(ls src/yugen-leafverify src/yugen-sendbuild src/yewd-yugen 2>/dev/null)
           ls -l "$RUNNER_TEMP/node-bin.tgz"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         # 30 days outside pull requests: the artifact contract (workspace docs/plans/kogany/
@@ -644,7 +648,7 @@ jobs:
   # upload it as this run's artifact, so every `mixed` job and its "Re-run failed jobs" use the same
   # three binaries (ycashd, koganyd, yewd) for 30 days, whatever the producer's retention.
   koganyd:
-    if: ${{ github.event_name != 'schedule' && vars.KOGANY_MIXED == 'true' && (inputs.tier == 'mixed' || inputs.tier == 'sidecar' || (contains(fromJSON('["push", "all"]'), inputs.tier || 'push') && contains(fromJSON('["vaults/kogany-compat", "upgrade/vault"]'), github.base_ref || github.ref_name))) }}
+    if: ${{ github.event_name != 'schedule' && vars.KOGANY_MIXED == 'true' && (inputs.tier == 'mixed' || inputs.tier == 'sidecar' || (contains(fromJSON('["push", "all"]'), inputs.tier || 'push') && contains(fromJSON('["vaults/kogany-compat", "upgrade/vault", "upgrade/yugen"]'), github.base_ref || github.ref_name))) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     permissions:
@@ -691,7 +695,7 @@ jobs:
 
   # yewd (the parity sidecar, kogany plan §3b) at YEW_COMMIT, as `koganyd` does for kogany.
   yewd:
-    if: ${{ github.event_name != 'schedule' && vars.KOGANY_MIXED == 'true' && (inputs.tier == 'mixed' || (contains(fromJSON('["push", "all"]'), inputs.tier || 'push') && contains(fromJSON('["vaults/kogany-compat", "upgrade/vault"]'), github.base_ref || github.ref_name))) }}
+    if: ${{ github.event_name != 'schedule' && vars.KOGANY_MIXED == 'true' && (inputs.tier == 'mixed' || (contains(fromJSON('["push", "all"]'), inputs.tier || 'push') && contains(fromJSON('["vaults/kogany-compat", "upgrade/vault", "upgrade/yugen"]'), github.base_ref || github.ref_name))) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -1266,6 +1270,10 @@ jobs:
           if [ -n "$release" ]; then
             other=upgrade/vault
             if git ls-remote --exit-code --tags "$url" "refs/tags/vault-params/$release" >/dev/null; then other=vault-params/$release src=refs/tags; fi
+          elif [ "$REF" = upgrade/yugen ]; then
+            # decision Y-18: ycash-dd never carries Yugen; the Yugen line compares with its upgrade/vault
+            # (qa/yellowback-audit.sh reverts qa/yugen/cross-line-delta.patch first). Never a record branch.
+            other=upgrade/vault
           elif [ "$REF" != upgrade/vault ] && [ "$other" != "$REF" ]; then
             if [ "$INTERM" = 1 ]; then other=upgrade/vault-in-term; fi
             if [ "$QUANTUM" = 1 ]; then other=upgrade/quantum-vaults; fi
@@ -1978,6 +1986,22 @@ jobs:
         run: |
           mkdir -p "$TMPDIR"
           qa/pull-tester/rpc-tests.py --fail-on-skip -j1 --nozmq --nocleanup vault_prune_floor
+      - name: Yugen (extended)
+        # The Yugen rpc scripts that need only the node and its three helpers (doc/yugen-node.md). The
+        # wallet scripts that also need the mailbox hosts (yugen-hostd, lightwalletd-dd) are run by hand
+        # (qa/yellowback-audit.sh REGISTRATION_EXCLUDE). Only on a tree with src/yugen.
+        if: ${{ !cancelled() && hashFiles('src/yugen/state.h') != '' }}
+        env:
+          TMPDIR: ${{ runner.temp }}/yellowback-tests
+        run: |
+          mkdir -p "$TMPDIR"
+          for h in yugen-leafverify yugen-sendbuild yewd-yugen; do
+            test -x "src/$h" || { echo "src/$h was not built: the Yugen scripts cannot run"; exit 1; }
+          done
+          python3 qa/yugen/test_leafverify.py   # the verifier helper's result contract (exit 0 / 10 / failure)
+          qa/pull-tester/rpc-tests.py --fail-on-skip -j1 --nozmq --nocleanup \
+            yugen_activation yugen_leaf yugen_turnstile yugen_bundle yugen_bundle_vb yugen_bundle_relay yugen_bundle_supersede \
+            yugen_strip yugen_wallet_stock wallet_spent_notify_lag relay_parent_first
       - name: The plan section 4 demonstration (extended)
         # ycash6 plan section 4 / Phase 6: the checklist walked on one eight-node chain with a transcript
         # line per item (yellowback_demo_v6.py, ~10 minutes). Node 1 is the ycash6-stock build from

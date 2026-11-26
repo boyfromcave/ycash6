@@ -32,6 +32,7 @@
 #   --root DIR           tree to read (default: .)
 #   --other-json FILE    extract JSON of the other node line
 #   --release-version    when set, VER must be a 6.22.x release version (the vault release line;
+#                        6.23.x when ROOT has src/yugen/, the Yugen line;
 #                        ycash-dd pairing tags), and its suffix names the stage
 #   --stage              the stage, when no version names it (default: final, the strictest)
 #   exit 0 when the parameters may ship; exit 1 when they may not; exit 2 when the extractor
@@ -68,10 +69,12 @@ if [ -n "$relver" ]; then
     echo "refusing to release: $relver is not a release version (6.22.N, 6.22.N-rcM, 6.22.N-betaM) ($where)"
     exit 1
   fi
+  # The Yugen line (src/yugen/ in the tree read) releases 6.23.x and carries the same Vault rules.
+  if [ -d "$root/src/yugen" ]; then want=6.23; wline="the Yugen release line"; else want=6.22; wline="the vault release line"; fi
   case "$found" in
-    "6.22 "*) ;;
+    "$want "*) ;;
     *)
-      echo "refusing to release: version $relver is not 6.22.x (the vault release line) ($where)"
+      echo "refusing to release: version $relver is not $want.x ($wline) ($where)"
       exit 1
       ;;
   esac

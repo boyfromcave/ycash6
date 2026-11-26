@@ -341,7 +341,18 @@ class ReleaseHeights(unittest.TestCase):
     def test_off_line_version_is_refused_even_when_warning(self):
         code, out = run(["--warn", "--release-version", "6.21.4-rc1"])
         self.assertEqual(code, 1, out)
-        self.assertIn("not 6.22.x", out)
+        # REPO's own line: 6.23.x on the Yugen line (src/yugen/), else 6.22.x.
+        self.assertIn("not 6.23.x" if os.path.isdir(os.path.join(REPO, "src", "yugen")) else "not 6.22.x", out)
+
+    def test_yugen_tree_releases_6_23(self):
+        root = os.path.join(self.tmp, "yugen")
+        write_tree(root)
+        os.makedirs(os.path.join(root, "src", "yugen"))
+        code, out = run(["--warn", "--root", root, "--release-version", "6.22.0-beta4"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("not 6.23.x (the Yugen release line)", out)
+        code, out = run(["--warn", "--root", root, "--release-version", "6.23.0-beta4"])
+        self.assertEqual(code, 0, out)
 
     def rc_tree(self, name, **kw):
         """An rc-shaped tree: mainnet unset, testnet-yb-fast launched and named, the Vault-era protocol."""

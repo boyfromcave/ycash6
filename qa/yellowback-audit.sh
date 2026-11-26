@@ -171,6 +171,10 @@ yellowback_cancel_agent_light   # needs a lightwalletd-dd and a yew-attestor bui
 kogany_mixed_smoke     # run directly (python3 -u), not through rpc-tests.py: the `direct` row of the mixed node group
 kogany_sidecar_smoke   # run directly by the sidecar-rig job ("The test rig smoke")
 kogany_standin         # not a test: the stand-in koganyd for testing the mixed-line harness (KOGANY_BIN)
+yugen_wallet           # needs the two mailbox hosts (yugen-hostd, lightwalletd-dd) beside the helpers; run by hand (doc/yugen-node.md)
+yugen_wallet_encrypted # as yugen_wallet
+yugen_wallet_rescan    # as yugen_wallet
+spend_matrix           # as yugen_wallet; four parts of up to 30 minutes each (qa/yugen/run-spend-matrix.sh)
 kogany_pruned_edge     # by hand only: needs a pruned koganyd (KOGANY_PRUNED=1); kogany pruning assessment KP-2
 EOF_EXCLUDE
 )
@@ -347,6 +351,31 @@ leg_cross_line() {
   # pinned shims, the overlay trees, and every Vault chain parameter (audit W3-P-1, W3-P-2), as the
   # workflow's cross-line step checked them before it called this leg.
   [ -d src/vault ] || { echo "not the upgrade line (no src/vault): nothing to compare"; return 0; }
+  # The Yugen line (src/yugen; decision Y-18, doc/yugen-node.md): ycash6 and kogany agree on every block,
+  # ycash-dd agrees up to Yugen activation and refuses Yugen after it. ycash-dd never carries Yugen,
+  # so the shared overlay is compared as it is without Yugen: in a detached worktree of HEAD,
+  # qa/yugen/cross-line-delta.patch (every Yugen edit to a manifest path, and nothing else; regenerate with `git diff <upgrade/vault> HEAD -- <paths>`) is
+  # reverse-applied, and the unchanged checks below run there against the pins of the vault line.
+  # A Yugen edit to a shared path that the patch does not carry fails as drift, as does a patch that
+  # no longer reverse-applies exactly. kogany has no Yugen until kogany M5 and takes the same rule.
+  if [ -d src/yugen ] && [ -z "${YB_YUGEN_REVERTED:-}" ]; then
+    local wt rc=0
+    wt=$(mktemp -d)/tree
+    git worktree add -q --detach "$wt" HEAD || return 1
+    if ! git -C "$wt" apply --check -R "$PWD/qa/yugen/cross-line-delta.patch" \
+       || ! git -C "$wt" apply -R "$PWD/qa/yugen/cross-line-delta.patch"; then
+      echo "  error: qa/yugen/cross-line-delta.patch does not reverse-apply to HEAD (regenerate it from upgrade/vault)"
+      rc=1
+    else
+      echo "Yugen line: shared paths compared with qa/yugen/cross-line-delta.patch reverted ($(grep -c '^+++ ' qa/yugen/cross-line-delta.patch) files)"
+      # The reverted files are left modified (not committed): the checks read file bytes, and git
+      # ls-files lists the same tracked paths.
+      ( cd "$wt" && YB_YUGEN_REVERTED=1 bash qa/yellowback-audit.sh --only cross-line \
+          $([ "$require_cross_line" = 1 ] && echo --require-cross-line) ycash6-baseline ) || rc=1
+    fi
+    git worktree remove --force "$wt"
+    return $rc
+  fi
   [ -n "${YB_OTHER_LINE_REF:-}" ] || [ -n "${YB_OTHER_LINE_DIR:-}" ] || find_other_line ycash-dd up- up6-
   local fail=0 tmp f
   tmp=$(mktemp -d)

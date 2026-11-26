@@ -1,0 +1,46 @@
+diff --git a/qa/test_yellowback_release_heights.py b/qa/test_yellowback_release_heights.py
+index dbddcd4bb..97f25176a 100644
+--- a/qa/test_yellowback_release_heights.py
++++ b/qa/test_yellowback_release_heights.py
+@@ -341,7 +341,18 @@ class ReleaseHeights(unittest.TestCase):
+     def test_off_line_version_is_refused_even_when_warning(self):
+         code, out = run(["--warn", "--release-version", "6.21.4-rc1"])
+         self.assertEqual(code, 1, out)
+-        self.assertIn("not 6.22.x", out)
++        # REPO's own line: 6.23.x on the Yugen line (src/yugen/), else 6.22.x.
++        self.assertIn("not 6.23.x" if os.path.isdir(os.path.join(REPO, "src", "yugen")) else "not 6.22.x", out)
++
++    def test_yugen_tree_releases_6_23(self):
++        root = os.path.join(self.tmp, "yugen")
++        write_tree(root)
++        os.makedirs(os.path.join(root, "src", "yugen"))
++        code, out = run(["--warn", "--root", root, "--release-version", "6.22.0-beta4"])
++        self.assertEqual(code, 1, out)
++        self.assertIn("not 6.23.x (the Yugen release line)", out)
++        code, out = run(["--warn", "--root", root, "--release-version", "6.23.0-beta4"])
++        self.assertEqual(code, 0, out)
+ 
+     def rc_tree(self, name, **kw):
+         """An rc-shaped tree: mainnet unset, testnet-yb-fast launched and named, the Vault-era protocol."""
+diff --git a/src/vault/node.cpp b/src/vault/node.cpp
+index ed9caf976..e551d11f5 100644
+--- a/src/vault/node.cpp
++++ b/src/vault/node.cpp
+@@ -185,7 +185,7 @@ std::optional<std::string> RecheckPQScripts(const CTransaction& tx, const CCoins
+     if (tx.IsCoinBase() || GetPQSigOpCount(tx, view) == 0) return std::nullopt;
+     // Quantum spec R-A3: OP_CHECKPQSIG is defined over the ZIP-243 sighash of v4 transactions only.
+     // Refuse anything else explicitly rather than compute a ZIP-244 digest from the placeholders below.
+-    if (tx.nVersionGroupId != SAPLING_VERSION_GROUP_ID) return std::string("non-v4 transaction (R-A3)");
++    if (tx.nVersionGroupId != SAPLING_VERSION_GROUP_ID && tx.nVersionGroupId != YUGEN_VERSION_GROUP_ID) return std::string("non-v4 transaction (R-A3)");  // Yugen: ZIP-243 + hashYugen (N-TX)
+     // 6.20.0: the precomputed data takes every input's coin; an unknown coin is a placeholder,
+     // inert because only a v4 (ZIP-243) sighash is computed here (checked above).
+     std::vector<CTxOut> allPrevOutputs;
+@@ -236,7 +236,7 @@ std::optional<std::string> RecheckTemplateScripts(const CTransaction& tx, const
+             // Quantum spec R-A3: the vault templates are defined over the ZIP-243 sighash of v4
+             // transactions only; refuse anything else explicitly rather than compute a ZIP-244
+             // digest from the placeholders below.
+-            if (tx.nVersionGroupId != SAPLING_VERSION_GROUP_ID) return std::string("non-v4 transaction (R-A3)");
++            if (tx.nVersionGroupId != SAPLING_VERSION_GROUP_ID && tx.nVersionGroupId != YUGEN_VERSION_GROUP_ID) return std::string("non-v4 transaction (R-A3)");  // Yugen: ZIP-243 + hashYugen (N-TX)
+             // 6.20.0: the precomputed data takes every input's coin; an unknown coin is a
+             // placeholder, inert because only a v4 (ZIP-243) sighash is computed here.
+             std::vector<CTxOut> allPrevOutputs;
