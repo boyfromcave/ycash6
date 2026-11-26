@@ -476,9 +476,15 @@ Tests: `qa/yugen/test_leafverify.py` (helper contract), helper unit test
   minutes. Only a refusal after a token was taken (the helper's judgement) or a replay of a refused
   copy counts. A helper failure or timeout after the token (`yugen-verifier-failed`: a panic, an exit
   other than 0 and 10, a timeout) counts too: the peer's proof bytes can cause one, so a peer must not
-  have the helper run for free (as it could while such a failure cleared the mark). Only a fault of
-  this node that no transaction bytes cause judged nothing and does not count: the YED module cannot
-  say which coins it tracks (`CoinsAtTip`), or the pool state itself fails. A broken local helper thus
+  have the helper run for free (as it could while such a failure cleared the mark). The node cannot
+  tell such a failure from a helper fault of its own (a pipe, fork or exec failure, a timeout under
+  local load), so those count as judged too. Only a fault before the helper judged nothing and does
+  not count: the YED module cannot say which coins it tracks (`CoinsAtTip`), or the pool state itself
+  fails. A helper failure is remembered in the refusal cache as a refusal is, until the tip changes,
+  so the same bytes replayed by other (Sybil) peers do not run the helper again; a copy with other
+  proofs has another key and is judged on its own. Known trade-off: an attacker who exploits a
+  difference of helper version or hardware (bytes that fail or time out on some nodes only) can have
+  honest relayers of those bytes deferred until the next block, never banned. A broken local helper thus
   backs off honest peers too (a delay, never a ban score); the block path's `HELPER_SAME_BODY_DOS`
   is not mirrored here, since every peer relays the same honest leaves and a broken local helper would
   then score them all. Every refusal after the token is `BodyCorruption::Possible` explicitly (the
@@ -489,9 +495,14 @@ Tests: `qa/yugen/test_leafverify.py` (helper contract), helper unit test
   inside a bundle leaves no coin, so `AlreadyHave` misses it and the two-minute retry fetches it:
   `bad-yugen-nullifier-spent`). Counting those deferred the peer's next real transaction by two
   minutes (spend_matrix `Mempool sync failed`).
-  Tests: `Yugen.PeerVerifyBudgetFairShare`, `Yugen.RefusalBackoffDoubles`, rpc `yugen_stale_relay`
-  (a helper that panics starts the back-off; the same leaf, and a leaf first sent with a flipped proof
-  byte, are then taken from another peer).
+  Tests: `Yugen.PeerVerifyBudgetFairShare`, `Yugen.RefusalBackoffDoubles`,
+  `Yugen.MempoolHelperFailureIsRemembered` (a second peer's copy of failing bytes runs no helper, a copy
+  with other proofs does), `Yugen.MempoolModuleFaultIsNotJudged` (a node-local fault starts no back-off),
+  rpc `yugen_stale_relay` (a helper that panics starts the back-off; the same bytes from another peer
+  are refused until the tip changes, then taken; a leaf first sent with a flipped proof byte keeps no
+  honest copy from another peer out).
+  A malformed `ACCEPT` from the bundle helper is a helper failure (`yugen-verifier-failed`), never an
+  exception.
 - Orphan Yugen transactions (high, relay policy): a leaf whose transparent input names a parent the
   node does not know passed the cheap checks and stopped at the missing input, so it went to the
   orphan pool; `ProcessOrphanTx` later accepts orphans outside any `PeerVerifyScope`, and the helper

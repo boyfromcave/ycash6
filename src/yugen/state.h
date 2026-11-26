@@ -177,8 +177,9 @@ struct PeerVerifyScope {
     // refusal starts the peer's back-off: one refused by the cheap checks (a nullifier spent at the
     // tip, an anchor) cost no verification, and an honest peer sends one whenever it answers a stale
     // request (a leaf confirmed inside a bundle keeps no coin, so AlreadyHave misses it). A helper
-    // failure or timeout after the token counts as a refusal (the peer's proof bytes can cause it); a
-    // node-local fault no transaction bytes cause (the YED module cannot answer, the pool state) does not.
+    // failure or timeout after the token counts as a refusal (the peer's proof bytes can cause it; this
+    // node's own helper faults, a pipe, fork or exec failure or a timeout under load, look the same and
+    // count too); a node-local fault before the helper (the YED module cannot answer, the pool state) does not.
     bool Judged() const;
 };
 // The reject reason prefix of a helper failure or timeout (a state error, never a verdict on a block).

@@ -20,7 +20,9 @@ and B):
 - a confirmed leaf from A is refused, and A's next leaf is taken at once;
 - a leaf whose helper run fails (the helper panics: exit 101) starts A's back-off, as a refusal does:
   the proof bytes are the peer's, so a failure they cause must cost it (A's next leaf is deferred);
-  the same leaf from B is then taken, since its proofs are outside the wtxid (no recentRejects entry);
+  the failure is remembered at this tip, so the same bytes from B do not run the helper again; once
+  the tip changes the same leaf from B is taken, since its proofs are outside the wtxid (no
+  recentRejects entry);
 - a leaf refused by the helper (a proof byte flipped) starts A's back-off, so A's honest copy right
   after it is not judged, and B's honest copy is taken: the bad-proof copy censors nothing;
 - a leaf whose transparent parent node 1 does not know is not kept as an orphan: orphans are accepted
@@ -137,6 +139,8 @@ class YugenStaleRelayTest(BitcoinTestFramework):
         probe.wait_for_verack()
         other.wait_for_verack()
         log_path = os.path.join(self.options.tmpdir, 'node1', 'regtest', 'debug.log')
+        assert self.wait(lambda: len(n1.getpeerinfo()) == 2)
+        other_id = max(p['id'] for p in n1.getpeerinfo())   # B connected last
 
         def deferred(txid, n):
             with open(log_path) as f:
@@ -154,8 +158,13 @@ class YugenStaleRelayTest(BitcoinTestFramework):
         assert_equal([p.get('banscore', 0) for p in peers], [0, 0])
 
         # 2. A helper that panics on A's leaf: A's proof bytes may be the cause, so the failure costs A
-        # the back-off (A's next leaf is deferred). The leaf's wtxid does not cover its proofs, so the
-        # failure keeps no copy out: the same leaf from B is taken.
+        # the back-off (A's next leaf is deferred). The failure is remembered at this tip: the same bytes
+        # from B (a Sybil replay) do not run the helper again. The leaf's wtxid does not cover its
+        # proofs, so the failure keeps no copy out once the tip changes: the same leaf from B is taken.
+        def helper_runs(txid):
+            with open(log_path) as f:
+                return f.read().count('yugen: verify %s:' % txid)
+
         open(self.flag, 'w').close()
         probe.send_message(msg_rawtx(bytes.fromhex(fault_hex)))
         probe.sync_with_ping(timeout=120)
@@ -166,6 +175,17 @@ class YugenStaleRelayTest(BitcoinTestFramework):
         probe.sync_with_ping(timeout=120)
         assert after not in n1.getrawmempool(), 'a helper failure started no back-off'
         assert deferred(after, 1), 'not deferred'
+        runs = helper_runs(fault)
+        assert runs >= 1, runs
+        other.send_message(msg_rawtx(bytes.fromhex(fault_hex)))
+        other.sync_with_ping(timeout=120)
+        t_replay = time.time()
+        assert fault not in n1.getrawmempool()
+        assert_equal(helper_runs(fault), runs)               # the replay ran no helper
+        with open(log_path) as f:
+            assert 'Yugen tx %s from peer=%d refused before at this tip' % (fault, other_id) in f.read()
+        own = n1.generate(1)[0]                              # the tip changes (node 1's own block)
+        time.sleep(max(0, 11 - (time.time() - t_replay)))   # B's back-off from the replay (10 s) runs out
         other.send_message(msg_rawtx(bytes.fromhex(fault_hex)))
         other.sync_with_ping(timeout=120)
         assert fault in n1.getrawmempool(), 'a helper failure on one copy kept the leaf out'
@@ -192,6 +212,7 @@ class YugenStaleRelayTest(BitcoinTestFramework):
         # 4. An orphan leaf: its parent (the deposit's funding) is in a block node 1 has not seen. An
         # honest leaf is too large for the orphan pool anyway, so B (never refused) sends a copy with
         # short proofs, which only the helper refuses.
+        n1.invalidateblock(own)                              # back on node 0's chain
         while (n0.getblockcount() + 1) % 16 == 0:            # the leaf's anchor must be one node 1 has
             n0.generate(1)
         self.feed()

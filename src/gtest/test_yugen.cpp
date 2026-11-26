@@ -618,7 +618,7 @@ struct YugenChain {
                  "root) echo \"ROOT " << std::string(96, 'a') << "\" ;;\n"
                  "regroot) echo " << std::string(96, 'b') << " ;;\n"
                  "verify) [ \"$YUGEN_FAKE_VERIFY\" = fail ] && exit 1; echo ACCEPT ;;\n"
-                 "bundle) echo \"ACCEPT {\\\"records\\\":[],\\\"stmt\\\":\\\"00\\\",\\\"transfers\\\":[$YUGEN_FAKE_TRANSFERS]}\" ;;\n"
+                 "bundle) echo \"ACCEPT {\\\"records\\\":[$YUGEN_FAKE_RECORDS],\\\"stmt\\\":\\\"00\\\",\\\"transfers\\\":[$YUGEN_FAKE_TRANSFERS]}\" ;;\n"
                  "*) exit 1 ;;\n"
                  "esac\n";
         }
@@ -755,6 +755,23 @@ TEST(Yugen, BundleTrialWritesNoProofFile) {
     EXPECT_TRUE(c.Connect(b, true, st)) << st.GetRejectReason();
     EXPECT_EQ(c.Calls("bundle"), 1);
     EXPECT_FALSE(fs::exists(GetDataDir() / "yugen" / "proofs" / (bundle.GetHash().GetHex() + ".bin")));
+}
+
+// A malformed ACCEPT from the bundle helper (a record whose script is not a string) is a helper
+// failure (yugen-verifier-failed), not an exception out of the parser.
+TEST(Yugen, BundleMalformedAcceptIsAHelperFailure) {
+    YugenChain c("accept");
+    ASSERT_TRUE(c.ConnectSeed());
+    setenv("YUGEN_FAKE_RECORDS", "{\"script\":5,\"pay\":1}", 1);
+    CTransaction bundle = AnchoredBundle(c.h0);
+    CBlock b = YugenChain::Block({YugenChain::Leaf(6, 7), bundle});
+    b.vYugenProofs.push_back({bundle.GetHash(), {{9, 9}, {9}}});
+    CValidationState st;
+    EXPECT_FALSE(c.Connect(b, true, st));
+    unsetenv("YUGEN_FAKE_RECORDS");
+    EXPECT_EQ(c.Calls("bundle"), 1);
+    EXPECT_TRUE(st.CorruptionPossible());                  // never a verdict
+    EXPECT_EQ(st.GetRejectReason().rfind(yugen::VERIFIER_FAILED, 0), 0u) << st.GetRejectReason();
 }
 
 TEST(Yugen, BundleCacheKeyHasVerifierOptions) {
@@ -1450,6 +1467,87 @@ TEST(Yugen, BundlePreScanStopsAtFailingTransfer) {
     EXPECT_EQ(ok.fail, "");
     EXPECT_EQ(ok.applied, std::vector<bool>({true, true}));
     EXPECT_EQ(g_askedCount, 1u);
+}
+
+// CheckMempoolTx at the test chain's tip (block 32, so a candidate for block 33), with pcoinsTip over
+// `coins` and an unlimited peer budget.
+namespace {
+struct MempoolAtTip {
+    CBlockIndex next;
+    uint256 nextHash = uint256S("77");
+    CCoinsViewDummy base;
+    CCoinsViewCache view{&base};
+    CCoinsViewCache* saved = pcoinsTip;
+    CTxMemPool pool{CFeeRate(0)};
+    MempoolAtTip(YugenChain& c, const std::vector<GenCoin>& coins)
+    {
+        for (const auto& k : coins) PutCoin(view, k);
+        pcoinsTip = &view;
+        mapArgs["-yugenpeerverifyrate"] = "0";
+        next.nHeight = YugenChain::ACT + 1; next.pprev = &c.i1; next.phashBlock = &nextHash;
+        yugen::DisconnectBlock(&next);                       // the mempool checks take its parent, block 32
+    }
+    ~MempoolAtTip() { yugen::EndDisconnect(); pcoinsTip = saved; mapArgs.erase("-yugenpeerverifyrate"); }
+    // Peer `peer`'s candidate: whether it was accepted, its reason, and whether the peer was judged.
+    std::tuple<bool, std::string, bool> Check(const CTransaction& tx, int64_t peer)
+    {
+        yugen::PeerVerifyScope scope(peer);
+        CValidationState st;
+        bool ok = yugen::CheckMempoolTx(tx, pool, Params(), st);
+        return {ok, st.GetRejectReason(), scope.Judged()};
+    }
+};
+} // namespace
+
+// A helper failure on a mempool candidate (the peer's proof bytes can cause one) starts the peer's
+// back-off and is remembered at this tip: the same bytes from a second peer do not run the helper
+// again; the same leaf with other proofs (an honest copy) has another key and is judged on its own.
+TEST(Yugen, MempoolHelperFailureIsRemembered) {
+    YugenChain c("fail");
+    ASSERT_TRUE(c.ConnectSeed());
+    MempoolAtTip m(c, {});
+    const CTransaction leaf = YugenChain::Leaf(11, 12);
+    auto [ok1, why1, judged1] = m.Check(leaf, 1);
+    EXPECT_FALSE(ok1);
+    EXPECT_EQ(why1.rfind(yugen::VERIFIER_FAILED, 0), 0u) << why1;
+    EXPECT_TRUE(judged1);
+    const int runs = c.Calls("verify");
+    EXPECT_GE(runs, 1);
+    EXPECT_TRUE(yugen::KnownRefused(leaf));                 // main.cpp backs a replaying peer off
+    auto [ok2, why2, judged2] = m.Check(leaf, 2);
+    EXPECT_FALSE(ok2);
+    EXPECT_EQ(why2, why1);
+    EXPECT_FALSE(judged2);                                   // the cache answered: no token, no helper
+    EXPECT_EQ(c.Calls("verify"), runs);
+    CMutableTransaction other(leaf);
+    other.yugen.proofB.push_back(3);
+    const CTransaction copy(other);
+    ASSERT_EQ(copy.GetHash(), leaf.GetHash());
+    EXPECT_FALSE(yugen::KnownRefused(copy));
+    auto [ok3, why3, judged3] = m.Check(copy, 2);
+    EXPECT_FALSE(ok3);
+    EXPECT_TRUE(judged3);
+    EXPECT_GT(c.Calls("verify"), runs);                      // the other copy reached the helper
+}
+
+// A node-local fault before the helper (the YED module cannot say which coins it tracks) judged nothing:
+// it starts no back-off for the peer and is not remembered.
+TEST(Yugen, MempoolModuleFaultIsNotJudged) {
+    YugenChain c("accept");
+    ASSERT_TRUE(c.ConnectSeed());
+    const GenCoin a{COutPoint(uint256S("a9"), 0), CoinState::P2PKH, 2000000};
+    MempoolAtTip m(c, {a});
+    ModuleHook hook(false);
+    const GenTransfer dep{-1500000, 21, 22, {{500000, PayTo(1)}}, {a.p}};
+    const CTransaction bundle = GenBundle(c.h0, {dep});
+    yugen::PutProofs(bundle.GetHash(), {{1, 2, 3}, {4, 5}});
+    auto [ok, why, judged] = m.Check(bundle, 1);
+    EXPECT_FALSE(ok);
+    EXPECT_EQ(why.rfind("yugen-module-unknown", 0), 0u) << why;
+    EXPECT_EQ(g_askedCount, 1u);
+    EXPECT_FALSE(judged);
+    EXPECT_FALSE(yugen::KnownRefused(bundle));
+    EXPECT_EQ(c.Calls("bundle"), 0);
 }
 
 TEST(Yugen, BundleDepositSpentNullifier) {

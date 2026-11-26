@@ -742,18 +742,27 @@ static HelperResult BundleHelper(const CTransaction& tx, const std::vector<std::
         hr.kind = HelperResult::FAIL;
         return hr;
     }
-    pay.records.clear();
-    for (const auto& r : v["records"].getValues())
-        pay.records.emplace_back(ParseHex(r["script"].get_str()), (uint64_t)r["pay"].get_int64());
-    if (v["stmt"].isStr()) pay.stmt = v["stmt"].get_str();
-    pay.hashes.clear();
-    if (v["transfers"].isArray())
-        for (const auto& t : v["transfers"].getValues()) {
-            const auto th = t["transfer_hash"].isStr() ? ParseHex(t["transfer_hash"].get_str()) : std::vector<unsigned char>();
-            if (th.size() != 48) { pay.hashes.clear(); break; }
-            pay.hashes.emplace_back();
-            std::copy(th.begin(), th.end(), pay.hashes.back().begin());
-        }
+    // A malformed ACCEPT (a record without a string script or an integer pay) is a helper failure, as
+    // a bad exit is: the caller's fail(), never an exception out of the connect or the mempool check.
+    try {
+        pay.records.clear();
+        for (const auto& r : v["records"].getValues())
+            pay.records.emplace_back(ParseHex(r["script"].get_str()), (uint64_t)r["pay"].get_int64());
+        if (v["stmt"].isStr()) pay.stmt = v["stmt"].get_str();
+        pay.hashes.clear();
+        if (v["transfers"].isArray())
+            for (const auto& t : v["transfers"].getValues()) {
+                const auto th = t["transfer_hash"].isStr() ? ParseHex(t["transfer_hash"].get_str()) : std::vector<unsigned char>();
+                if (th.size() != 48) { pay.hashes.clear(); break; }
+                pay.hashes.emplace_back();
+                std::copy(th.begin(), th.end(), pay.hashes.back().begin());
+            }
+    } catch (const std::exception& e) {
+        pay = Pay();
+        hr.kind = HelperResult::FAIL;
+        hr.line = std::string("malformed ACCEPT: ") + e.what();
+        return hr;
+    }
     g_bundleOk.put(key, pay);
     return hr;
 }
@@ -1436,7 +1445,7 @@ int64_t RefusalBackoff(int& refusals, int64_t& lastRefusal, int64_t nowMicros)
 // Every refusal here is DoS 0 (review M-3): each depends on the state at the tip (anchors, the
 // nullifier set, the turnstile, and the proofs, which verify against the anchor's root and block
 // hash), which a peer on another tip need not share; the structure was judged (DoS 100) before. A
-// helper failure is DoS 0 too, and is not remembered (review H-1); a refusal is (item 4).
+// helper failure is DoS 0 too (review H-1); it is remembered at this tip as a refusal is (item 4).
 bool CheckMempoolTx(const CTransaction& tx, const CTxMemPool& pool, const CChainParams& params,
                     CValidationState& state)
 {
@@ -1466,20 +1475,27 @@ bool CheckMempoolTx(const CTransaction& tx, const CTxMemPool& pool, const CChain
     // bundle's come from the proof store), so it is BodyCorruption::Possible: main.cpp keeps its wtxid
     // out of recentRejects, and a copy with other proofs, from any peer, is judged on its own.
     // The back-off (PeerVerifyScope::Judged): a helper failure or timeout counts as a refusal does, since
-    // the peer's proof bytes can make the helper panic, exit badly or run out of time. Only a fault of
-    // this node that no transaction bytes cause judged nothing: the YED module unable to say which coins
-    // it tracks (CoinsAtTip), or the pool state itself (Trial's other IsError()).
+    // the peer's proof bytes can make the helper panic, exit badly or run out of time. This node cannot
+    // tell those from its own helper faults (a pipe, fork or exec failure, a timeout under local load,
+    // a malformed answer), so they count as judged too. Only a fault that does not reach the helper
+    // judged nothing: the YED module unable to say which coins it tracks (CoinsAtTip), or the pool
+    // state itself (Trial's other IsError()).
+    // A helper failure is remembered in the refusal cache as a refusal is, until the tip changes: the
+    // same bytes (proofs included) replayed by other peers do not run the helper again, and a copy
+    // with other proofs has another key. Known trade-off: an attacker who exploits a difference of
+    // helper version or hardware (a copy that fails or times out here only) can have honest relayers
+    // of those bytes deferred, never banned (DoS 0), until the next block.
     if (!CoinsAtTip({tx}, tip, params, coins, inner)) {
         if (inner.IsError()) g_scopeJudged = false;
         return state.DoS(0, false, REJECT_INVALID, inner.GetRejectReason(), BodyCorruption::Possible);
     }
     if (!Trial(one, tip->nHeight + 1, tip, params, inner, nullptr, coins, &nfs)) {
-        if (!inner.IsError()) g_refused.put(key, inner.GetRejectReason());
-        else if (inner.GetRejectReason().rfind(VERIFIER_FAILED, 0) != 0) g_scopeJudged = false;
+        if (!inner.IsError() || inner.GetRejectReason().rfind(VERIFIER_FAILED, 0) == 0) g_refused.put(key, inner.GetRejectReason());
+        else g_scopeJudged = false;
         return state.DoS(0, false, REJECT_INVALID, inner.GetRejectReason(), BodyCorruption::Possible);
     }
-    if (tx.IsYugenBundle() && nfs != 2 * tx.GetYugenTransfers().size())
-        return state.DoS(0, false, REJECT_INVALID, "bad-yugen-bundle-skips");   // every transfer must apply in the pool
+    if (tx.IsYugenBundle() && nfs != 2 * tx.GetYugenTransfers().size())   // every transfer must apply in the pool
+        return state.DoS(0, false, REJECT_INVALID, "bad-yugen-bundle-skips", BodyCorruption::Possible);
     return true;
 }
 
