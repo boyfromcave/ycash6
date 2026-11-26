@@ -1462,9 +1462,15 @@ bool CheckMempoolTx(const CTransaction& tx, const CTxMemPool& pool, const CChain
     MempoolTimeout shortTimeout;   // review M-2
     CValidationState inner;
     BundleCoinsMap coins;
-    if (!CoinsAtTip({tx}, tip, params, coins, inner)) return state.DoS(0, false, REJECT_INVALID, inner.GetRejectReason());
+    // A local fault (inner.IsError(): the YED module cannot answer, the helper failed or timed out) is no
+    // judgement of the transaction, so it starts no relay back-off for the peer (PeerVerifyScope::Judged).
+    if (!CoinsAtTip({tx}, tip, params, coins, inner)) {
+        if (inner.IsError()) g_scopeJudged = false;
+        return state.DoS(0, false, REJECT_INVALID, inner.GetRejectReason());
+    }
     if (!Trial(one, tip->nHeight + 1, tip, params, inner, nullptr, coins, &nfs)) {
         if (!inner.IsError()) g_refused.put(key, inner.GetRejectReason());
+        else g_scopeJudged = false;
         return state.DoS(0, false, REJECT_INVALID, inner.GetRejectReason());
     }
     if (tx.IsYugenBundle() && nfs != 2 * tx.GetYugenTransfers().size())

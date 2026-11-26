@@ -176,7 +176,9 @@ struct PeerVerifyScope {
     // Whether a candidate in this scope took a token, so reached the helper's judgement. Only such a
     // refusal starts the peer's back-off: one refused by the cheap checks (a nullifier spent at the
     // tip, an anchor) cost no verification, and an honest peer sends one whenever it answers a stale
-    // request (a leaf confirmed inside a bundle keeps no coin, so AlreadyHave misses it).
+    // request (a leaf confirmed inside a bundle keeps no coin, so AlreadyHave misses it). A local fault
+    // after the token (inner.IsError(): the YED module cannot answer, the helper failed or timed out)
+    // judged nothing either.
     bool Judged() const;
 };
 // The reject reason of a mempool candidate that found no token: not a refusal (main.cpp asks again).

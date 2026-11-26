@@ -17,6 +17,8 @@ The leaves are real deposits made by the Yugen wallet engine (YEWD_YUGEN) with b
 Node 0 builds the chain and the leaves; node 1 is fed blocks by hand and one P2P peer (a probe):
 
 - a confirmed leaf from the probe is refused, and the probe's next leaf is taken at once;
+- a leaf whose helper run fails (a local fault, not a verdict) starts no back-off: the probe's next
+  leaf is taken at once;
 - a guard: a leaf refused by the helper (a proof byte flipped) still starts the back-off, so the
   probe's honest copy right after it is not judged.
 """
@@ -32,7 +34,7 @@ from test_framework.mininode import NetworkThread, NodeConn
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal, p2p_port, rpc_auth_pair, rpc_port, start_nodes
 from tx_expiry_helper import TestNode
-from yugen_bundle import ARGS, WALLET
+from yugen_bundle import ARGS, HELPER, WALLET
 from yugen_strip import PROTO, msg_rawtx
 
 
@@ -43,8 +45,15 @@ class YugenStaleRelayTest(BitcoinTestFramework):
         self.setup_clean_chain = True
 
     def setup_network(self, split=False):
-        # No node links: node 1 hears of transactions from the probe only.
-        self.nodes = start_nodes(2, self.options.tmpdir, [ARGS + ['-debug=mempool']] * 2)
+        # No node links: node 1 hears of transactions from the probe only. Node 1's helper fails its
+        # proof checks while the flag file exists (a local fault, as a crash or a timeout).
+        self.flag = os.path.join(self.options.tmpdir, 'helper-fails')
+        faulty = os.path.join(self.options.tmpdir, 'faulty-helper.sh')
+        with open(faulty, 'w') as f:
+            f.write('#!/bin/sh\ncase "$1" in verify) [ -e "%s" ] && exit 1;; esac\nexec "%s" "$@"\n' % (self.flag, HELPER))
+        os.chmod(faulty, 0o755)
+        args1 = [a for a in ARGS if not a.startswith('-yugenverifier=')] + ['-yugenverifier=' + faulty]
+        self.nodes = start_nodes(2, self.options.tmpdir, [ARGS + ['-debug=mempool'], args1 + ['-debug=mempool']])
         self.is_network_split = False
 
     def wallet(self, *args):
@@ -100,7 +109,7 @@ class YugenStaleRelayTest(BitcoinTestFramework):
         [(stale, stale_hex)] = self.leaves(dep, 1)
         blk = n0.generate(1)[0]
         assert stale in n0.getblock(blk)['tx']
-        (fresh, fresh_hex), (third, third_hex) = self.leaves(dep, 2)
+        (fresh, fresh_hex), (third, third_hex), (fault, fault_hex), (after, after_hex) = self.leaves(dep, 4)
         self.feed()
         assert_equal(n1.getrawmempool(), [])
 
@@ -120,7 +129,17 @@ class YugenStaleRelayTest(BitcoinTestFramework):
         assert_equal(len(peers), 1)
         assert_equal(peers[0].get('banscore', 0), 0)
 
-        # 2. Guard: a leaf the helper refuses (the last proof byte flipped) still starts the back-off.
+        # 2. A helper run that fails is the node's fault, not a verdict: the probe's next leaf is taken.
+        open(self.flag, 'w').close()
+        probe.send_message(msg_rawtx(bytes.fromhex(fault_hex)))
+        probe.sync_with_ping(timeout=120)
+        assert fault not in n1.getrawmempool()
+        os.remove(self.flag)
+        probe.send_message(msg_rawtx(bytes.fromhex(after_hex)))
+        probe.sync_with_ping(timeout=120)
+        assert after in n1.getrawmempool(), 'the leaf after a helper fault was deferred (back-off)'
+
+        # 3. Guard: a leaf the helper refuses (the last proof byte flipped) still starts the back-off.
         b = bytearray(bytes.fromhex(third_hex))
         b[-1] ^= 0x01
         probe.send_message(msg_rawtx(bytes(b)))
