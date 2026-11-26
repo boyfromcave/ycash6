@@ -1078,6 +1078,49 @@ TEST(Yugen, BundleVbRecordsConnect) {
         EXPECT_TRUE(outs->IsAvailable(1));
         EXPECT_EQ(undo.vprevout.size(), 1u);
     }
+    {
+        // N-D12 cost: the module is asked only for deposit coins that exist and are otherwise eligible, so a
+        // peer's deposits of missing, immature or same-block outpoints cost no module lookups. The decisions
+        // are unchanged: a missing or same-block coin is skipped, an existing one is asked once and applied.
+        static size_t askedCount;
+        askedCount = 0;
+        yugen::g_moduleTracks = [](const std::vector<COutPoint>& outs, const CBlockIndex*, std::vector<bool>& t) {
+            askedCount += outs.size();
+            t.assign(outs.size(), false);
+            return yugen::ModuleAnswer::KNOWN;
+        };
+        {
+            const CTransaction bundle = vb.Tx(c.h0);
+            CCoinsViewCache view(&base);
+            CTxUndo undo; yugen::BlockCoins bc; CAmount delta = 0; CValidationState st;
+            st.SetMerkleRootChecked(); st.SetBlockCommitmentsChecked();
+            EXPECT_TRUE(run(bundle, view, undo, bc, delta, st)) << st.GetRejectReason();
+            EXPECT_EQ(bc.bundles[bundle.GetHash()].applied, std::vector<bool>({false, true}));
+            EXPECT_EQ(askedCount, 0u);   // no coin: never asked
+        }
+        {
+            const CTransaction bundle = vb.Tx(c.h0);
+            CCoinsViewCache view(&base);
+            withCoin(view, vb.Spk());
+            view.ModifyCoins(vb.coin.hash)->nHeight = YugenChain::ACT + 1;
+            CTxUndo undo; yugen::BlockCoins bc; CAmount delta = 0; CValidationState st;
+            st.SetMerkleRootChecked(); st.SetBlockCommitmentsChecked();
+            EXPECT_TRUE(run(bundle, view, undo, bc, delta, st)) << st.GetRejectReason();
+            EXPECT_EQ(bc.bundles[bundle.GetHash()].applied, std::vector<bool>({false, true}));
+            EXPECT_EQ(askedCount, 0u);   // a coin of the bundle's own block: never asked
+        }
+        {
+            const CTransaction bundle = vb.Tx(c.h0);
+            CCoinsViewCache view(&base);
+            withCoin(view, vb.Spk());
+            CTxUndo undo; yugen::BlockCoins bc; CAmount delta = 0; CValidationState st;
+            st.SetMerkleRootChecked(); st.SetBlockCommitmentsChecked();
+            EXPECT_TRUE(run(bundle, view, undo, bc, delta, st)) << st.GetRejectReason();
+            EXPECT_EQ(bc.bundles[bundle.GetHash()].applied, std::vector<bool>({true, true}));
+            EXPECT_EQ(askedCount, 1u);   // an eligible coin: asked once
+        }
+        yugen::g_moduleTracks = nullptr;
+    }
     auto refused = [&](const CTransaction& bundle, const CScript& spk) {
         CCoinsViewCache view(&base);
         withCoin(view, spk);

@@ -313,10 +313,21 @@ narrowed, not closed. A host does not build a bundle made only of deposits from 
 screens every deposit as confirmed and untracked.
 
 Cost. `TracksAtParent` takes the index lock and reads the tip record once per bundle, then up to four keys
-per deposit input, at the bundle's admission to the pool, per block template and at the block's
-connection; never on the per-tip pool re-check (`StaleInPool`, `RemoveInvalidVaultSpends`). For a
-~53,000-input bundle that is ~212,000 LevelDB reads per evaluation, mostly cached: a known issue for beta4
-(one prefix lookup would cut it).
+per deposit input it is asked about, at the bundle's admission to the pool, per block template and at the
+block's connection; never on the per-tip pool re-check (`StaleInPool`, `RemoveInvalidVaultSpends`). It is
+asked only about the deposits that can reach its test: before the first transfer that fails the bundle
+(B6's `K`, a record output), with unspent nullifiers, and whose every coin exists in the coins view,
+unspent, mature and from an earlier block. Any other deposit is skipped (or never reached) whatever the
+module says, so the decisions are unchanged, and a peer's deposits of outpoints that do not exist cost one
+coins lookup each, not four module lookups (`Yugen.BundleVbRecordsConnect` counts the coins asked). For a
+~53,000-input bundle of real coins that is still ~212,000 LevelDB reads per evaluation, mostly cached: a
+known issue for beta4 (one prefix lookup would cut it).
+
+Re-verification trusts the recorded mask. When the module cannot answer during `VerifyDB` (K6), a deposit
+that every other rule would apply follows the applied mask in the block's undo data. By design this
+cannot detect a wrong module skip: a mask recorded by a node whose module state was wrong is re-read, not
+re-decided, so `verifychain` passes over it; only a rebuild from the chain (`-reindex`) re-decides it.
+The caveat above for regtest nodes without an attestor set stands: they may split from live nodes.
 
 Spec status: both rules are pending a spec proposal for 0.5.5
 (`doc/yugen-spec-proposal-0.5.5-vb-module-coins.md`); the output rule narrows §15.1's "any bytes".

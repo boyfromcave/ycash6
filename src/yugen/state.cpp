@@ -539,21 +539,49 @@ bool ConnectBundleCoins(const CTransaction& tx, CCoinsViewCache& view, CTxUndo& 
     BundleCoins& out = bc.bundles[tx.GetHash()];
     out = BundleCoins();
     out.flags = flags;
-    // N-D12: the module's answer for every deposit coin, asked once (one lock, one tip read). A coin's
-    // status is fixed in the parent's state, so asking for coins S2 later skips anyway costs only lookups.
+    // N-D12: the module's answer for the deposit coins, asked once (one lock, one tip read). Only a deposit
+    // that can reach the module's test below is asked: one before the first transfer that fails the bundle
+    // (B6's K, a record output: pure functions of the transfer), whose nullifiers are unspent and whose every
+    // coin exists, is unspent, mature and older than this block in the view as it stands. The loop only
+    // spends coins and adds nullifiers, so a deposit left out here is skipped (or never reached) below
+    // whatever the module says, and the decisions are those of asking for every coin; a peer's deposits of
+    // missing outpoints cost a coins lookup each, not four module lookups.
+    auto failsBundle = [&](const Transfer& t) {
+        if (t.valueBalance > 0 && (uint64_t)t.valueBalance > K) return true;
+        for (const auto& o : t.vout) {
+            const CScript spk(o.script.begin(), o.script.end());
+            vault::VaultParams vp;
+            vault::IntentParams ip;
+            if (vault::IsActOutput(spk) || vault::MatchVault(spk, vp) != vault::Shape::NONE || vault::MatchIntent(spk, ip) != vault::Shape::NONE)
+                return true;
+        }
+        return false;
+    };
+    const size_t NOT_ASKED = (size_t)-1;
     std::vector<COutPoint> asked;
-    for (const auto& t : ts)
-        if (t.valueBalance < 0) for (const auto& in : t.vin) asked.push_back(Prevout(in));
+    std::vector<size_t> askedAt(ts.size(), NOT_ASKED);   // a deposit's first coin's position in `asked`
+    for (size_t j = 0; j < ts.size(); j++) {
+        const auto& t = ts[j];
+        if (failsBundle(t)) break;
+        if (t.valueBalance >= 0) continue;
+        bool eligible = true;
+        for (const auto& nf : t.nf) if (g_state.nullifiers.count(nf) || bc.nfs.count(nf)) eligible = false;
+        for (size_t k = 0; eligible && k < t.vin.size(); k++) {
+            const COutPoint p = Prevout(t.vin[k]);
+            const CCoins* c = view.AccessCoins(p.hash);
+            if (!c || !c->IsAvailable(p.n) || (c->IsCoinBase() && h - c->nHeight < COINBASE_MATURITY) || c->nHeight >= h) eligible = false;
+        }
+        if (!eligible) continue;
+        askedAt[j] = asked.size();
+        for (const auto& in : t.vin) asked.push_back(Prevout(in));
+    }
     std::vector<bool> tracked(asked.size(), false);
     ModuleAnswer answer = ModuleAnswer::KNOWN;
     if (g_moduleTracks && !asked.empty()) answer = g_moduleTracks(asked, pindex->pprev, tracked);
     if (answer == ModuleAnswer::KNOWN && tracked.size() != asked.size()) answer = ModuleAnswer::UNKNOWN;
-    size_t a = 0;   // the next deposit coin's position in `asked`
     std::vector<CTxInUndo> spent;
     for (size_t j = 0; j < ts.size(); j++) {
         const auto& t = ts[j];
-        const size_t a0 = a;
-        if (t.valueBalance < 0) a += t.vin.size();
         // B6 first: a withdrawal above the window's gross cap K fails the bundle, skipped or not (§13.3.5).
         if (t.valueBalance > 0 && (uint64_t)t.valueBalance > K)
             return state.DoS(100, false, REJECT_INVALID, "bad-yugen-bundle-withdrawal-above-k");
@@ -580,7 +608,7 @@ bool ConnectBundleCoins(const CTransaction& tx, CCoinsViewCache& view, CTxUndo& 
                 const CCoins* c = view.AccessCoins(p.hash);
                 if (!c || !c->IsAvailable(p.n) || (c->IsCoinBase() && h - c->nHeight < COINBASE_MATURITY)) { skip = true; break; }
                 if (c->nHeight >= h) { skip = true; break; }
-                if (answer == ModuleAnswer::KNOWN) { if (tracked[a0 + k]) { skip = true; break; } }
+                if (answer == ModuleAnswer::KNOWN) { if (askedAt[j] != NOT_ASKED && tracked[askedAt[j] + k]) { skip = true; break; } }
                 else moduleAsked = true;
             }
             // The module could not answer: a re-verified active-chain block takes the decision its undo
