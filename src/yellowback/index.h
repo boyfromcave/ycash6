@@ -375,6 +375,14 @@ public:
      * pindex->phashBlock (K5: TestBlockValidity's indexDummy has none).
      */
     ConnectCheck CheckConnect(const CBlock& block, const CBlockIndex* pindex, bool fJustCheck);
+
+    /**
+     * N-D12 (yugen::g_moduleTracks): whether the module tracks `out` (a token, a vault, an intent, a bond) in
+     * its state after `pprev`. False when the index is not at `pprev` -- an empty index, a stopped or unhealthy
+     * one (CheckConnect then fails the connection) or a re-verification of an active-chain block (K6, which the
+     * module does not judge either).
+     */
+    bool TracksAtParent(const COutPoint& out, const CBlockIndex* pprev);
     /** The commit after view.SetBestBlock (never under fJustCheck): same guards; reuses the cache else re-evaluates; one batch; false => a node failure (the caller aborts). */
     bool CommitConnect(const CBlock& block, const CBlockIndex* pindex);
     /** DisconnectBlock's undo (inside `if (updateIndices)`): guard indexTip.blockHash == pindex->GetBlockHash(); false => a node failure. */

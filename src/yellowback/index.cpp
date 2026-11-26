@@ -679,8 +679,6 @@ std::optional<std::string> YellowbackIndex::MempoolCheckInner(const CTransaction
         if (v.has_value() && v->Status() == VaultStatus::ACTIVE) spendsActive = true;
         if (v.has_value() || st.GetToken(in.prevout).has_value() || st.GetIntent(in.prevout).has_value()) relevant = true;
     }
-    for (const COutPoint& prev : YugenRecordInputs(tx))   // N-D12: a bundle's VB record inputs
-        if (st.GetToken(prev) || st.GetVault(prev) || st.GetIntent(prev) || st.GetBondIndex(prev)) relevant = true;
     for (const CTxOut& o : tx.vout) {
         vault::VaultParams vp;
         vault::IntentParams ip;
@@ -711,6 +709,16 @@ std::optional<std::string> YellowbackIndex::MempoolCheckInner(const CTransaction
         return std::string("mempool-expiry");
     }
     return std::nullopt;
+}
+
+bool YellowbackIndex::TracksAtParent(const COutPoint& out, const CBlockIndex* pprev)
+{
+    LOCK(cs_yellowback);
+    if (stopped || !healthy || pprev == nullptr) return false;   // CheckConnect then fails the block's connection
+    State st(*db);
+    const std::optional<TipRecord> tip = st.GetTip();
+    if (!tip.has_value() || tip->height != pprev->nHeight || tip->blockHash != pprev->GetBlockHash()) return false;   // as CheckConnect (K6)
+    return st.GetToken(out).has_value() || st.GetVault(out).has_value() || st.GetIntent(out).has_value() || st.GetBondIndex(out).has_value();
 }
 
 std::optional<std::string> YellowbackIndex::MempoolCheckReason(const CTransaction& tx)

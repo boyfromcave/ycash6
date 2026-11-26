@@ -518,6 +518,8 @@ static unsigned int ConsensusScriptFlags(int h, const Consensus::Params& consens
 
 static bool Ensure(const CBlockIndex* pindex, const CChainParams& params, std::string& err);
 
+bool (*g_moduleTracks)(const COutPoint& out, const CBlockIndex* pprev) = nullptr;
+
 bool ConnectBundleCoins(const CTransaction& tx, CCoinsViewCache& view, CTxUndo& undo, const CBlockIndex* pindex,
                         const CChainParams& params, unsigned int flags, BlockCoins& bc, CAmount& transparentDelta,
                         CValidationState& state)
@@ -554,12 +556,16 @@ bool ConnectBundleCoins(const CTransaction& tx, CCoinsViewCache& view, CTxUndo& 
         // S1: a nullifier spent on chain, earlier in the block or earlier in this bundle.
         bool skip = false;
         for (const auto& nf : t.nf) if (g_state.nullifiers.count(nf) || bc.nfs.count(nf)) skip = true;
-        // S2: a deposit input that is not an unspent output spendable at h (on this line: coinbase maturity).
+        // S2: a deposit input that is not an unspent output spendable at h (on this line: coinbase maturity);
+        // N-D12: or one created in this block, or one the YED module tracks after the parent (a token, a
+        // vault, an intent, a bond: the module reads tx.vin only). A coin of this block is skipped whatever
+        // it is, so the module's state at the parent decides every other coin exactly.
         if (!skip && t.valueBalance < 0)
             for (const auto& in : t.vin) {
                 const COutPoint p = Prevout(in);
                 const CCoins* c = view.AccessCoins(p.hash);
                 if (!c || !c->IsAvailable(p.n) || (c->IsCoinBase() && h - c->nHeight < COINBASE_MATURITY)) { skip = true; break; }
+                if (c->nHeight >= h || (g_moduleTracks && g_moduleTracks(p, pindex->pprev))) { skip = true; break; }
             }
         // S3: a deposit that would take B above cap(h) (§13.3.6), B as the earlier transfers left it.
         if (!skip && t.valueBalance < 0 && g_state.balance - bc.debited - t.TransparentDelta() > (CAmount)cap) skip = true;

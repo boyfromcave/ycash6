@@ -229,7 +229,7 @@ admits (`StaleInPool`, `CreateNewBlock`); the pool refuses a bundle with a skip
 itself. Tests: gtest `Yugen.RatchetAndOutflowCapVectors` (safety.json `ratchet` without a freeze and
 `outflow-caps`), `Yugen.LeafValueCapAndGrossCap`, `Yugen.BundleVbRecordsConnect` (S3 skip, K failure).
 
-## Decision N-D12: a bundle's VB records never touch what the vault primitive or the YED module tracks (review, 2026-11-25)
+## Decision N-D12: a bundle's VB records never touch what the vault primitive or the YED module tracks (review, 2026-11-25; revised 2026-11-26)
 The defect: a bundle's record inputs and outputs (B1a: the bundle transaction has no `vin`/`vout`) are
 spent and created in `ConnectBundleCoins`, but the vault primitive (`vault::ApplyBlock`, `IsVaultRelevant`,
 `TouchesTemplate`) and the YED module (`ProcessTx`) read `tx.vin`/`tx.vout` only. `DepositScriptOk`
@@ -241,33 +241,65 @@ Four-part check. The leaf path does X (spends a token coin as an ordinary input:
 IN-1, and burns the YED; creates V/I/act outputs in `tx.vout`: the primitive and the module judge them)
 in `src/yellowback/state.cpp` `ProcessTxImpl` and `src/vault/state.cpp` using mechanism M (both read the
 transaction's own `vin`/`vout`). The bundle path is Z (records outside `vin`/`vout`), which lacks M. So
-the adaptation W is refusal, not integration: (1) a record input the module tracks (a token, a vault, an
-intent, an attestor bond), applied or skipped, makes the bundle invalid under the module
-(`bad-yellowback-yugen-bundle-input`; `yellowback::YugenRecordInputs`, also in the mempool relevance
-filter); (2) a record output that is an act or V- or I-shaped (`MatchVault`/`MatchIntent` not `NONE`,
-any tag, malformed included) fails the bundle, skipped or not, as B6's `K` does
-(`bad-yugen-bundle-record-output`). Such a coin deposits, and such an output is paid, by a leaf, whose
-outcome is unchanged; as with `DepositScriptOk`'s "any other coin deposits by a leaf transfer". The
-vault primitive's own coins need no input rule: vaults and intents are templates and bonds are P2SH, all
-refused by `DepositScriptOk` already.
+the adaptation W keeps such coins and outputs out of bundles; they go by a leaf, whose outcome is
+unchanged (as `DepositScriptOk`'s "any other coin deposits by a leaf transfer"):
+- **Inputs: a skip (S2), never a failure.** A deposit whose coin was created in the bundle's own block,
+  or which the module tracks in its state after the parent (a token, a vault, an intent, an attestor
+  bond; `YellowbackIndex::TracksAtParent` through `yugen::g_moduleTracks`), is skipped exactly as a
+  missing or immature coin: the record is not applied, its coin stays unspent, its fee follows the
+  existing skip rules, the undo mask records the decision and a replay reads it from there. A skipped
+  record is never checked against the module (§15.5: a skipped deposit is not verified), and the module
+  itself never looks at record inputs.
+- **Outputs: a failure.** A record output that is an act or V- or I-shaped (`MatchVault`/`MatchIntent`
+  not `NONE`, any tag, malformed included) fails the bundle, skipped or not, as B6's `K` does
+  (`bad-yugen-bundle-record-output`).
+The vault primitive's own coins need no input rule: vaults and intents are templates and bonds are
+P2SH, all refused by `DepositScriptOk` already.
 
-Where. Options: (a) everything in `ConnectBundleCoins`; (b) the input rule in the module, the output
-rule in `ConnectBundleCoins`; (c) integrate (feed record inputs to the module and the primitive). Chosen
-(b). The output rule is a pure function of the script, so it sits beside B6 in the bundle path. The
-input rule depends on the module's state at the bundle's place in the block: a token created earlier
-in the same block is not in the index's tip state while `ConnectBundleCoins` runs (the module evaluates
-the block after main.cpp's loop), so (a) would need either a new deposit restriction (coins from earlier
-blocks only) or a second, partial token view; the module's sequential pass has the exact state, in
-`ConnectBlock`, the mempool and the template alike. A token's status is fixed at its creation, so the
-refusal cannot be triggered against a pooled bundle by a later transaction. (c) gives up the smaller
-footprint for nothing a user needs. Reverse if the spec gives VB records a module-visible form.
+Why a skip. The first version (6cf7dc15b) made a tracked record input invalidate the bundle under the
+module and claimed that a later transaction could not trigger it. That was false: a coin's token status
+is fixed once the coin exists, but a bundle may name a coin that does not exist yet. A holder of a
+signed, unbroadcast YED transaction knows its txid; a host bundles a deposit of `(txid, 0)` (harmless
+then: an S2 skip), the YED transaction is broadcast, and every node would refuse the whole bundle,
+losing its proving work. As a skip, the same sequence only skips that one record.
 
-Tier: within the network upgrade (Yugen's activation), the smallest rung: a refusal on the bundle path,
-no new field, no state; it narrows what a valid bundle may be, so it binds only post-activation blocks
-and nothing on chain before Yugen changes. The spec (§15.5, §15.6 B6) should carry the same two rules;
-kogany will need the same rule when it implements VB records (record it in the kogany plan's findings
-log until then). Tests: gtest `Yugen.BundleVbRecordsConnect` (a V-shaped record output, YED and other
-tag), `Yugen.BundleRecordInputTrackedByModule` (a token record input refused; the leaf way burns).
+Why the parent's state and the same-block skip. The coins move in `ConnectBundleCoins`, inside
+main.cpp's transaction loop; the module evaluates the block after it, so its in-order pass cannot
+decide a coin's fate in time. Every coin from an earlier block is decided exactly by the module's state
+after the parent (a token's status is set when its coin is created; a token spent earlier in the block
+is a spent coin, S2 already). Only a coin created in the same block could have become a token at an
+earlier position, and the same-block skip covers it without the module's in-block state (stricter than
+needed; the pool already takes only confirmed deposit coins). The block connect, the template's and the
+pool's dry runs (`CoinsAtTip`, both at the tip) and the replay (the undo mask) therefore decide alike.
+`TracksAtParent` answers false when the index is not at the parent: empty, stopped or unhealthy (then
+`CheckConnect` fails the connection anyway) or re-verifying an active-chain block (K6, where the module
+does not judge the block either; a `-checklevel=4` re-verification may then apply a deposit the original
+connection skipped, in its throwaway view only).
+
+Why a failure for outputs, and that it is not griefable. Record outputs are bytes the bundle author
+writes at build time, and the test is a pure function of the script (no chain state, no height), so no
+later transaction can change the verdict; a host checks its own bundles before proving.
+
+Host policy (yugen-bundler, any bundling host): accept only deposit coins that are confirmed and that
+the module does not track at the tip (the pool refuses any bundle with a skip,
+`bad-yugen-bundle-skips`); a deposit voided later by a YED transaction is then a skip, not a loss of
+the bundle.
+
+Cost. `TracksAtParent` takes the index lock and reads the tip record and up to four keys per deposit
+input, at the bundle's admission to the pool, per block template and at the block's connection; it runs
+only for inputs that pass the rest of S2 and never on the per-tip pool re-check (`StaleInPool`,
+`RemoveInvalidVaultSpends`). For a ~53,000-input bundle that is ~265,000 LevelDB reads per evaluation,
+mostly cached: a known issue for beta4 (one tip read per call and one prefix lookup would cut it).
+
+Spec status: both rules are pending a spec proposal for 0.5.5
+(`doc/yugen-spec-proposal-0.5.5-vb-module-coins.md`); the output rule narrows §15.1's "any bytes".
+
+Tier: within the network upgrade (Yugen's activation), the smallest rung: a skip and a refusal on the
+bundle path, no new field, no new state; both bind only post-activation blocks. kogany will need the
+same rules when it implements VB records (record it in the kogany plan's findings log until then).
+Tests: gtest `Yugen.BundleVbRecordsConnect` (a tracked coin and a same-block coin skipped; a V-shaped
+record output, YED and other tag, refused), `Yugen.BundleRecordInputTrackedByModule` (the module does
+not refuse the bundle; the leaf way burns).
 
 ## Review fixes (C-1, P-1, 2026-11-26)
 - C-1: `DecodeRecord` found a repeated deposit input by scanning the record's earlier inputs, quadratic

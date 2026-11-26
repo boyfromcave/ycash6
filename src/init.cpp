@@ -2541,6 +2541,10 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         yellowback::g_yellowback = new yellowback::YellowbackIndex(yellowbackParams, GetDataDir() / "yellowback", 1 << 22, GetBoolArg("-reindex-yellowback", false));
         // the primitive's liveness hook verifies through the index's signature cache (focused review; never deleted)
         vault::SetModuleCache(static_cast<yellowback::SigCache*>(yellowback::g_yellowback->GetSigCache()));
+        // N-D12: a bundle skips a deposit of a coin the module tracks (yugen::ConnectBundleCoins, S2)
+        yugen::g_moduleTracks = [](const COutPoint& out, const CBlockIndex* pprev) {
+            return yellowback::g_yellowback != nullptr && yellowback::g_yellowback->TracksAtParent(out, pprev);
+        };
         {
             // MINER-1..3, L6 (validated in step 3).
             KeyIO yellowbackKeyIO(chainparams);

@@ -100,6 +100,10 @@ struct BlockCoins {
 bool ConnectBundleCoins(const CTransaction& tx, CCoinsViewCache& view, CTxUndo& undo, const CBlockIndex* pindex,
                         const CChainParams& params, unsigned int flags, BlockCoins& bc, CAmount& transparentDelta,
                         CValidationState& state);
+// N-D12: whether the YED module tracks a coin (a token, a vault, an intent, a bond) in its state after
+// `pprev` (init.cpp sets it to the Yellowback index's answer; unset, nothing is tracked). ConnectBundleCoins
+// skips a deposit of such a coin (S2).
+extern bool (*g_moduleTracks)(const COutPoint& out, const CBlockIndex* pprev);
 // The applied mask a bundle's undo entry records (empty if it records none), and the outputs and
 // the outpoints of its applied records (for DisconnectBlock).
 std::vector<bool> UndoMask(const CTxUndo& undo);

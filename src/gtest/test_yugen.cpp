@@ -1090,6 +1090,29 @@ TEST(Yugen, BundleVbRecordsConnect) {
     EXPECT_EQ(refused(vb.Tx(c.h0), GetScriptForDestination(CScriptID(vb.Spk()))), "bad-yugen-bundle-deposit-coin");
     EXPECT_EQ(refused(vb.Tx(c.h0, false), vb.Spk()), "bad-yugen-bundle-deposit-script");
     EXPECT_EQ(refused(vb.Tx(c.h0, true, vb.deposit - 1), vb.Spk()), "bad-yugen-bundle-deposit-balance");
+    auto skippedDeposit = [&](int coinHeight) {
+        const CTransaction bundle = vb.Tx(c.h0);
+        CCoinsViewCache view(&base);
+        withCoin(view, vb.Spk());
+        view.ModifyCoins(vb.coin.hash)->nHeight = coinHeight;
+        CTxUndo undo; yugen::BlockCoins bc; CAmount delta = 0; CValidationState st;
+        st.SetMerkleRootChecked(); st.SetBlockCommitmentsChecked();
+        EXPECT_TRUE(run(bundle, view, undo, bc, delta, st)) << st.GetRejectReason();
+        EXPECT_EQ(bc.bundles[bundle.GetHash()].applied, std::vector<bool>({false, true}));
+        EXPECT_EQ(yugen::UndoMask(undo), std::vector<bool>({false, true}));
+        EXPECT_TRUE(view.AccessCoins(vb.coin.hash)->IsAvailable(vb.coin.n));   // the coin stays unspent
+    };
+    {
+        // N-D12, S2: a coin the YED module tracks after the parent (here: a token) is skipped, never spent.
+        static COutPoint tracked;
+        tracked = vb.coin;
+        yugen::g_moduleTracks = [](const COutPoint& o, const CBlockIndex*) { return o == tracked; };
+        skippedDeposit(1);
+        yugen::g_moduleTracks = nullptr;
+    }
+    // N-D12, S2: a coin created in the bundle's own block is skipped (the module's state at the parent
+    // cannot tell whether an earlier transaction of the block made it a token).
+    skippedDeposit(YugenChain::ACT + 1);
     {
         // S3 (§13.3.6): a deposit that would take B above cap(h) is skipped: its coin stays unspent, its
         // change is never created; the withdrawal after it applies.
@@ -1144,19 +1167,14 @@ TEST(Yugen, BundleVbRecordsConnect) {
 }
 
 TEST(Yugen, BundleRecordInputTrackedByModule) {
-    // N-D12: a bundle's record input is spent outside tx.vin; the YED module refuses the bundle when the
-    // coin is one it tracks (here a token), where a leaf (an ordinary input) spending it burns the YED.
+    // N-D12: a bundle's record inputs are spent outside tx.vin; ConnectBundleCoins skips a deposit of a coin
+    // the module tracks (S2, Yugen.BundleVbRecordsConnect), so the module itself never refuses the bundle for it
+    // (a refusal would let anyone who makes the coin a token after the bundle is built void the bundle),
+    // while a leaf (an ordinary input) spending the coin burns the YED.
     YugenChain c("accept");   // the chain parameters the bundle is built under
     VbBundle vb;
     const CTransaction bundle = vb.Tx(uint256S("01"));
-    EXPECT_EQ(yellowback::YugenRecordInputs(bundle), std::vector<COutPoint>({vb.coin}));
     const yellowback::Params P = yellowback::RegtestParams(1, 15000, 10000, uint256S("aa"));
-    {
-        yellowback::MemoryStateView view;
-        yellowback::State st(view);
-        const yellowback::TxOutcome out = yellowback::ProcessTx(st, P, bundle, 10);
-        EXPECT_FALSE(out.invalid) << out.log.verdict;   // an untracked coin: nothing for the module
-    }
     yellowback::MemoryStateView view;
     yellowback::State st(view);
     yellowback::TokenRecord tok;
@@ -1166,10 +1184,8 @@ TEST(Yugen, BundleRecordInputTrackedByModule) {
     tok.height = 5;
     st.Put(yellowback::keys::Token(vb.coin), tok);
     const yellowback::TxOutcome out = yellowback::ProcessTx(st, P, bundle, 10);
-    EXPECT_TRUE(out.invalid);
-    EXPECT_EQ(out.log.verdict, yellowback::verdict::YUGEN_BUNDLE_INPUT);
-    EXPECT_TRUE(st.GetToken(vb.coin).has_value());   // nothing applied
-    // The leaf way: an ordinary input spending the token burns it.
+    EXPECT_FALSE(out.invalid) << out.log.verdict;
+    EXPECT_TRUE(st.GetToken(vb.coin).has_value());   // the skipped deposit left the token alone
     CMutableTransaction leaf;
     leaf.vin.push_back(CTxIn(vb.coin));
     leaf.vout.push_back(CTxOut(vb.coinValue - 1000, vb.Spk()));
@@ -1258,7 +1274,8 @@ TEST(Yugen, DecodeRecordManyInputsIsFast) {
     EXPECT_TRUE(decode(b, t, why)) << why;
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
     EXPECT_EQ(t.vin.size(), N);
-    EXPECT_LT(ms, 200) << "decode of " << N << " inputs took " << ms << " ms";
+    // A bound safe for debug and sanitizer builds, well under the quadratic scan's cost there.
+    EXPECT_LT(ms, 1000) << "decode of " << N << " inputs took " << ms << " ms";
     // The last input repeats the first: refused, as yugen-ref Bundle::decode refuses it.
     std::copy(b.begin() + 4, b.begin() + 4 + 37, b.end() - 37);
     yugen::Transfer d;
