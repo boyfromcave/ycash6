@@ -50,7 +50,8 @@ CRATE_ARCHIVE = $(SOURCES_PATH)/vendored-crates.tar.gz
 # configure --disable-yugen-helpers).
 NO_YUGEN_HELPERS ?=
 ifeq ($(NO_YUGEN_HELPERS),)
-YUGEN_CONTRIB = $(BASEDIR)/../contrib
+# abspath: cargo rejects a --sync manifest reached through "depends/.." as "a member of the wrong workspace".
+YUGEN_CONTRIB = $(abspath $(BASEDIR)/../contrib)
 YUGEN_HELPER_DEPS = sh $(YUGEN_CONTRIB)/yugen-leafverify/scripts/deps.sh && sh $(YUGEN_CONTRIB)/yugen-sendbuild/scripts/deps.sh &&
 YUGEN_HELPER_VENDOR = --sync $(YUGEN_CONTRIB)/yugen-leafverify/Cargo.toml --sync $(YUGEN_CONTRIB)/yugen-sendbuild/Cargo.toml \
   --sync $(YUGEN_CONTRIB)/yugen-sendbuild/deps/clones/yew/yewd/yugen/Cargo.toml
