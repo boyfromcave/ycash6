@@ -379,6 +379,32 @@ class YellowbackIndexTest(YellowbackTestFramework):
         assert_best_hash(nodes)
         assert_equal(self.statehash(4), self.statehash(2))
 
+        # A non-storage exception on the mempool path refuses that transaction only: the index stays healthy, so
+        # a crafted peer transaction cannot make the next block stop the node (only dbwrapper_error does that).
+        print('mempool_error_refuses_only: a non-storage exception in MempoolCheck refuses the transaction; node 4 runs on healthy')
+        if kogany_pair(tmpdir, 4):
+            print('  [kogany pair] skipped: error:mempool is a ycashd test fault')
+        else:
+            self.restart(4, ['-yellowbacktestfault=error:mempool'])
+            wait_yed_healthy(nodes[4], timeout=120)
+            self.sync_all(blocks_only=True)
+            payer = nodes[POOLS[0]]
+            funded = payer.fundrawtransaction(payer.createrawtransaction([], {payer.getnewaddress(): 1}))
+            signed = payer.signrawtransaction(funded['hex'])['hex']
+            try:
+                nodes[4].sendrawtransaction(signed)
+                raise AssertionError('the injected non-storage fault did not refuse the transaction')
+            except JSONRPCException as e:
+                assert 'yellowback-check-error' in str(e), str(e)
+            assert_equal(nodes[4].yed_getinfo()['healthy'], True)
+            txid = nodes[4].sendrawtransaction(signed)                 # the fault is consumed: admitted
+            self.sync_all()
+            bh = payer.generate(1)[0]
+            self.sync_all(blocks_only=True)
+            assert txid in payer.getblock(bh)['tx'], 'the transaction was not mined'
+            assert_equal(wait_yed_healthy(nodes[4], timeout=60)['healthy'], True)
+            assert_best_hash(nodes)
+
         print('fresh_datadir: node 2 wiped and resynced (K21 without the kill switch)')
         stop_node(nodes[2], 2)
         nodes[2] = None

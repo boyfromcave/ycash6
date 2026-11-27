@@ -459,7 +459,7 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-yellowbackattestarmmin=<n>", "Yellowback ATTEST_ARM_MIN override, 0 = attestation never arms (regtest only, default 3)");
         strUsage += HelpMessageOpt("-yellowbackmintrequiresarmed", "Yellowback MINT_REQUIRES_ARMED: an unarmed mint is VOID (mint-halted-unarmed) (regtest only, default 0; always on mainnet and testnet)");
         strUsage += HelpMessageOpt("-yellowbackbundlecarrier=<mode>", "Yellowback BUNDLE_CARRIER override: scriptsig, opreturn or either (regtest only, default scriptsig)");
-        strUsage += HelpMessageOpt("-yellowbacktestfault=<spec>", "Inject a fault once: storage:<check|commit|undo>[:<height>], crash:<height>, template or schema (regtest only)");
+        strUsage += HelpMessageOpt("-yellowbacktestfault=<spec>", "Inject a fault once: storage:<check|commit|undo>[:<height>], storage:mempool, error:mempool, crash:<height>, template or schema (regtest only)");
     }
 
     strUsage += HelpMessageGroup(_("Connection options:"));

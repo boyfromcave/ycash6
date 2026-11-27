@@ -135,6 +135,10 @@ void YellowbackIndex::MaybeFault(TestFault::Hook hook, int height)
     if (!testFault.armed || testFault.storageHook != hook) return;
     if (testFault.height.has_value() && testFault.height.value() != height) return;
     testFault.armed = false;
+    if (testFault.nonStorage) {
+        LogPrintf("yellowback: -yellowbacktestfault: injecting a non-storage fault at hook %d height %d\n", (int)hook, height);
+        throw std::runtime_error("injected non-storage fault (-yellowbacktestfault)");
+    }
     LogPrintf("yellowback: -yellowbacktestfault: injecting a storage fault at hook %d height %d\n", (int)hook, height);
     throw dbwrapper_error("injected storage fault (-yellowbacktestfault)");
 }
@@ -150,11 +154,17 @@ std::optional<std::string> YellowbackIndex::SetTestFault(const std::string& spec
         int64_t h = atoi64(spec.substr(6));
         if (h <= 0 || h > 0x7FFFFFFF) return std::string("-yellowbacktestfault: bad height");
         f.crashHeight = (int)h;
+    } else if (spec == "error:mempool") {
+        f.storageHook = TestFault::MEMPOOL;
+        f.nonStorage = true;
+        f.armed = true;
     } else if (boost::algorithm::starts_with(spec, "storage:")) {
         std::vector<std::string> parts;
         boost::split(parts, spec, boost::is_any_of(":"));
-        if (parts.size() < 2 || parts.size() > 3) return std::string("-yellowbacktestfault: expected storage:<check|commit|undo>[:<height>]");
+        if (parts.size() < 2 || parts.size() > 3) return std::string("-yellowbacktestfault: expected storage:<check|commit|undo>[:<height>] or storage:mempool");
+        if (parts[1] == "mempool" && parts.size() == 3) return std::string("-yellowbacktestfault: storage:mempool takes no height");
         if (parts[1] == "check") f.storageHook = TestFault::CHECK;
+        else if (parts[1] == "mempool") f.storageHook = TestFault::MEMPOOL;
         else if (parts[1] == "commit") f.storageHook = TestFault::COMMIT;
         else if (parts[1] == "undo") f.storageHook = TestFault::UNDO;
         else return std::string("-yellowbacktestfault: unknown hook '" + parts[1] + "'");
@@ -165,7 +175,7 @@ std::optional<std::string> YellowbackIndex::SetTestFault(const std::string& spec
         }
         f.armed = true;
     } else {
-        return std::string("-yellowbacktestfault: expected storage:<check|commit|undo>[:<height>], crash:<height>, template or schema");
+        return std::string("-yellowbacktestfault: expected storage:<check|commit|undo>[:<height>], storage:mempool, error:mempool, crash:<height>, template or schema");
     }
     testFault = f;
     LogPrintf("yellowback: -yellowbacktestfault=%s armed\n", spec);
@@ -649,16 +659,22 @@ std::optional<std::string> YellowbackIndex::MempoolCheckLocked(const CTransactio
     if (stopped) return std::nullopt;
     if (!healthy) return std::string("yellowback-unhealthy");   // the module cannot be evaluated: admit nothing that touches it
     if (tx.IsCoinBase()) return std::nullopt;
-    // The storage boundary on the mempool path (audit A-3): a storage failure refuses the transaction and
-    // marks the index unhealthy (the next block then aborts the node) instead of unwinding AcceptToMemoryPool.
+    // The storage boundary on the mempool path (audit A-3): a storage failure (dbwrapper_error) refuses the
+    // transaction and marks the index unhealthy (the next block then aborts the node) instead of unwinding
+    // AcceptToMemoryPool. Any other exception comes from evaluating the peer's transaction, not from storage:
+    // it refuses that transaction only, so no crafted input can turn the index unhealthy and stop the node.
     try {
+        MaybeFault(TestFault::MEMPOOL, 0);
         return MempoolCheckInner(tx);
-    } catch (const std::exception& e) {
+    } catch (const dbwrapper_error& e) {
         SetUnhealthy(std::string("storage failure in MempoolCheck: ") + e.what());
+        return std::string("yellowback-unhealthy");
+    } catch (const std::exception& e) {
+        LogPrintf("yellowback: MempoolCheck refused %s: %s\n", tx.GetHash().ToString(), e.what());
     } catch (...) {
-        SetUnhealthy("storage failure in MempoolCheck");
+        LogPrintf("yellowback: MempoolCheck refused %s: unknown exception\n", tx.GetHash().ToString());
     }
-    return std::string("yellowback-unhealthy");
+    return std::string("yellowback-check-error");
 }
 
 std::optional<std::string> YellowbackIndex::MempoolCheckInner(const CTransaction& tx)
