@@ -14,7 +14,36 @@ The Yugen line (`upgrade/yugen`, `src/yugen/` present) releases **6.23.x** (firs
   (`qa/test_yellowback_release_heights.py`, `test_yugen_tree_releases_6_23`).
 - Activation: `UPGRADE_YUGEN` is `NO_ACTIVATION_HEIGHT` on mainnet and testnet
   (`src/chainparams.cpp`); regtest only by `-nuparams=59474e30:<h>`. A height is set only by a
-  gate-passing release, as for `UPGRADE_VAULT`.
+  gate-passing release, as for `UPGRADE_VAULT`. The release workflow's version job refuses, at every
+  stage and on a proving run, a tree in which any chain-parameter class gives `UPGRADE_YUGEN` a
+  height (`qa/yugen/release-activation.py`): known issue K-1 (`doc/yugen-node.md`) must land on every
+  node line before one is set, and that release changes the guard with it.
+- The Vault fields are compared with ycash-dd's pairing tag `vault-params/v<V>` as on the vault line
+  (`doc/yellowback-release.md`, Network parameters), so that tag must exist before `v<V>` is pushed.
+
+## Platforms
+
+The helpers are built with the runner's own rustup toolchain and are not cross-built, so the Yugen
+line packages the native builds only:
+
+| Asset | Built on | Tier |
+|---|---|---|
+| `ycashd_v<V>_linux_x86_64.tar.gz` | ubuntu-22.04, native (glibc 2.35 floor) | 1 |
+| `ycashd_v<V>_linux_aarch64.tar.gz` | ubuntu-22.04-arm, native | 1 |
+| `ycashd_v<V>_macos_aarch64.tar.gz` | macos-15, native, `MACOSX_DEPLOYMENT_TARGET=11.0` | 1 |
+| `ycashd_v<V>_macos_x86_64.tar.gz` | macos-15-intel, native | 2 |
+
+No Windows and no Ubuntu 18.04 package (the version job renders the matrix per line). Each package
+holds `ycashd`, `ycash-cli`, `ycash-tx`, `ycashd-wallet-tool`, `yugen-leafverify`, `yugen-sendbuild`,
+`yewd-yugen` and `COPYING`; ycashd takes the first two from its own directory as the defaults of
+`-yugenverifier` and `-yugenbuilder`, and `-yugenprover=<dir>/yewd-yugen` turns on the wallet's Yugen
+account. The signing job refuses a package without the three helpers. Not packaged: System B's
+`b2verify` and its verifying plan (`-yugenb2verify`, `-yugenbplan`), which only a node verifying real
+bundle proofs needs; regtest runs without them (a warning), and no public network has a Yugen height.
+
+The smoke test (`qa/yellowback-release-smoke.sh`) also starts each helper (usage exit), restarts the
+node with `-nuparams=59474e30:<h>`, and checks that Yugen activates with the packaged verifier
+(`yugen_getinfo`: active, `tree_size` 1, a root).
 
 ## Sources
 

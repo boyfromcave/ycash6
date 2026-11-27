@@ -6,7 +6,8 @@
 # Release smoke test (doc/yellowback-release.md): the packaged binaries in <dir> report the
 # expected version, start a throwaway regtest node on the vault upgrade, create the YED attestor
 # set, restart it with that set so Yellowback is live, answer one stock RPC and one yed_* RPC, and
-# stop cleanly (doc/yellowback.md, Configuration). Needs the zk parameters
+# stop cleanly (doc/yellowback.md, Configuration); on the Yugen line, also check the three helpers
+# and activate Yugen by -nuparams (doc/yugen-release.md). Needs the zk parameters
 # (zcutil/fetch-params.sh) unless --version-only, which is all a runner that cannot execute the
 # node gets.
 #
@@ -80,4 +81,28 @@ info=$("$cli" "${rpc[@]}" yed_getinfo)
 echo "$info"
 echo "$info" | grep -q "\"rpcversion\": $rpcversion\b" || { echo "yed_getinfo: expected rpcversion $rpcversion"; exit 1; }
 echo "$info" | grep -q '"status": "active"' || { echo "yed_getinfo: expected the vault upgrade active"; exit 1; }
+# The Yugen line (a tree with src/yugen, doc/yugen-release.md): the package carries the three helpers
+# next to ycashd, each one starts on this system (a missing library or a refused binary is a signal
+# or 126/127, never a usage exit), and the node activates Yugen (59474e30, -nuparams only: no network
+# has a height) with the packaged yugen-leafverify as its default -yugenverifier, which it runs at
+# startup (the registry root) and for the activation block.
+if [ -d "$(cd "$(dirname "$0")/.." && pwd)/src/yugen" ]; then
+  for h in yugen-leafverify yugen-sendbuild yewd-yugen; do
+    [ -x "$dir/$h" ] || { echo "missing or not executable: $dir/$h"; exit 1; }
+    set +e; "$dir/$h" </dev/null >/dev/null 2>&1; rc=$?; set -e
+    case $rc in 1|2) ;; *) echo "$h: expected its usage exit (1 or 2) with no arguments, got $rc"; exit 1 ;; esac
+    echo "$h: starts (usage exit $rc)"
+  done
+  "$cli" "${rpc[@]}" stop >/dev/null
+  wait $pid || true
+  yugen_h=$((vault_h + 16))
+  start -yellowbackattestorset="$setid" -nuparams=59474e30:$yugen_h
+  "$cli" "${rpc[@]}" yugen_getinfo | grep -q '"active": false' || { echo "yugen_getinfo: expected Yugen pending"; exit 1; }
+  "$cli" "${rpc[@]}" generate $((yugen_h + 1 - $("$cli" "${rpc[@]}" getblockcount))) >/dev/null
+  yinfo=$("$cli" "${rpc[@]}" yugen_getinfo)
+  echo "$yinfo"
+  echo "$yinfo" | grep -q '"active": true' || { echo "yugen_getinfo: expected Yugen active"; exit 1; }
+  echo "$yinfo" | grep -q '"tree_size": 1\b' || { echo "yugen_getinfo: expected the empty pool (tree_size 1)"; exit 1; }
+  echo "$yinfo" | grep -q '"root": "[0-9a-f]\{64\}"' || { echo "yugen_getinfo: expected a pool root"; exit 1; }
+fi
 echo "smoke: ok"

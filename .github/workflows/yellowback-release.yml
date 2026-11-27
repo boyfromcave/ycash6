@@ -74,6 +74,10 @@
 #   ubuntu_18.04_x86_64   tier 2  contrib/legacy-glibc-build (Ubuntu 18.04 image, LEGACY_GLIBC=1)
 #   macos_x86_64          tier 2  macos-15-intel native; native_clang.mk notes x86_64-apple-darwin
 #                                 "is being abandoned" upstream
+# The Yugen line (src/yugen/, 6.23.x) builds the native four only (linux_x86_64, linux_aarch64,
+# macos_aarch64, macos_x86_64): each package also holds yugen-leafverify, yugen-sendbuild and
+# yewd-yugen, built from the public repositories at the commits in contrib/yugen-*/PINS, and the
+# helpers are not cross-built (doc/yugen-release.md). The version job renders the matrix.
 #
 # Binaries are not code-signed, as upstream's are not: macOS needs `xattr -d com.apple.quarantine`,
 # Windows shows a SmartScreen prompt. Builds are not reproducible (the gitian descriptors are dead).
@@ -107,6 +111,8 @@ jobs:
       version: ${{ steps.v.outputs.version }}
       prerelease: ${{ steps.v.outputs.prerelease }}
       stage: ${{ steps.v.outputs.stage }}
+      line: ${{ steps.v.outputs.line }}
+      matrix: ${{ steps.v.outputs.matrix }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -152,7 +158,30 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "prerelease=$pre" >> "$GITHUB_OUTPUT"
           echo "stage=$stage" >> "$GITHUB_OUTPUT"
-          echo "version $version (stage $stage, prerelease: $pre)"
+          echo "line=$line" >> "$GITHUB_OUTPUT"
+          # The platforms. The Yugen line packages native builds only: its three helpers
+          # (yugen-leafverify, yugen-sendbuild, yewd-yugen) are built with the runner's own rustup
+          # toolchain and are not cross-built, so it has no windows (cross) and no ubuntu_18.04
+          # (legacy image) package (doc/yugen-release.md, "Platforms").
+          linux_x86_64='{"platform":"linux_x86_64","tier":1,"os":"ubuntu-22.04","kind":"native","smoke":"full"}'
+          linux_aarch64='{"platform":"linux_aarch64","tier":1,"os":"ubuntu-22.04-arm","kind":"native","smoke":"full"}'
+          macos_aarch64='{"platform":"macos_aarch64","tier":1,"os":"macos-15","kind":"native","smoke":"full"}'
+          windows='{"platform":"windows","tier":1,"os":"ubuntu-22.04","kind":"cross","host":"x86_64-w64-mingw32","smoke":"none"}'
+          legacy='{"platform":"ubuntu_18.04_x86_64","tier":2,"os":"ubuntu-22.04","kind":"legacy","smoke":"full"}'
+          macos_x86_64='{"platform":"macos_x86_64","tier":2,"os":"macos-15-intel","kind":"native","smoke":"full"}'
+          if [ "$line" = yugen ]; then
+            matrix="[$linux_x86_64,$linux_aarch64,$macos_aarch64,$macos_x86_64]"
+          else
+            matrix="[$linux_x86_64,$linux_aarch64,$macos_aarch64,$windows,$legacy,$macos_x86_64]"
+          fi
+          echo "matrix={\"include\":$matrix}" >> "$GITHUB_OUTPUT"
+          echo "version $version (line $line, stage $stage, prerelease: $pre)"
+      - name: Yugen has no activation height (the Yugen line)
+        # Known issue K-1 (doc/yugen-node.md): the withdrawal classification of spec §13.3.5 is not
+        # built, so no release of this line may give UPGRADE_YUGEN a height on any network; regtest
+        # and devnets take -nuparams=59474e30:<h>. Refused on every stage, a proving run included.
+        if: steps.v.outputs.line == 'yugen'
+        run: python3 qa/yugen/release-activation.py
       - name: Vault release parameters are set for the stage and match the ycash-dd pairing tag
         # A tag never releases unless the rules of its stage hold (qa/yellowback-release-heights.sh
         # --release-version: beta, rc or final, testnet plan §5.1) and every compared Vault field
@@ -225,39 +254,8 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - platform: linux_x86_64
-            tier: 1
-            os: ubuntu-22.04
-            kind: native
-            smoke: full
-          - platform: linux_aarch64
-            tier: 1
-            os: ubuntu-22.04-arm
-            kind: native
-            smoke: full
-          - platform: macos_aarch64
-            tier: 1
-            os: macos-15
-            kind: native
-            smoke: full
-          - platform: windows
-            tier: 1
-            os: ubuntu-22.04
-            kind: cross
-            host: x86_64-w64-mingw32
-            smoke: none          # an .exe: smoke-windows runs it on windows-latest
-          - platform: ubuntu_18.04_x86_64
-            tier: 2
-            os: ubuntu-22.04
-            kind: legacy
-            smoke: full          # runs inside an 18.04 container, which proves the glibc floor
-          - platform: macos_x86_64
-            tier: 2
-            os: macos-15-intel
-            kind: native
-            smoke: full
+      # Rendered by the version job: the platforms of the line (above, and the header's table).
+      matrix: ${{ fromJSON(needs.version.outputs.matrix) }}
     env:
       VERSION: ${{ needs.version.outputs.version }}
       PKG: ycashd_v${{ needs.version.outputs.version }}_${{ matrix.platform }}
@@ -402,7 +400,8 @@ jobs:
   smoke-windows:
     name: Smoke windows (version only)
     needs: [version, build]
-    if: ${{ !cancelled() }}
+    # The Yugen line has no windows package (the version job's matrix).
+    if: ${{ !cancelled() && needs.version.outputs.line != 'yugen' }}
     runs-on: windows-latest
     timeout-minutes: 30
     permissions:
@@ -431,7 +430,8 @@ jobs:
   sign:
     name: SBOMs, SHA256SUMS, provenance and cosign
     needs: [version, build, smoke-windows]
-    if: ${{ !cancelled() && needs.build.result == 'success' && needs.smoke-windows.result == 'success' }}
+    # smoke-windows is skipped, by design, only on the Yugen line, which has no windows package.
+    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.smoke-windows.result == 'success' || (needs.version.outputs.line == 'yugen' && needs.smoke-windows.result == 'skipped')) }}
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     permissions:
@@ -440,6 +440,7 @@ jobs:
       attestations: write   # store the provenance attestations on this repository
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      LINE: ${{ needs.version.outputs.line }}
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -452,7 +453,16 @@ jobs:
           for p in linux_x86_64 linux_aarch64 macos_aarch64; do
             [ -f "ycashd_v${VERSION}_$p.tar.gz" ] || { echo "missing tier-1 asset $p"; exit 1; }
           done
-          [ -f "ycashd_v${VERSION}_windows.zip" ] || { echo "missing tier-1 asset windows"; exit 1; }
+          if [ "$LINE" = yugen ]; then
+            # Every package of the Yugen line carries the three helpers next to ycashd.
+            for pkg in ycashd_v"${VERSION}"_*.tar.gz; do
+              for b in yugen-leafverify yugen-sendbuild yewd-yugen; do
+                tar -tzf "$pkg" | grep -qx "${pkg%.tar.gz}/$b" || { echo "$pkg lacks $b"; exit 1; }
+              done
+            done
+          else
+            [ -f "ycashd_v${VERSION}_windows.zip" ] || { echo "missing tier-1 asset windows"; exit 1; }
+          fi
           ls -l
       - name: Install syft
         id: syft
@@ -520,6 +530,7 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
       PRERELEASE: ${{ needs.version.outputs.prerelease }}
+      LINE: ${{ needs.version.outputs.line }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -537,16 +548,19 @@ jobs:
           for p in linux_x86_64 linux_aarch64 macos_aarch64; do
             grep -q "  ycashd_v${VERSION}_$p.tar.gz\$" SHA256SUMS || { echo "SHA256SUMS lacks tier-1 $p"; exit 1; }
           done
-          grep -q "  ycashd_v${VERSION}_windows.zip\$" SHA256SUMS || { echo "SHA256SUMS lacks tier-1 windows"; exit 1; }
+          if [ "$LINE" != yugen ]; then
+            grep -q "  ycashd_v${VERSION}_windows.zip\$" SHA256SUMS || { echo "SHA256SUMS lacks tier-1 windows"; exit 1; }
+          fi
           ls -l
           cd ..
           notes=doc/release-notes/release-notes-$VERSION.md
           [ -s "$notes" ] || { echo "missing $notes: the tag's release job would refuse (doc/yellowback-release.md step 2)"; exit 1; }
           pre=; [ "$PRERELEASE" = true ] && pre=--prerelease
+          title="Yellowback"; [ "$LINE" = yugen ] && title="Yugen"
           {
             echo "## Dry run: the tag v$VERSION would create"
             echo
-            echo "gh release create v$VERSION dist/* --draft $pre --verify-tag --title \"ycashd v$VERSION (Yellowback)\""
+            echo "gh release create v$VERSION dist/* --draft $pre --verify-tag --title \"ycashd v$VERSION ($title)\""
             echo "then qualify it: boyfromcave/yellowback rc-qualify.yml with train=releases/v$VERSION.yaml (prove it now: add proving_run=$GITHUB_RUN_ID)"
             echo
             echo "Assets:"
@@ -572,6 +586,7 @@ jobs:
       contents: write       # create the draft release and upload its assets
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      LINE: ${{ needs.version.outputs.line }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -613,5 +628,6 @@ jobs:
               minisign -Vm SHA256SUMS -P RWQYr5PFpiPJAigk86vf89bPYrJCXj5tskgRAPRYFsEXyciZo8dveOGQ
           EOF
           pre=; [ "$PRERELEASE" = true ] && pre=--prerelease
+          title="Yellowback"; [ "$LINE" = yugen ] && title="Yugen"
           gh release create "$GITHUB_REF_NAME" dist/* --draft $pre --verify-tag \
-            --title "ycashd v$VERSION (Yellowback)" --notes-file "$body"
+            --title "ycashd v$VERSION ($title)" --notes-file "$body"
