@@ -239,12 +239,6 @@ static const CRPCConvertTable rpcCvtTable =
     { "yed_getfeepayee",             {{o}, {s}} },
     { "yed_gethistory",              {{o, o}, {}} },
     { "yed_getinfo",                 {{}, {}} },
-    { "yugen_getinfo",               {{}, {}} },
-    { "yugen_getblockdata",          {{o}, {}} },
-    { "yugen_getanchor",             {{o}, {}} },
-    { "gettransferstatus",           {{s}, {}} },
-    { "submittransfer",              {{o}, {}} },
-    { "submitbundle",                {{o}, {}} },
     { "yed_getnewaddress",           {{}, {s, s}} },
     { "yed_getnotice",               {{s}, {}} },
     { "yed_getprice",                {{}, {o}} },
@@ -310,6 +304,14 @@ static const CRPCConvertTable rpcCvtTable =
     { "vault_ownerspend",            {{s, s}, {}} },
     { "vault_app",                   {{s}, {o}} },
     // end vault
+    // Yugen (doc/yugen-node.md); outside the generated yed_* block, which qa/yellowback-rpc-cvt.py rewrites
+    { "yugen_getinfo",               {{}, {}} },
+    { "yugen_getblockdata",          {{o}, {}} },
+    { "yugen_getanchor",             {{o}, {}} },
+    { "gettransferstatus",           {{s}, {}} },
+    { "submittransfer",              {{o}, {}} },
+    { "submitbundle",                {{o}, {}} },
+    // end yugen
 };
 
 #endif // ZCASH_RPC_COMMON_H

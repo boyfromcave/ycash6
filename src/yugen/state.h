@@ -2,7 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
-// Yugen pool state on the ycash6 line (doc/yugen-node.md): the note tree
+// Yugen pool state in ycashd (doc/yugen-node.md): the note tree
 // (commitments in block order, cm* first), the nullifier set, the pool balance B (§13.3.2
 // turnstile) and, per block from activation, the root after it and its undo record. Held in
 // memory, saved to <datadir>/yugen/state.dat at each chainstate flush (review M-3) and loaded at

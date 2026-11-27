@@ -193,7 +193,7 @@ env:
   SANITIZER_SCRIPTS: yellowback_index
   # The functional scripts the nightly job runs by name, each in its own step (the Rust attest agent, the devnet,
   # a ycash6-stock build, the prune floor). qa/yellowback-audit.sh counts them as run by CI.
-  NIGHTLY_SCRIPTS: yellowback_attest_agent yellowback_cancel_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity yellowback_demo_v6 vault_prune_floor yugen_activation yugen_leaf yugen_turnstile yugen_bundle yugen_bundle_vb yugen_bundle_vb_module yugen_bundle_relay yugen_bundle_supersede yugen_stale_relay yugen_wallet_stock wallet_spent_notify_lag relay_parent_first
+  NIGHTLY_SCRIPTS: yellowback_attest_agent yellowback_cancel_agent yellowback_devnet_roles yellowback_devnet_upgrade yellowback_stockparity yellowback_demo_v6 vault_prune_floor yugen_activation yugen_leaf yugen_turnstile yugen_bundle yugen_bundle_vb yugen_bundle_vb_module yugen_bundle_vb_coinbase yugen_strip yugen_bundle_relay yugen_bundle_supersede yugen_stale_relay yugen_wallet_stock wallet_spent_notify_lag relay_parent_first
   # Audit 07/F-11: the files whose change runs the PR legs lockorder-pr and sanitizers-pr (an extended
   # regex over `git diff --name-only` of the PR), and the functional subset lockorder-pr runs (each also
   # in YELLOWBACK_SCRIPTS; the full suite stays in the nightly lockorder job).
@@ -1325,15 +1325,31 @@ jobs:
           if os.environ.get("PREFIX") == "1": line, ver = ("prefix", 9)
           if os.environ.get("BETA3") == "1": line, ver = ("beta3", 10)
           if os.environ.get("BETA4") == "1": line, ver = ("beta4", 11)
-          if x.doc_line(doc) != line:
+          # The Yugen line (src/yugen; doc/yugen-node.md decision Y-6) is rpcversion 12 with the beta4 yed_*
+          # contract unchanged. Until the pinned workspace commit's generator has a Yugen mode (the workspace's
+          # upgrade/yugen, published in a later wave), its doc still reads as the beta4 line here, and the
+          # contract is compared with the beta4 output with its two rpcversion fields at 12. Moving
+          # YB_WORKSPACE_COMMIT to a generator that reads the doc as the Yugen line ends the bridge: the exact
+          # comparison below applies, unchanged.
+          bridge = False
+          if os.path.exists(os.path.join(os.environ["GITHUB_WORKSPACE"], "src", "yugen", "state.h")):
+              line, ver = ("yugen", 12)
+              bridge = x.doc_line(doc) == "beta4"
+          if x.doc_line(doc) != line and not bridge:
               sys.exit("doc/yellowback-rpc.md is rpcversion %s; the %s line is rpcversion %d" % (x.rpcdoc_version(doc), line, ver))
           want = x.contract_text(x.read_plan(), x.read_plan_v3(), doc, x.RPCDOC6_REL)
+          if bridge:
+              field = '"rpcversion": %d,'
+              if want.count(field % 11) != 2:
+                  sys.exit("the Yugen bridge expects the beta4 generator's two rpcversion fields at 11")
+              want = want.replace(field % 11, field % ver)
+              print("Yugen line: the pinned workspace generator has no Yugen mode; compared with its beta4 output at rpcversion 12 (decision Y-6)")
           have = open("doc/yellowback-rpc-contract.json", encoding="utf-8", newline="").read()
           if json.loads(have).get("rpcversion") != ver:
               sys.exit("contract rpcversion is not %d" % ver)
           if have != want:
               sys.stdout.writelines(difflib.unified_diff(have.splitlines(True), want.splitlines(True), "committed", "generated"))
-              sys.exit("doc/yellowback-rpc-contract.json is not the generator's output: regenerate it (make spec%s in the workspace)" % ({"interm": "-in-term", "quantum": "-quantum", "fees": "-fees", "prefix": "-prefix", "beta3": "-beta3", "beta4": "-beta4"}.get(line, "-upgrade")))
+              sys.exit("doc/yellowback-rpc-contract.json is not the generator's output: regenerate it (make spec%s in the workspace)" % ({"interm": "-in-term", "quantum": "-quantum", "fees": "-fees", "prefix": "-prefix", "beta3": "-beta3", "beta4": "-beta4", "yugen": "-yugen"}.get(line, "-upgrade")))
           print("contract: rpcversion %d, identical to the generator's output (%d bytes)" % (ver, len(have)))
           PY
 
@@ -2000,7 +2016,7 @@ jobs:
           done
           python3 qa/yugen/test_leafverify.py   # the verifier helper's result contract (exit 0 / 10 / failure)
           qa/pull-tester/rpc-tests.py --fail-on-skip -j1 --nozmq --nocleanup \
-            yugen_activation yugen_leaf yugen_turnstile yugen_bundle yugen_bundle_vb yugen_bundle_vb_module yugen_bundle_relay yugen_bundle_supersede \
+            yugen_activation yugen_leaf yugen_turnstile yugen_bundle yugen_bundle_vb yugen_bundle_vb_module yugen_bundle_vb_coinbase yugen_bundle_relay yugen_bundle_supersede \
             yugen_strip yugen_stale_relay yugen_wallet_stock wallet_spent_notify_lag relay_parent_first
       - name: The plan section 4 demonstration (extended)
         # ycash6 plan section 4 / Phase 6: the checklist walked on one eight-node chain with a transcript
