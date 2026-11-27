@@ -7,6 +7,7 @@
 #include "chainparams.h"
 #include "consensus/upgrades.h"
 #include "consensus/validation.h"
+#include "dbwrapper.h"
 #include "main.h"
 #include "policy/policy.h"
 #include "script/interpreter.h"
@@ -52,14 +53,17 @@ bool FilterTemplate(TemplateView& view, const CTransaction& tx, int nHeight)
     const Params& p = index.ParamsAt(nHeight);
     if (nHeight < p.startHeight) return true;
 
-    // The storage boundary on the template path (audit A-3): a storage failure skips the candidate and
-    // marks the index unhealthy instead of unwinding CreateNewBlock.
+    // The storage boundary on the template path (audit A-3): a storage failure (dbwrapper_error) skips the
+    // candidate and marks the index unhealthy instead of unwinding CreateNewBlock; any other exception comes
+    // from evaluating the candidate and skips it only (as MempoolCheck refuses it).
     try {
         return FilterTemplateInner(view, tx, nHeight, index, p);
-    } catch (const std::exception& e) {
+    } catch (const dbwrapper_error& e) {
         index.SetUnhealthy(std::string("storage failure in FilterTemplate: ") + e.what());
+    } catch (const std::exception& e) {
+        LogPrintf("yellowback: FilterTemplate skipped %s: %s\n", tx.GetHash().ToString(), e.what());
     } catch (...) {
-        index.SetUnhealthy("storage failure in FilterTemplate");
+        LogPrintf("yellowback: FilterTemplate skipped %s: unknown exception\n", tx.GetHash().ToString());
     }
     return false;
 }

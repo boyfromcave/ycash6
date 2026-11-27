@@ -151,15 +151,16 @@ struct MinerStatus
 /** -yellowbacktestfault (regtest only, §4.5): a storage fault at one hook once, a template disagreement once, or a schema mismatch at start. */
 struct TestFault
 {
-    enum Hook { NONE, CHECK, COMMIT, UNDO };
+    enum Hook { NONE, CHECK, COMMIT, UNDO, MEMPOOL };   //!< MEMPOOL: the next MempoolCheck (unhealthy, the node runs on)
     Hook storageHook;
     std::optional<int> height;        //!< fire at this height only (default: the next call)
     bool armed;                       //!< consumed on the first firing
+    bool nonStorage;                  //!< throw a non-storage exception (std::runtime_error) instead of dbwrapper_error
     bool templateFault;               //!< FilterTemplate keeps one invalid transaction (TestBlockValidity then refuses the template)
     bool schemaMismatch;              //!< SyncToChain treats the stored tip as a foreign SCHEMA_VERSION once (the v3 rebuild path, yellowback_index.py)
     std::optional<int> crashHeight;   //!< CheckConnect flushes, then SIGKILLs the node, before judging this height (yellowback_index.py)
 
-    TestFault() : storageHook(NONE), armed(false), templateFault(false), schemaMismatch(false) {}
+    TestFault() : storageHook(NONE), armed(false), nonStorage(false), templateFault(false), schemaMismatch(false) {}
 };
 
 // ---------------------------------------------------------------------------

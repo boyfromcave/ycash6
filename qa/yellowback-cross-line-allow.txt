@@ -33,8 +33,8 @@ src/vault/node.h 5ab9e85217a0d6cef5b19a8d6f195323c31aaec18bcd37acda15a4ebae3c1e7
 # re-derives openDebtCents (HALT-2, 2026-10-28) on both lines; pins updated then.
 # ParamsFromArgs takes the testnet profile (testnet plan Revision 3, 2026-10-29)
 # on both lines; pins updated then.
-src/yellowback/index.cpp 996754238cfd57fcc97456d3fd9f7ba52376604ed5e700d43c69da908322246c 2147fff4db7f22d9047de93ffc47cd0c7f88d74a56dfa2f00bc1b1112b1bf0f6
-src/yellowback/index.h 201780ca78cbabd2c6e74e6a338b66602b683b1f9cad8b11985c23d9a7bc0135 41c8096c20b9b856098ad2a645f9fff72d146f8129524ace9bc176ccbef63634
+src/yellowback/index.cpp d04f34b244f6ebe7636a8d40ec3999997f215b7ff3f4864b332b1b951d8d7c9c d7347094d80122b690e344b34c27467328062e6a5465a557bcd1fa4ce57a52ad
+src/yellowback/index.h fecc1a0bcf6bb7fdcd5a77e13aae72a23f37557d5553e99bcac137d089dff88b 8e02732aa803bac380362baefd08f34fe51bb85d235a4908cc398fd8194b7636
 
 # Comment only: DEFAULT_YELLOWBACK_FEE still 1000; the note names the 6.20.0
 # P-2 rule max(-yellowbackfee, ZIP-317 conventional fee). TestFastParams is
@@ -43,7 +43,7 @@ src/yellowback/params.h bcc4054aac878b076a540f90aaeb47a6d8dfe72d9223b72213137778
 
 # util/time.h, PrecomputedTransactionData(tx, prevouts), and
 # TransactionSignatureChecker(tx, txdata, nIn, amount).
-src/yellowback/policy.cpp e13b97ea99a66e48d8dab025b0626162ac3714e17646157e07282d18a25f1047 9f98dd64b3fedc5dc3e133911183ff81d4e471496b6e76a75777c26a7751592f
+src/yellowback/policy.cpp 8723d14647cf2642b12d6f82b8df0e343a0601defeb632d9c40633b4f2ee20e6 fcfb34b8a4f6b0068139867ea5a08f63fb39d01322e16be45d3aff736255a989
 
 # P-2 fee path. 6.20.0 prices with NetworkFee over a sized probe and reprices
 # until the ZIP-317 conventional fee covers the shape it selects. The builder
