@@ -843,7 +843,7 @@ BOOST_AUTO_TEST_CASE(mempool_non_storage_exception_refuses_without_unhealthy)
             for (const CScript& c : crafted) {
                 CMutableTransaction m = base;
                 m.vout[o].scriptPubKey = c;
-                (void)live.index->MempoolCheckReason(CTransaction(m));
+                BOOST_CHECK(live.index->MempoolCheckReason(CTransaction(m)).value_or("") != "yellowback-check-error");   // a rule, never an exception
             }
         }
     }
