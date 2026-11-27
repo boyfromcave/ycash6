@@ -45,77 +45,10 @@ index ed9caf976..e551d11f5 100644
              // placeholder, inert because only a v4 (ZIP-243) sighash is computed here.
              std::vector<CTxOut> allPrevOutputs;
 diff --git a/src/yellowback/index.cpp b/src/yellowback/index.cpp
-index 420c779e2..417cb56e7 100644
+index 7f7b0daa8..417cb56e7 100644
 --- a/src/yellowback/index.cpp
 +++ b/src/yellowback/index.cpp
-@@ -135,6 +135,10 @@ void YellowbackIndex::MaybeFault(TestFault::Hook hook, int height)
-     if (!testFault.armed || testFault.storageHook != hook) return;
-     if (testFault.height.has_value() && testFault.height.value() != height) return;
-     testFault.armed = false;
-+    if (testFault.nonStorage) {
-+        LogPrintf("yellowback: -yellowbacktestfault: injecting a non-storage fault at hook %d height %d\n", (int)hook, height);
-+        throw std::runtime_error("injected non-storage fault (-yellowbacktestfault)");
-+    }
-     LogPrintf("yellowback: -yellowbacktestfault: injecting a storage fault at hook %d height %d\n", (int)hook, height);
-     throw dbwrapper_error("injected storage fault (-yellowbacktestfault)");
- }
-@@ -150,11 +154,17 @@ std::optional<std::string> YellowbackIndex::SetTestFault(const std::string& spec
-         int64_t h = atoi64(spec.substr(6));
-         if (h <= 0 || h > 0x7FFFFFFF) return std::string("-yellowbacktestfault: bad height");
-         f.crashHeight = (int)h;
-+    } else if (spec == "error:mempool") {
-+        f.storageHook = TestFault::MEMPOOL;
-+        f.nonStorage = true;
-+        f.armed = true;
-     } else if (boost::algorithm::starts_with(spec, "storage:")) {
-         std::vector<std::string> parts;
-         boost::split(parts, spec, boost::is_any_of(":"));
--        if (parts.size() < 2 || parts.size() > 3) return std::string("-yellowbacktestfault: expected storage:<check|commit|undo>[:<height>]");
-+        if (parts.size() < 2 || parts.size() > 3) return std::string("-yellowbacktestfault: expected storage:<check|commit|undo>[:<height>] or storage:mempool");
-+        if (parts[1] == "mempool" && parts.size() == 3) return std::string("-yellowbacktestfault: storage:mempool takes no height");
-         if (parts[1] == "check") f.storageHook = TestFault::CHECK;
-+        else if (parts[1] == "mempool") f.storageHook = TestFault::MEMPOOL;
-         else if (parts[1] == "commit") f.storageHook = TestFault::COMMIT;
-         else if (parts[1] == "undo") f.storageHook = TestFault::UNDO;
-         else return std::string("-yellowbacktestfault: unknown hook '" + parts[1] + "'");
-@@ -165,7 +175,7 @@ std::optional<std::string> YellowbackIndex::SetTestFault(const std::string& spec
-         }
-         f.armed = true;
-     } else {
--        return std::string("-yellowbacktestfault: expected storage:<check|commit|undo>[:<height>], crash:<height>, template or schema");
-+        return std::string("-yellowbacktestfault: expected storage:<check|commit|undo>[:<height>], storage:mempool, error:mempool, crash:<height>, template or schema");
-     }
-     testFault = f;
-     LogPrintf("yellowback: -yellowbacktestfault=%s armed\n", spec);
-@@ -649,16 +659,22 @@ std::optional<std::string> YellowbackIndex::MempoolCheckLocked(const CTransactio
-     if (stopped) return std::nullopt;
-     if (!healthy) return std::string("yellowback-unhealthy");   // the module cannot be evaluated: admit nothing that touches it
-     if (tx.IsCoinBase()) return std::nullopt;
--    // The storage boundary on the mempool path (audit A-3): a storage failure refuses the transaction and
--    // marks the index unhealthy (the next block then aborts the node) instead of unwinding AcceptToMemoryPool.
-+    // The storage boundary on the mempool path (audit A-3): a storage failure (dbwrapper_error) refuses the
-+    // transaction and marks the index unhealthy (the next block then aborts the node) instead of unwinding
-+    // AcceptToMemoryPool. Any other exception comes from evaluating the peer's transaction, not from storage:
-+    // it refuses that transaction only, so no crafted input can turn the index unhealthy and stop the node.
-     try {
-+        MaybeFault(TestFault::MEMPOOL, 0);
-         return MempoolCheckInner(tx);
--    } catch (const std::exception& e) {
-+    } catch (const dbwrapper_error& e) {
-         SetUnhealthy(std::string("storage failure in MempoolCheck: ") + e.what());
-+        return std::string("yellowback-unhealthy");
-+    } catch (const std::exception& e) {
-+        LogPrintf("yellowback: MempoolCheck refused %s: %s\n", tx.GetHash().ToString(), e.what());
-     } catch (...) {
--        SetUnhealthy("storage failure in MempoolCheck");
-+        LogPrintf("yellowback: MempoolCheck refused %s: unknown exception\n", tx.GetHash().ToString());
-     }
--    return std::string("yellowback-unhealthy");
-+    return std::string("yellowback-check-error");
- }
- 
- std::optional<std::string> YellowbackIndex::MempoolCheckInner(const CTransaction& tx)
-@@ -711,6 +727,29 @@ std::optional<std::string> YellowbackIndex::MempoolCheckInner(const CTransaction
+@@ -727,6 +727,29 @@ std::optional<std::string> YellowbackIndex::MempoolCheckInner(const CTransaction
      return std::nullopt;
  }
  
@@ -146,29 +79,10 @@ index 420c779e2..417cb56e7 100644
  {
      LOCK(cs_yellowback);
 diff --git a/src/yellowback/index.h b/src/yellowback/index.h
-index e13e55edf..41c1dcff5 100644
+index 08f30d3ce..41c1dcff5 100644
 --- a/src/yellowback/index.h
 +++ b/src/yellowback/index.h
-@@ -151,15 +151,16 @@ struct MinerStatus
- /** -yellowbacktestfault (regtest only, §4.5): a storage fault at one hook once, a template disagreement once, or a schema mismatch at start. */
- struct TestFault
- {
--    enum Hook { NONE, CHECK, COMMIT, UNDO };
-+    enum Hook { NONE, CHECK, COMMIT, UNDO, MEMPOOL };   //!< MEMPOOL: the next MempoolCheck (unhealthy, the node runs on)
-     Hook storageHook;
-     std::optional<int> height;        //!< fire at this height only (default: the next call)
-     bool armed;                       //!< consumed on the first firing
-+    bool nonStorage;                  //!< throw a non-storage exception (std::runtime_error) instead of dbwrapper_error
-     bool templateFault;               //!< FilterTemplate keeps one invalid transaction (TestBlockValidity then refuses the template)
-     bool schemaMismatch;              //!< SyncToChain treats the stored tip as a foreign SCHEMA_VERSION once (the v3 rebuild path, yellowback_index.py)
-     std::optional<int> crashHeight;   //!< CheckConnect flushes, then SIGKILLs the node, before judging this height (yellowback_index.py)
- 
--    TestFault() : storageHook(NONE), armed(false), templateFault(false), schemaMismatch(false) {}
-+    TestFault() : storageHook(NONE), armed(false), nonStorage(false), templateFault(false), schemaMismatch(false) {}
- };
- 
- // ---------------------------------------------------------------------------
-@@ -375,6 +376,16 @@ public:
+@@ -376,6 +376,16 @@ public:
       * pindex->phashBlock (K5: TestBlockValidity's indexDummy has none).
       */
      ConnectCheck CheckConnect(const CBlock& block, const CBlockIndex* pindex, bool fJustCheck);
@@ -185,37 +99,3 @@ index e13e55edf..41c1dcff5 100644
      /** The commit after view.SetBestBlock (never under fJustCheck): same guards; reuses the cache else re-evaluates; one batch; false => a node failure (the caller aborts). */
      bool CommitConnect(const CBlock& block, const CBlockIndex* pindex);
      /** DisconnectBlock's undo (inside `if (updateIndices)`): guard indexTip.blockHash == pindex->GetBlockHash(); false => a node failure. */
-diff --git a/src/yellowback/policy.cpp b/src/yellowback/policy.cpp
-index 272657798..ee2840a62 100644
---- a/src/yellowback/policy.cpp
-+++ b/src/yellowback/policy.cpp
-@@ -7,6 +7,7 @@
- #include "chainparams.h"
- #include "consensus/upgrades.h"
- #include "consensus/validation.h"
-+#include "dbwrapper.h"
- #include "main.h"
- #include "policy/policy.h"
- #include "script/interpreter.h"
-@@ -52,14 +53,17 @@ bool FilterTemplate(TemplateView& view, const CTransaction& tx, int nHeight)
-     const Params& p = index.ParamsAt(nHeight);
-     if (nHeight < p.startHeight) return true;
- 
--    // The storage boundary on the template path (audit A-3): a storage failure skips the candidate and
--    // marks the index unhealthy instead of unwinding CreateNewBlock.
-+    // The storage boundary on the template path (audit A-3): a storage failure (dbwrapper_error) skips the
-+    // candidate and marks the index unhealthy instead of unwinding CreateNewBlock; any other exception comes
-+    // from evaluating the candidate and skips it only (as MempoolCheck refuses it).
-     try {
-         return FilterTemplateInner(view, tx, nHeight, index, p);
--    } catch (const std::exception& e) {
-+    } catch (const dbwrapper_error& e) {
-         index.SetUnhealthy(std::string("storage failure in FilterTemplate: ") + e.what());
-+    } catch (const std::exception& e) {
-+        LogPrintf("yellowback: FilterTemplate skipped %s: %s\n", tx.GetHash().ToString(), e.what());
-     } catch (...) {
--        index.SetUnhealthy("storage failure in FilterTemplate");
-+        LogPrintf("yellowback: FilterTemplate skipped %s: unknown exception\n", tx.GetHash().ToString());
-     }
-     return false;
- }
