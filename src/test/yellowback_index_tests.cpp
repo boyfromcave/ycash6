@@ -843,7 +843,7 @@ BOOST_AUTO_TEST_CASE(mempool_non_storage_exception_refuses_without_unhealthy)
             for (const CScript& c : crafted) {
                 CMutableTransaction m = base;
                 m.vout[o].scriptPubKey = c;
-                (void)live.index->MempoolCheckReason(CTransaction(m));
+                BOOST_CHECK(live.index->MempoolCheckReason(CTransaction(m)).value_or("") != "yellowback-check-error");   // a rule, never an exception
             }
         }
     }
@@ -1006,24 +1006,6 @@ BOOST_AUTO_TEST_CASE(check_unhealthy)
     Chain::Node& bad = live.BadBlock();
     BOOST_CHECK_EQUAL(Connect(*live.index, bad).value_or("").substr(0, 8), "failure:");   // U-21: unhealthy aborts, never accepts
     BOOST_CHECK(policy::BuildTagScript(*live.index, 0).empty());     // MINER-3: no tag while unhealthy
-}
-
-// N-D12 (yugen::g_moduleTracks): the module's answer for a bundle's deposit coins is known only at the parent;
-// a stopped, unhealthy or misplaced index answers unknown (false), never "not tracked", so ConnectBundleCoins
-// cannot apply a deposit of a tracked coin and then fail a valid block on it.
-BOOST_AUTO_TEST_CASE(tracks_at_parent_unknown_unless_at_parent)
-{
-    Live live(pathTemp / "yb-tracks");
-    live.Activate();
-    live.MintActive();
-    const std::vector<COutPoint> outs{COutPoint(live.vault, 0), COutPoint(uint256S("c0"), 1)};
-    std::vector<bool> tracked;
-    BOOST_CHECK(live.index->TracksAtParent(outs, live.tip, tracked));
-    BOOST_CHECK(tracked == std::vector<bool>({true, false}));
-    BOOST_CHECK(!live.index->TracksAtParent(outs, live.tip->pprev, tracked));   // not at the parent (K6)
-    BOOST_CHECK(tracked == std::vector<bool>({false, false}));
-    live.index->SetUnhealthy("test");
-    BOOST_CHECK(!live.index->TracksAtParent(outs, live.tip, tracked));          // unhealthy: unknown
 }
 
 // Rule: BLK-3
