@@ -114,7 +114,8 @@ mod tests {
         // testnet-yb-fast's heights, not the old Ycash testnet's that TestNetwork hardcodes
         // (Canopy 661,634, no Vault).
         let net = network(
-            "test", 207_500, 280_000, 510_248, 510_250, 510_252, 510_254, -1, -1, -1, -1, 510_400, -1,
+            "test", 207_500, 280_000, 510_248, 510_250, 510_252, 510_254, -1, -1, -1, -1, 510_400,
+            -1,
         )
         .unwrap();
         assert_eq!(net.network_type(), NetworkType::Test);
