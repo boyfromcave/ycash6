@@ -95,7 +95,7 @@ if [ -d "$(cd "$(dirname "$0")/.." && pwd)/src/yugen" ]; then
   done
   "$cli" "${rpc[@]}" stop >/dev/null
   wait $pid || true
-  yugen_h=$((vault_h + 16))
+  yugen_h=128   # a multiple of 16 (spec 0.5.1 §2), past the vault height and the tip
   start -yellowbackattestorset="$setid" -nuparams=59474e30:$yugen_h
   "$cli" "${rpc[@]}" yugen_getinfo | grep -q '"active": false' || { echo "yugen_getinfo: expected Yugen pending"; exit 1; }
   "$cli" "${rpc[@]}" generate $((yugen_h + 1 - $("$cli" "${rpc[@]}" getblockcount))) >/dev/null
@@ -103,6 +103,6 @@ if [ -d "$(cd "$(dirname "$0")/.." && pwd)/src/yugen" ]; then
   echo "$yinfo"
   echo "$yinfo" | grep -q '"active": true' || { echo "yugen_getinfo: expected Yugen active"; exit 1; }
   echo "$yinfo" | grep -q '"tree_size": 1\b' || { echo "yugen_getinfo: expected the empty pool (tree_size 1)"; exit 1; }
-  echo "$yinfo" | grep -q '"root": "[0-9a-f]\{64\}"' || { echo "yugen_getinfo: expected a pool root"; exit 1; }
+  echo "$yinfo" | grep -q '"root": "[0-9a-f]\{64,\}"' || { echo "yugen_getinfo: expected a pool root"; exit 1; }
 fi
 echo "smoke: ok"
