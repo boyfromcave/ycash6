@@ -104,6 +104,9 @@ from test_framework import yellowback_model as ym                  # noqa: E402
 # newest row is the tree's own (YELLOWBACK_RPC_VERSION, read from doc/yellowback-rpc-contract.json; the
 # clients step fails until a bump adds its row here).
 RPCVERSION_LADDER = [
+    # 12 is the Yugen line (yugen_getinfo); no yed_* params- or chain-visible field, so its row reads what 11 reads.
+    (12, "the Yugen line: yugen_getinfo, no yed_* shape change",
+     lambda params, chain: "transparentPools" in chain and isinstance(params.get("pqAddressVersion"), dict)),
     # 11 adds no params- or chain-visible field (tag v2 shows in yed_gettag's version and payoutScheme), so its row
     # reads what 10 reads: the walk runs against the tree's own node, whose rpcversion the contract names.
     (11, "tag v2, post-quantum fee payees (beta4 P1): yed_gettag.version and payoutScheme",

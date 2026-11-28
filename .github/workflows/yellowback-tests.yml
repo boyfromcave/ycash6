@@ -223,7 +223,8 @@ env:
   # On upgrade/vault since the post-quantum merge: lightwalletd-dd's upgrade/vault (83a154d, rpcversion 9, 10 and 11, beta4;
   # D-9: an older build refuses the node's rpcversion and leaves YellowbackStreamer unregistered).
   # It must be pushed before the nightly resolves it, and it moves with every rpcversion bump.
-  LWD_COMMIT: ${{ inputs.lwd_commit || '83a154d11dd71bcbf749aab58d9614b815347d04' }}
+  # On upgrade/yugen: lightwalletd-dd's upgrade/yugen (924230a, rpcversion 9 to 12; 83a154d stops at 11).
+  LWD_COMMIT: ${{ inputs.lwd_commit || '924230a950cc814653bb3d42bbd450b343672a7e' }}
   GO_VERSION: 1.24.7
   GO_SHA256: da18191ddb7db8a9339816f3e2b54bdded8047cdc2a5d67059478f8d1595c43f
   # sprout-groth16.params for the nightly's ycash-gtest (Joinsplit.FullApiTest); the hash zcutil/fetch-params.sh

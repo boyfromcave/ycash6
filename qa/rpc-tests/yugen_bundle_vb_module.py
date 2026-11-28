@@ -28,6 +28,7 @@ module is inert: on regtest the set is a node parameter, 01/V-7; on a public net
 
 import hashlib
 import struct
+import tempfile
 import time
 from io import BytesIO
 
@@ -77,8 +78,8 @@ class YugenBundleVbModuleTest(YugenBundleVbTest):
     def args0(self, extra=()):
         return list(ARGS) + self.yed_args + list(extra)
 
-    def restart0(self, extra=(), connect=True):
-        self.nodes[0] = start_node(0, self.options.tmpdir, self.args0(extra))
+    def restart0(self, extra=(), connect=True, stderr=None):
+        self.nodes[0] = start_node(0, self.options.tmpdir, self.args0(extra), stderr=stderr)
         if connect:
             connect_nodes_bi(self.nodes, 0, 1)
 
@@ -203,7 +204,10 @@ class YugenBundleVbModuleTest(YugenBundleVbTest):
 
         # 1. Node 0's index unhealthy, the node running on: the block stops the node, it is not invalid.
         stop_node(n0, 0)
-        self.restart0(['-yellowbacktestfault=storage:mempool'], connect=False)   # node 1 stays banned
+        # The node's expected "fatal internal error" goes to a captured stderr: the runner fails a test
+        # whose stderr is not empty.
+        abort_stderr = tempfile.SpooledTemporaryFile(max_size=2**16)
+        self.restart0(['-yellowbacktestfault=storage:mempool'], connect=False, stderr=abort_stderr)   # node 1 stays banned
         n0 = self.nodes[0]
         try:
             n0.sendtoaddress(n0.getnewaddress(), 1)
@@ -216,7 +220,10 @@ class YugenBundleVbModuleTest(YugenBundleVbTest):
             pass
         bitcoind_processes[0].wait(timeout=120)   # AbortNode shuts the node down
         del bitcoind_processes[0]
-        self.check('unhealthy index: the block stops the node (a node failure)', True)
+        abort_stderr.seek(0)
+        abort_msg = abort_stderr.read().decode('utf-8')
+        abort_stderr.close()
+        self.check('unhealthy index: the block stops the node (a node failure)', 'fatal internal error' in abort_msg, abort_msg.strip())
         self.restart0(connect=False)
         n0 = self.nodes[0]
         tips = {t['hash']: t['status'] for t in n0.getchaintips()}
